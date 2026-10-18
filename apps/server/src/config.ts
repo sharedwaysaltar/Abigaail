@@ -5,6 +5,8 @@ export interface Config {
   saltPath: string;
   host: string;
   port: number;
+  /** ABIGAAIL_AGENTS=off disables the agent runner (ingest only). */
+  agents: boolean;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -15,5 +17,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     saltPath: env.ABIGAAIL_SALT_PATH || "./data/salt.bin",
     host: env.ABIGAAIL_HOST || "127.0.0.1",
     port,
+    agents: (env.ABIGAAIL_AGENTS ?? "on").toLowerCase() !== "off",
   };
 }

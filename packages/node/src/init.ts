@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import dc from "node:diagnostics_channel";
 import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
@@ -47,6 +49,11 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
   heartbeatIntervalMs?: number;
   /** Environment to read configuration from. Default process.env. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Link outbound calls and errors to the inbound request that caused them
+   * (`parent_id`), via AsyncLocalStorage. Default true.
+   */
+  linkOutbound?: boolean;
 }
 
 export interface ErrorContext {
@@ -243,7 +250,11 @@ class NodeAdapter implements AbigaailNode {
   private readonly root: string;
   /** Start times of in-flight inbound responses and outbound requests. */
   private readonly starts = new WeakMap<object, number>();
-  private readonly outMeta = new WeakMap<object, { host: string; method: HttpMethod }>();
+  private readonly outMeta = new WeakMap<object, { host: string; method: HttpMethod; parent: string | undefined }>();
+  /** event_id of each in-flight inbound request, chosen at start so calls it makes can name it. */
+  private readonly requestIds = new WeakMap<object, string>();
+  /** The current inbound request's event_id; undefined when linking is off. */
+  private readonly current: AsyncLocalStorage<string> | undefined;
   private readonly unsubscribers: (() => void)[] = [];
   private readonly timers: ReturnType<typeof setInterval>[] = [];
   private readonly loopDelay = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
@@ -268,6 +279,7 @@ class NodeAdapter implements AbigaailNode {
     this.ignored = compileIgnore(opts.ignore ?? DEFAULT_IGNORE);
     this.trustProxy = Number.isInteger(opts.trustProxy) && opts.trustProxy! > 0 ? opts.trustProxy! : 0;
     this.root = opts.root ?? process.cwd();
+    this.current = opts.linkOutbound === false ? undefined : new AsyncLocalStorage<string>();
 
     this.listen("http.server.request.start", (m) => this.onServerStart(m));
     this.listen("http.server.response.finish", (m) => this.onServerFinish(m));
@@ -324,12 +336,20 @@ class NodeAdapter implements AbigaailNode {
 
   private onServerStart({ response }: { response: ServerResponse }): void {
     this.starts.set(response, performance.now());
+    if (!this.current) return;
+    const id = randomUUID();
+    this.requestIds.set(response, id);
+    // Published synchronously just before the server emits 'request', so the
+    // handler and everything it awaits run with this id as their store.
+    this.current.enterWith(id);
   }
 
   private onServerFinish({ request, response }: { request: IncomingMessage; response: ServerResponse }): void {
     const start = this.starts.get(response);
     if (start === undefined) return;
     this.starts.delete(response);
+    const id = this.requestIds.get(response);
+    this.requestIds.delete(response);
     const url = typeof request.url === "string" ? request.url : "/";
     const path = pathOnly(url);
     if (this.ignored(path)) return;
@@ -356,6 +376,7 @@ class NodeAdapter implements AbigaailNode {
 
     this.client.capture({
       type: "request",
+      ...(id ? { event_id: id } : {}),
       method: toMethod(request.method),
       route,
       status,
@@ -386,6 +407,7 @@ class NodeAdapter implements AbigaailNode {
       ...(status !== undefined ? { status } : {}),
       duration_ms: Math.round((performance.now() - rec) * 100) / 100,
       outcome,
+      ...(meta.parent ? { parent_id: meta.parent } : {}),
     });
   }
 
@@ -393,7 +415,7 @@ class NodeAdapter implements AbigaailNode {
     // Our own sends to ingest are not app traffic, and reporting them would loop.
     if (!hostname || (hostWithPort && hostWithPort === this.ownHost)) return;
     this.starts.set(key, performance.now());
-    this.outMeta.set(key, { host: hostname, method: toMethod(method) });
+    this.outMeta.set(key, { host: hostname, method: toMethod(method), parent: this.current?.getStore() });
   }
 
   private onClientStart({ request }: { request: ClientRequest }): void {
@@ -435,12 +457,14 @@ class NodeAdapter implements AbigaailNode {
     try {
       if (this.stopped) return;
       const frames = parseStack(err, this.root);
+      const parent = this.current?.getStore();
       this.client.capture({
         type: "error",
         error_type: errorType(err),
         handled: ctx.handled ?? true,
         ...(ctx.route ? { route: ctx.route } : {}),
         ...(frames ? { frames } : {}),
+        ...(parent ? { parent_id: parent } : {}),
       });
     } catch (e) {
       this.report(e);
@@ -494,6 +518,7 @@ class NodeAdapter implements AbigaailNode {
       for (const t of this.timers) clearInterval(t);
       for (const u of this.unsubscribers) u();
       this.loopDelay.disable();
+      this.current?.disable();
       const g = globalThis as Global;
       if (g[SINGLETON] === this) delete g[SINGLETON];
       await this.client.shutdown(timeoutMs);

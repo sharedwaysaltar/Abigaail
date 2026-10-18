@@ -5,22 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import type { AbigaailEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS } from "./migrations.js";
+import { HOUR_MS, StoreReader, type App, type RunOutcome, type Severity, type StatKind } from "./reader.js";
 import { toRow, type Derived } from "./rows.js";
-
-export interface App {
-  id: string;
-  name: string;
-  created_at: number;
-  disabled_at: number | null;
-  last_event_at: number | null;
-}
-
-export interface Deploy {
-  release: string;
-  environment: string;
-  first_seen: number;
-  last_seen: number;
-}
 
 export interface AuditEntry {
   id: number;
@@ -29,30 +15,6 @@ export interface AuditEntry {
   action: string;
   app_id: string | null;
   detail: string | null;
-}
-
-export interface StoredEvent {
-  event_id: string;
-  ts: number;
-  received_at: number;
-  client_ts: number;
-  type: string;
-  release: string;
-  environment: string;
-  route: string | null;
-  method: string | null;
-  status: number | null;
-  duration_ms: number | null;
-  host: string | null;
-  name: string | null;
-  value: number | null;
-  sample_rate: number | null;
-  visitor_hash: string | null;
-  browser: string | null;
-  bot_class: string | null;
-  country: string | null;
-  city: string | null;
-  attrs: string | null;
 }
 
 export interface IngestBatch {
@@ -71,31 +33,77 @@ export const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at";
 
+/** A finding as an agent run reports it; the runner has already set the fingerprint. */
+export interface FindingInput {
+  app_id: string | null;
+  agent: string;
+  fingerprint: string;
+  signal: string;
+  severity: Severity;
+  summary: string;
+  cause?: string | null;
+  action: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface RunInput {
+  agent: string;
+  started_at: number;
+  finished_at: number;
+  outcome: RunOutcome;
+  error_class?: string | null;
+  apps_ok: number;
+  apps_failed: number;
+}
+
+export interface RecordRunOptions {
+  /** A finding resolved this recently is reopened instead of duplicated. Default 30 min. */
+  cooldownMs?: number;
+  /** Consecutive evaluated runs without the finding before it resolves. Default 3. */
+  resolveAfter?: number;
+}
+
+const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric"];
+const DAY_MS = 86_400_000;
+
 export function openStore(path: string, opts: StoreOptions = {}): Store {
   return new Store(path, opts);
 }
 
 /**
- * The only code that touches the database. Every method that reads or writes
- * monitored-app data takes an appId and filters by it.
+ * Read-only access for agent workers: no pragmas, no migrations, and SQLite
+ * refuses every write on this connection.
  */
-export class Store {
-  private readonly db: DatabaseSync;
+export function openReadOnly(path: string): StoreReader {
+  const db = new DatabaseSync(path, { readOnly: true });
+  db.exec("PRAGMA busy_timeout = 5000");
+  return new StoreReader(db);
+}
+
+function openWritable(path: string): DatabaseSync {
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
+    -- Overwrite deleted content instead of leaving it in free space.
+    PRAGMA secure_delete = ON;
+  `);
+  return db;
+}
+
+/**
+ * The only code that writes the database. Every method that reads or writes
+ * monitored-app data takes an appId and filters by it. Reads live in StoreReader.
+ */
+export class Store extends StoreReader {
   private readonly now: () => number;
-  private closed = false;
 
   constructor(path: string, opts: StoreOptions = {}) {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
+    super(openWritable(path));
     this.now = opts.now ?? Date.now;
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA foreign_keys = ON;
-      PRAGMA busy_timeout = 5000;
-      -- Overwrite deleted content instead of leaving it in free space.
-      PRAGMA secure_delete = ON;
-    `);
     this.migrate();
   }
 
@@ -178,14 +186,6 @@ export class Store {
       .get(hashIngestKey(key)) as App | undefined;
   }
 
-  appByName(name: string): App | undefined {
-    return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps WHERE name = ?`).get(name) as App | undefined;
-  }
-
-  listApps(): App[] {
-    return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps ORDER BY name`).all() as unknown as App[];
-  }
-
   listAudit(limit = 100): AuditEntry[] {
     return this.db
       .prepare("SELECT id, ts, actor, action, app_id, detail FROM audit_log ORDER BY id DESC LIMIT ?")
@@ -203,8 +203,8 @@ export class Store {
       INSERT OR IGNORE INTO events (
         app_id, event_id, ts, received_at, client_ts, type, release, environment,
         route, method, status, duration_ms, host, name, value, sample_rate,
-        visitor_hash, browser, bot_class, attrs
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        visitor_hash, browser, bot_class, attrs, parent_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     return this.tx(() => {
       let inserted = 0;
       for (const { event, derived } of batch.events) {
@@ -212,7 +212,7 @@ export class Store {
         const { changes } = insert.run(
           appId, r.event_id, r.ts, batch.receivedAt, r.client_ts, r.type, batch.release, batch.environment,
           r.route, r.method, r.status, r.duration_ms, r.host, r.name, r.value, r.sample_rate,
-          r.visitor_hash, r.browser, r.bot_class, r.attrs,
+          r.visitor_hash, r.browser, r.bot_class, r.attrs, r.parent_id,
         );
         inserted += Number(changes);
       }
@@ -229,27 +229,137 @@ export class Store {
     });
   }
 
-  countEvents(appId: string, filter: { type?: string } = {}): number {
-    const row = filter.type
-      ? this.db.prepare("SELECT count(*) AS n FROM events WHERE app_id = ? AND type = ?").get(appId, filter.type)
-      : this.db.prepare("SELECT count(*) AS n FROM events WHERE app_id = ?").get(appId);
-    return Number((row as { n: number }).n);
+  // ---- agents ---------------------------------------------------------------
+
+  /**
+   * Log one agent run and apply its findings, in one transaction.
+   *
+   * Each emitted finding is upserted by (app, fingerprint): hits+1, misses
+   * reset. An open finding of this agent that was not emitted gets misses+1
+   * only if its scope is in `evaluated` (apps the agent finished successfully;
+   * null = Abigaail itself), and resolves after `resolveAfter` such runs. Runs
+   * that failed, timed out or were skipped change no finding, so an agent that
+   * cannot see an app never "recovers" it.
+   */
+  recordRun(run: RunInput, findings: readonly FindingInput[], evaluated: readonly (string | null)[], opts: RecordRunOptions = {}): void {
+    const cooldownMs = opts.cooldownMs ?? 30 * 60_000;
+    const resolveAfter = opts.resolveAfter ?? 3;
+    const now = run.finished_at;
+    this.tx(() => {
+      this.db
+        .prepare(`INSERT INTO agent_runs (agent, started_at, finished_at, outcome, duration_ms, findings, error_class, apps_ok, apps_failed)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(run.agent, run.started_at, run.finished_at, run.outcome, run.finished_at - run.started_at,
+          run.outcome === "ok" ? findings.length : 0, run.error_class ?? null, run.apps_ok, run.apps_failed);
+      if (run.outcome !== "ok") return;
+
+      // One finding per (scope, fingerprint) per run: the last one wins.
+      const emitted = new Map<string, FindingInput>();
+      for (const f of findings) emitted.set(`${f.app_id ?? ""}\n${f.fingerprint}`, f);
+
+      const findOpen = this.db.prepare(
+        "SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'open'");
+      const findRecent = this.db.prepare(`
+        SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'resolved'
+          AND resolved_at >= ? ORDER BY resolved_at DESC, id DESC LIMIT 1`);
+      const refresh = this.db.prepare(`
+        UPDATE findings SET state = 'open', resolved_at = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
+          misses = 0, signal = ?, severity = ?, summary = ?, cause = ?, action = ?, evidence = ?, last_seen = ?
+        WHERE id = ?`);
+      const insert = this.db.prepare(`
+        INSERT INTO findings (app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence,
+                              hits, misses, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 1, 0, ?, ?)`);
+
+      for (const f of emitted.values()) {
+        const scope = f.app_id ?? "";
+        const evidence = JSON.stringify(f.evidence);
+        const existing = (findOpen.get(scope, f.fingerprint) ?? findRecent.get(scope, f.fingerprint, now - cooldownMs)) as
+          | { id: number }
+          | undefined;
+        if (existing) {
+          refresh.run(f.signal, f.severity, f.summary, f.cause ?? null, f.action, evidence, now, existing.id);
+        } else {
+          insert.run(f.app_id, f.agent, f.fingerprint, f.signal, f.severity, f.summary, f.cause ?? null, f.action,
+            evidence, now, now);
+        }
+      }
+
+      const openOfScope = this.db.prepare(
+        "SELECT id, fingerprint FROM findings WHERE agent = ? AND coalesce(app_id, '') = ? AND state = 'open'");
+      const miss = this.db.prepare(`
+        UPDATE findings SET misses = misses + 1,
+          state = CASE WHEN misses + 1 >= ? THEN 'resolved' ELSE state END,
+          resolved_at = CASE WHEN misses + 1 >= ? THEN ? ELSE resolved_at END
+        WHERE id = ?`);
+      for (const appId of new Set(evaluated)) {
+        const scope = appId ?? "";
+        for (const row of openOfScope.all(run.agent, scope) as { id: number; fingerprint: string }[]) {
+          if (!emitted.has(`${scope}\n${row.fingerprint}`)) miss.run(resolveAfter, resolveAfter, now, row.id);
+        }
+      }
+    });
   }
 
-  recentEvents(appId: string, limit = 100): StoredEvent[] {
-    return this.db
-      .prepare(`
-        SELECT event_id, ts, received_at, client_ts, type, release, environment, route, method,
-               status, duration_ms, host, name, value, sample_rate, visitor_hash, browser,
-               bot_class, country, city, attrs
-        FROM events WHERE app_id = ? ORDER BY ts DESC, event_id LIMIT ?`)
-      .all(appId, limit) as unknown as StoredEvent[];
+  /**
+   * Roll one UTC hour of an app's raw events into hourly_route_stats, and
+   * refresh that day's unique humans. Idempotent: re-running replaces the hour,
+   * so late events are picked up by rolling it again.
+   */
+  rollupHour(appId: string, hour: number): void {
+    if (hour % HOUR_MS !== 0) throw new Error("hour must be the start of a UTC hour");
+    const end = hour + HOUR_MS;
+    this.tx(() => {
+      this.db.prepare("DELETE FROM hourly_route_stats WHERE app_id = ? AND hour = ?").run(appId, hour);
+      const insert = this.db.prepare(`
+        INSERT INTO hourly_route_stats (app_id, hour, kind, key, n, weighted_n, status_5xx, status_4xx,
+                                        status_401_403, failures, p50, p95, p99, uniques)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const kind of STAT_KINDS) {
+        for (const r of this.statsFor(appId, kind, hour, end)) {
+          insert.run(appId, hour, kind, r.key, r.n, r.weighted_n, r.status_5xx, r.status_4xx, r.status_401_403,
+            r.failures, r.p50, r.p95, r.p99, r.uniques);
+        }
+      }
+      this.db
+        .prepare(`INSERT INTO rollup_hours (app_id, hour, events, rolled_at) VALUES (?, ?, ?, ?)
+                  ON CONFLICT (app_id, hour) DO UPDATE SET events = excluded.events, rolled_at = excluded.rolled_at`)
+        .run(appId, hour, this.countEventsBetween(appId, hour, end), this.now());
+      const dayStart = Math.floor(hour / DAY_MS) * DAY_MS;
+      this.db
+        .prepare(`INSERT INTO daily_uniques (app_id, day, humans) VALUES (?, ?, ?)
+                  ON CONFLICT (app_id, day) DO UPDATE SET humans = excluded.humans`)
+        .run(appId, new Date(dayStart).toISOString().slice(0, 10), this.uniqueHumans(appId, dayStart, dayStart + DAY_MS));
+    });
   }
 
-  deploys(appId: string): Deploy[] {
-    return this.db
-      .prepare("SELECT release, environment, first_seen, last_seen FROM deploys WHERE app_id = ? ORDER BY first_seen")
-      .all(appId) as unknown as Deploy[];
+  /** Hour starts in [from, to) that have not been rolled up yet. */
+  missingHours(appId: string, from: number, to: number): number[] {
+    const first = Math.ceil(from / HOUR_MS) * HOUR_MS;
+    const done = new Set(
+      (this.db
+        .prepare("SELECT hour FROM rollup_hours WHERE app_id = ? AND hour >= ? AND hour < ?")
+        .all(appId, first, to) as { hour: number }[]).map((r) => r.hour),
+    );
+    const out: number[] = [];
+    for (let h = first; h < to; h += HOUR_MS) if (!done.has(h)) out.push(h);
+    return out;
+  }
+
+  /** Add ingest refusal counts. appId '' = unknown key. */
+  addIngestRejections(rows: readonly { app_id: string; minute: number; status: number; n: number }[]): void {
+    if (!rows.length) return;
+    const upsert = this.db.prepare(`
+      INSERT INTO ingest_rejections (app_id, minute, status, n) VALUES (?, ?, ?, ?)
+      ON CONFLICT (app_id, minute, status) DO UPDATE SET n = n + excluded.n`);
+    this.tx(() => {
+      for (const r of rows) upsert.run(r.app_id, r.minute, r.status, r.n);
+    });
+  }
+
+  /** Record the current database size, for the Watchdog's growth estimate. */
+  sampleDbSize(): void {
+    this.db.prepare("INSERT OR REPLACE INTO db_size_samples (ts, bytes) VALUES (?, ?)").run(this.now(), this.dbBytes());
   }
 
   // ---- maintenance --------------------------------------------------------
@@ -257,11 +367,5 @@ export class Store {
   /** Move WAL contents into the main file and truncate the WAL. */
   checkpoint(): void {
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.db.close();
   }
 }

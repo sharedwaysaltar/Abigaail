@@ -15,3 +15,6 @@ decided later (see DECISIONS #2); this list grows as chunks land.
       front). Over plain http to another machine the SDK withholds visitor IP/UA
       (DECISIONS #36), so visitor hashes, bot class and geo stay empty.
 - [ ] Ingest keys and other secrets come from the environment, never from files in the repo.
+- [ ] **External uptime check on `/healthz`.** It answers 503 when the Watchdog has
+      stopped running (DECISIONS #45), so this check watches the watcher. Alert on
+      anything but 200.

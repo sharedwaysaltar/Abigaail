@@ -29,6 +29,13 @@ export interface ServerOptions {
     checkIntervalMs?: number;
   };
   maxHeaderSize?: number;
+  /**
+   * Liveness for /healthz: ok false answers 503, so an external uptime check
+   * also notices a stalled Watchdog. Default: always ok.
+   */
+  healthz?: () => { ok: boolean; agents?: "off" };
+  /** How often refusal counts (401/403/429) are written to the store. Default 60 s. */
+  rejectionFlushMs?: number;
 }
 
 const JSON_TYPE = "application/json";
@@ -104,6 +111,28 @@ export function createServer(opts: ServerOptions): http.Server {
   const appBuckets = new Map<string, TokenBucket>();
   let saltFailing = false;
 
+  // Refusals per (app, minute, status), kept in memory and flushed in one
+  // transaction a minute, so a flood of bad requests never means a write per
+  // request. Bounded: apps × a minute or two × three statuses. '' = no app.
+  const rejections = new Map<string, { app_id: string; minute: number; status: number; n: number }>();
+  const reject = (appId: string, status: number) => {
+    const minute = Math.floor(now() / 60_000) * 60_000;
+    const k = `${appId}|${minute}|${status}`;
+    const r = rejections.get(k);
+    if (r) r.n++;
+    else rejections.set(k, { app_id: appId, minute, status, n: 1 });
+  };
+  const flushRejections = () => {
+    if (!rejections.size) return;
+    const rows = [...rejections.values()];
+    rejections.clear();
+    try {
+      store.addIngestRejections(rows);
+    } catch (err) {
+      log(`ingest: could not record refusals (${errorClass(err)})`);
+    }
+  };
+
   /**
    * Today's salt, or undefined if it cannot be rotated. Never falls back to an
    * older salt: events then get a null visitor hash until rotation succeeds.
@@ -135,14 +164,22 @@ export function createServer(opts: ServerOptions): http.Server {
     const app: App | undefined = typeof key === "string" && key ? store.appByKey(key) : undefined;
     if (!app) {
       // Key-guessing floods are refused cheaply once the global budget is spent.
-      if (!badKeys.take()) return sendAndClose(req, res, 429, { error: "rate_limited" }, { "retry-after": "1" });
+      if (!badKeys.take()) {
+        reject("", 429);
+        return sendAndClose(req, res, 429, { error: "rate_limited" }, { "retry-after": "1" });
+      }
+      reject("", 401);
       return sendAndClose(req, res, 401, { error: "invalid_key" });
     }
-    if (app.disabled_at !== null) return sendAndClose(req, res, 403, { error: "app_disabled" });
+    if (app.disabled_at !== null) {
+      reject(app.id, 403);
+      return sendAndClose(req, res, 403, { error: "app_disabled" });
+    }
 
     let bucket = appBuckets.get(app.id);
     if (!bucket) appBuckets.set(app.id, (bucket = new TokenBucket(appRate.perSec, appRate.burst, now)));
     if (!bucket.take()) {
+      reject(app.id, 429);
       return sendAndClose(req, res, 429, { error: "rate_limited" }, { "retry-after": String(bucket.retryAfterSec()) });
     }
 
@@ -201,7 +238,9 @@ export function createServer(opts: ServerOptions): http.Server {
     const path = (req.url ?? "/").split("?")[0];
     if (path === "/healthz") {
       if (req.method !== "GET" && req.method !== "HEAD") return sendAndClose(req, res, 405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
-      return send(res, 200, { ok: true });
+      const health = opts.healthz?.() ?? { ok: true };
+      if (!health.ok) return send(res, 503, { ok: false });
+      return send(res, 200, { ok: true, ...(health.agents ? { agents: health.agents } : {}) });
     }
     if (path !== "/ingest") return sendAndClose(req, res, 404, { error: "not_found" });
     if (req.method !== "POST") return sendAndClose(req, res, 405, { error: "method_not_allowed" }, { allow: "POST" });
@@ -240,6 +279,12 @@ export function createServer(opts: ServerOptions): http.Server {
     rotation.unref();
   };
   scheduleRotation();
-  server.on("close", () => clearTimeout(rotation));
+  const flushTimer = setInterval(flushRejections, opts.rejectionFlushMs ?? 60_000);
+  flushTimer.unref();
+  server.on("close", () => {
+    clearTimeout(rotation);
+    clearInterval(flushTimer);
+    flushRejections();
+  });
   return server;
 }

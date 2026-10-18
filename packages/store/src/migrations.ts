@@ -81,6 +81,105 @@ export const MIGRATIONS: readonly string[] = [
   `
   DROP TABLE salts;
   `,
+  // 3: agents. Outbound/error events link to their inbound request; findings,
+  // agent runs, ingest rejection counts and the hourly baseline rollup.
+  `
+  ALTER TABLE events ADD COLUMN parent_id TEXT;
+
+  CREATE TABLE findings (
+    id          INTEGER PRIMARY KEY,
+    -- NULL: a finding about Abigaail itself, not a monitored app.
+    app_id      TEXT REFERENCES apps(id),
+    agent       TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    signal      TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    state       TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    cause       TEXT,
+    action      TEXT NOT NULL,
+    evidence    TEXT NOT NULL,
+    -- Consecutive runs that emitted it / evaluated runs that did not.
+    hits        INTEGER NOT NULL,
+    misses      INTEGER NOT NULL,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    resolved_at INTEGER
+  );
+  CREATE UNIQUE INDEX findings_open ON findings (coalesce(app_id, ''), fingerprint) WHERE state = 'open';
+  CREATE INDEX findings_app_state ON findings (app_id, state, last_seen);
+  CREATE INDEX findings_fingerprint ON findings (fingerprint, resolved_at);
+
+  CREATE TABLE agent_runs (
+    id          INTEGER PRIMARY KEY,
+    agent       TEXT NOT NULL,
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER NOT NULL,
+    outcome     TEXT NOT NULL,
+    duration_ms REAL NOT NULL,
+    findings    INTEGER NOT NULL,
+    error_class TEXT,
+    apps_ok     INTEGER NOT NULL,
+    apps_failed INTEGER NOT NULL
+  );
+  CREATE INDEX agent_runs_agent ON agent_runs (agent, started_at);
+
+  -- Ingest refusals per app and minute. app_id '' = unknown key (no app to name).
+  CREATE TABLE ingest_rejections (
+    app_id TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    n      INTEGER NOT NULL,
+    PRIMARY KEY (app_id, minute, status)
+  );
+
+  -- Hourly rollup: the only source of baselines. kind is route, host, referrer,
+  -- error or metric; key is the route pattern, host, referrer domain,
+  -- "ErrorType route" or metric name. Request rows count traffic that matters only.
+  CREATE TABLE hourly_route_stats (
+    app_id         TEXT NOT NULL REFERENCES apps(id),
+    hour           INTEGER NOT NULL,
+    kind           TEXT NOT NULL,
+    key            TEXT NOT NULL,
+    n              INTEGER NOT NULL,
+    weighted_n     REAL NOT NULL,
+    status_5xx     INTEGER NOT NULL,
+    status_4xx     INTEGER NOT NULL,
+    status_401_403 INTEGER NOT NULL,
+    failures       INTEGER NOT NULL,
+    p50            REAL,
+    p95            REAL,
+    p99            REAL,
+    uniques        INTEGER NOT NULL,
+    PRIMARY KEY (app_id, hour, kind, key)
+  );
+  CREATE INDEX hourly_route_stats_key ON hourly_route_stats (app_id, kind, key, hour);
+
+  -- Hours already rolled up. events = all events of the app in that hour; a
+  -- slot with 0 events is "no data" (app or Abigaail down), not "0 traffic".
+  CREATE TABLE rollup_hours (
+    app_id    TEXT NOT NULL REFERENCES apps(id),
+    hour      INTEGER NOT NULL,
+    events    INTEGER NOT NULL,
+    rolled_at INTEGER NOT NULL,
+    PRIMARY KEY (app_id, hour)
+  );
+
+  -- Database file size, sampled hourly, so growth is measured, not guessed.
+  CREATE TABLE db_size_samples (
+    ts    INTEGER PRIMARY KEY,
+    bytes INTEGER NOT NULL
+  );
+
+  -- Unique humans per UTC day. Hourly uniques cannot be summed into a day, and
+  -- the daily salt makes uniques across days impossible by design.
+  CREATE TABLE daily_uniques (
+    app_id TEXT NOT NULL REFERENCES apps(id),
+    day    TEXT NOT NULL,
+    humans INTEGER NOT NULL,
+    PRIMARY KEY (app_id, day)
+  );
+  `,
 ];
 
 /** user_version after which the store purges free space (see Store.purgeFreeSpace). */

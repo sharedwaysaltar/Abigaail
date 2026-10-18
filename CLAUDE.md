@@ -47,6 +47,9 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
 | `npm run dev:server` | Build and start the ingest server |
 | `npm run app:create -- <name>` / `app:disable` / `app:list` | App admin CLI (audited) |
 | `npm run events:tail -- <name> [n]` | Print an app's recent events (read-only) |
+| `npm run findings -- <name>` | Print an app's status and open findings, plus Abigaail's own |
+| `npm run agents:once` | Run the rollup and every agent once now, then print findings |
+| `npm run bench` | Linking benchmark (not part of `check`; results go in DECISIONS #38) |
 | `npm run demo:node` / `npm run demo:next` | Run a demo app (needs `apps/demo-*/.env`, see `.env.example`) |
 
 ## Layout
@@ -57,8 +60,12 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
 - `packages/node`: `@abigaail/node` adapter (`diagnostics_channel` capture, flags, stack frames, metrics).
 - `packages/next`: `@abigaail/next` (`register` / `onRequestError` for `instrumentation.ts`, routes manifest).
 - `packages/store`: `@abigaail/store`, the only code that touches SQL (`node:sqlite`, migrations).
+  `StoreReader` holds every read (agents get it over a read-only connection); `Store` adds writes.
 - `apps/server`: ingest server (`src/server.ts`), derivations (`src/derive.ts`), daily salt
   file (`src/salt.ts`, never in the DB), admin CLI. Hosting requirements: docs/HOSTING.md.
+- `apps/server/src/agents`: agent runner (`runner.ts`, one worker per run, read-only DB),
+  registry (one line per agent), `thresholds.ts` (every tunable), agents. `ABIGAAIL_AGENTS=off`
+  disables them.
 - `apps/demo-node`, `apps/demo-next`: demo apps (not part of `npm run build`).
 - Tests live in `packages/*/test/*.test.ts` and `apps/*/test/*.test.ts` and import packages by name
   (`@abigaail/core`), resolved to sources via `vitest.config.ts` and `tsconfig.json`.

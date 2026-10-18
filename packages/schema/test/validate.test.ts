@@ -154,3 +154,18 @@ describe("validateBatch: envelope rules", () => {
     for (const input of [null, undefined, "x", 42, []]) expect(validateBatch(input).ok).toBe(false);
   });
 });
+
+describe("validateBatch: parent_id", () => {
+  const outbound = { type: "outbound", event_id: ID, client_ts: 1, host: "api.stripe.com", method: "POST", duration_ms: 80, outcome: "ok" };
+  const error = { type: "error", event_id: ID, client_ts: 1, error_type: "TypeError", handled: true };
+
+  it("accepts a UUID parent_id on outbound and error events", () => {
+    expect(validateBatch(batch([{ ...outbound, parent_id: ID }, { ...error, parent_id: ID }])).ok).toBe(true);
+  });
+
+  it("rejects a parent_id that is not a UUID, and on other event types", () => {
+    expect(validateBatch(batch([{ ...outbound, parent_id: "jane@example.com" }])).ok).toBe(false);
+    expect(validateBatch(batch([{ ...error, parent_id: "session-123" }])).ok).toBe(false);
+    expect(validateBatch(batch([{ ...request, parent_id: ID }])).ok).toBe(false);
+  });
+});
