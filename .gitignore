@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.env
+.env.*
+!.env.example
+# local Abigaail data (SQLite, backups) never goes in git
+data/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
