@@ -12,6 +12,19 @@ the apps you deploy, with no personal data collected and no third-party monitori
 | `dev`  | Single source of truth. All work is committed and pushed here as it happens. |
 | `main` | Front-facing. Only receives chunks from `dev` after they pass local testing. |
 
+## Workflow
+
+Each chunk follows the same loop (details in [CLAUDE.md](CLAUDE.md)):
+
+1. `git pull` on `dev`, then ask Claude (in Plan mode) to plan the next chunk.
+2. Approve the plan; Claude builds it in small commits and pushes to `dev`.
+3. Test locally: `npm run check` plus the manual test listed in [docs/ROADMAP.md](docs/ROADMAP.md).
+4. When it passes, open a pull request `dev` -> `main`, wait for CI, merge, and tag it.
+
+Project docs: [docs/SPEC.md](docs/SPEC.md) (requirements),
+[docs/DECISIONS.md](docs/DECISIONS.md) (choices made and why),
+[docs/ROADMAP.md](docs/ROADMAP.md) (progress).
+
 ## Run it on your laptop
 
 Requirements: Node.js 22.13 or newer (Node 24 LTS recommended), git, VS Code.
