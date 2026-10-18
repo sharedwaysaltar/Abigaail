@@ -2,15 +2,22 @@
 
 import { openStore } from "@abigaail/store";
 import { loadConfig } from "./config.js";
-import { utcDay } from "./derive.js";
+import { openSaltFile, type SaltFile } from "./salt.js";
 import { createServer } from "./server.js";
 
 const config = loadConfig();
+let salt: SaltFile;
+try {
+  // Rotates a salt left over from an earlier day before the first request.
+  salt = openSaltFile(config.saltPath);
+} catch (err) {
+  const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.name : "Error");
+  console.error(`[abigaail] cannot open the salt file ${config.saltPath} (${code}); not starting`);
+  process.exit(1);
+}
 const store = openStore(config.dbPath);
-// Deletes any salt left over from an earlier day before the first request.
-store.saltFor(utcDay(Date.now()));
 
-const server = createServer({ store });
+const server = createServer({ store, salt });
 server.listen(config.port, config.host, () => {
   console.log(`[abigaail] ingest listening on http://${config.host}:${config.port}/ingest (db: ${config.dbPath})`);
 });

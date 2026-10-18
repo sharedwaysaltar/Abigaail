@@ -1,9 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createServer } from "@abigaail/server";
+import { createServer, openSaltFile } from "@abigaail/server";
 import { openStore, type Store } from "@abigaail/store";
 
 let dir: string;
@@ -21,25 +20,26 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const saltDays = () => {
-  const db = new DatabaseSync(join(dir, "test.db"), { readOnly: true });
-  try {
-    return (db.prepare("SELECT day FROM salts").all() as { day: string }[]).map((r) => r.day);
-  } finally {
-    db.close();
-  }
-};
+it("rotates salt.bin at UTC midnight with no requests, and keeps doing so daily", () => {
+  const path = join(dir, "salt.bin");
+  const salt = openSaltFile(path);
+  const file = () => readFileSync(path);
+  const before = file();
+  expect(before.toString("latin1", 0, 10)).toBe("2026-10-18");
+  const oldSalt = Buffer.from(before.subarray(10, 42));
 
-it("rotates the salt at UTC midnight with no requests, and keeps doing so daily", () => {
-  store.saltFor("2026-10-18");
-  const server = createServer({ store, log: () => {} });
+  const server = createServer({ store, salt, log: () => {} });
   try {
     vi.advanceTimersByTime(59_000);
-    expect(saltDays()).toEqual(["2026-10-18"]);
+    expect(file().equals(before)).toBe(true);
+
     vi.advanceTimersByTime(1_000);
-    expect(saltDays()).toEqual(["2026-10-19"]);
+    const after = file();
+    expect(after.toString("latin1", 0, 10)).toBe("2026-10-19");
+    expect(after.includes(oldSalt)).toBe(false);
+
     vi.advanceTimersByTime(24 * 60 * 60 * 1000);
-    expect(saltDays()).toEqual(["2026-10-20"]);
+    expect(file().toString("latin1", 0, 10)).toBe("2026-10-20");
   } finally {
     server.close();
   }

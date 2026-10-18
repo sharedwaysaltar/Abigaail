@@ -1,9 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { hashIngestKey, INGEST_KEY_RE, openStore, type IngestBatch, type Store } from "@abigaail/store";
+import { hashIngestKey, INGEST_KEY_RE, MIGRATIONS, openStore, type IngestBatch, type Store } from "@abigaail/store";
 import type { AbigaailEvent, RequestEvent } from "@abigaail/schema";
 
 let dir: string;
@@ -157,36 +158,44 @@ describe("events", () => {
   });
 });
 
-describe("salts", () => {
-  it("keeps one salt per UTC day and deletes earlier days", () => {
-    const d1 = store.saltFor("2026-10-17");
-    expect(store.saltFor("2026-10-17").equals(d1)).toBe(true);
-    const d2 = store.saltFor("2026-10-18");
-    expect(d2.equals(d1)).toBe(false);
-    const days = raw<{ day: string }>("SELECT day FROM salts").map((r) => r.day);
-    expect(days).toEqual(["2026-10-18"]);
-  });
-});
-
-describe("salt erasure", () => {
-  it("leaves no bytes of a rotated-out salt in the database file or its WAL", () => {
-    const { app } = store.createApp("a", "test");
-    const old = store.saltFor("2026-10-17");
-    // Other writes around the salt, as in real use.
-    store.insertBatch(app.id, batch([request(), request()]));
-    store.checkpoint();
-    store.insertBatch(app.id, batch([request()]));
-    const dbPath = join(dir, "test.db");
-    expect(readFileSync(dbPath).includes(old) || readFileSync(`${dbPath}-wal`).includes(old)).toBe(true);
-
-    store.saltFor("2026-10-18");
-    for (const path of [dbPath, `${dbPath}-wal`]) {
-      if (existsSync(path)) expect(readFileSync(path).includes(old), path).toBe(false);
-    }
-  });
-});
-
 describe("migrations", () => {
+  it("migration 2 drops the salts table and erases salts deleted before secure_delete existed", () => {
+    store.close();
+    const path = join(dir, "v1.db");
+    // A database as the first chunk 2 build left it: version 1, secure_delete
+    // off, one current salt and rotated-out ones that were deleted but are
+    // still on disk. Enough old rows to span several pages, so after the
+    // delete some old salt bytes sit in pages already on the free list, which
+    // DROP TABLE + secure_delete does not touch; only VACUUM removes those.
+    const v1 = new DatabaseSync(path);
+    v1.exec("PRAGMA journal_mode = WAL; PRAGMA secure_delete = OFF;");
+    v1.exec(MIGRATIONS[0]!);
+    v1.exec("PRAGMA user_version = 1");
+    const oldSalts = Array.from({ length: 400 }, () => randomBytes(32));
+    const current = randomBytes(32);
+    const insertSalt = v1.prepare("INSERT INTO salts (day, salt) VALUES (?, ?)");
+    oldSalts.forEach((salt, i) => insertSalt.run(`2025-${String(i).padStart(5, "0")}`, salt));
+    v1.prepare("INSERT INTO apps (id, name, key_hash, created_at) VALUES ('a', 'a', 'h', 1)").run();
+    insertSalt.run("2026-10-18", current);
+    v1.prepare("DELETE FROM salts WHERE day < ?").run("2026-10-18");
+    v1.close();
+
+    const files = () => [path, `${path}-wal`].filter(existsSync).map((p) => readFileSync(p));
+    const onDisk = (salt: Buffer) => files().some((f) => f.includes(salt));
+    // Precondition: without secure_delete the deleted salts really are still on disk.
+    expect(oldSalts.filter(onDisk).length).toBeGreaterThan(0);
+    expect(onDisk(current)).toBe(true);
+
+    store = openStore(path);
+    const tables = new DatabaseSync(path, { readOnly: true });
+    expect(tables.prepare("SELECT name FROM sqlite_master WHERE name = 'salts'").all()).toEqual([]);
+    expect(tables.prepare("PRAGMA user_version").get()).toEqual({ user_version: MIGRATIONS.length });
+    tables.close();
+    expect(store.appByName("a")?.id).toBe("a");
+    expect(oldSalts.filter(onDisk)).toHaveLength(0);
+    expect(onDisk(current)).toBe(false);
+  });
+
   it("reopening an existing database does not re-run migrations or lose data", () => {
     const { app } = store.createApp("a", "test");
     store.insertBatch(app.id, batch([request()]));

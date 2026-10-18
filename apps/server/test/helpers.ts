@@ -4,7 +4,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createServer, type ServerOptions } from "@abigaail/server";
+import { createServer, openSaltFile, type ServerOptions } from "@abigaail/server";
 import { openStore, type Store } from "@abigaail/store";
 
 export const T0 = Date.UTC(2026, 9, 18, 12, 0, 0);
@@ -12,6 +12,7 @@ export const T0 = Date.UTC(2026, 9, 18, 12, 0, 0);
 export interface TestServer {
   store: Store;
   dbPath: string;
+  saltPath: string;
   port: number;
   url: string;
   /** Server clock; tests move it by assigning. */
@@ -24,14 +25,17 @@ export interface TestServer {
 export async function startServer(opts: Partial<Omit<ServerOptions, "store" | "now">> = {}): Promise<TestServer> {
   const dir = mkdtempSync(join(tmpdir(), "abigaail-server-"));
   const dbPath = join(dir, "test.db");
+  const saltPath = join(dir, "salt.bin");
   const clock = { now: T0 };
   const store = openStore(dbPath, { now: () => clock.now });
-  const server = createServer({ store, now: () => clock.now, log: () => {}, ...opts });
+  const salt = opts.salt ?? openSaltFile(saltPath, () => clock.now);
+  const server = createServer({ store, now: () => clock.now, log: () => {}, ...opts, salt });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   return {
     store,
     dbPath,
+    saltPath,
     port,
     url: `http://127.0.0.1:${port}`,
     clock,

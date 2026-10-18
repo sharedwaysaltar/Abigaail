@@ -7,9 +7,12 @@ import { validateBatch } from "@abigaail/schema/validate";
 import type { App, Store } from "@abigaail/store";
 import { classifyUserAgent, eventTime, utcDay, visitorHash } from "./derive.js";
 import { TokenBucket } from "./ratelimit.js";
+import type { SaltSource } from "./salt.js";
 
 export interface ServerOptions {
   store: Store;
+  /** Daily visitor-hash salt (see salt.ts). Never stored in the database. */
+  salt: SaltSource;
   now?: () => number;
   /** Logs fixed messages only: never bodies, keys, IPs or user agents. */
   log?: (msg: string) => void;
@@ -99,11 +102,24 @@ export function createServer(opts: ServerOptions): http.Server {
   const badKeys = new TokenBucket(badKeyRate.perSec, badKeyRate.burst, now);
   // One bucket per known app: bounded by the number of apps, not by callers.
   const appBuckets = new Map<string, TokenBucket>();
-  let salt: { day: string; value: Buffer } | undefined;
+  let saltFailing = false;
 
-  const saltFor = (day: string): Buffer => {
-    if (salt?.day !== day) salt = { day, value: store.saltFor(day) };
-    return salt.value;
+  /**
+   * Today's salt, or undefined if it cannot be rotated. Never falls back to an
+   * older salt: events then get a null visitor hash until rotation succeeds.
+   */
+  const saltFor = (day: string): Buffer | undefined => {
+    try {
+      const value = opts.salt.forDay(day);
+      if (saltFailing) log("salt rotation recovered; visitor hashes resumed");
+      saltFailing = false;
+      return value;
+    } catch (err) {
+      // Logged once per failure streak, not once per request.
+      if (!saltFailing) log(`salt rotation failed (${errorClass(err)}); visitor hashes are null until it succeeds`);
+      saltFailing = true;
+      return undefined;
+    }
   };
 
   async function ingest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -150,7 +166,8 @@ export function createServer(opts: ServerOptions): http.Server {
     const batch = result.batch;
 
     // The salt day comes from receive time (UTC), never from event time, so a
-    // retried batch never needs an already-deleted salt.
+    // retried batch never needs an already-rotated salt. The buffer is used
+    // within this synchronous block only: rotation zeroes it.
     const receivedAt = now();
     const daySalt = saltFor(utcDay(receivedAt));
 
@@ -165,7 +182,7 @@ export function createServer(opts: ServerOptions): http.Server {
         event,
         derived: {
           ts,
-          visitor_hash: ip ? visitorHash(daySalt, app.id, ip, ua) : null,
+          visitor_hash: ip && daySalt ? visitorHash(daySalt, app.id, ip, ua) : null,
           ...classifyUserAgent(ua),
         },
       };
@@ -217,12 +234,7 @@ export function createServer(opts: ServerOptions): http.Server {
     // Epoch time has no leap seconds, so UTC days are exactly 86,400,000 ms.
     const nextMidnight = (Math.floor(t0 / 86_400_000) + 1) * 86_400_000;
     rotation = setTimeout(() => {
-      try {
-        const day = utcDay(now());
-        salt = { day, value: store.saltFor(day) };
-      } catch (err) {
-        log(`salt rotation failed (${errorClass(err)})`);
-      }
+      saltFor(utcDay(now()));
       scheduleRotation();
     }, Math.max(1, nextMidnight - t0));
     rotation.unref();

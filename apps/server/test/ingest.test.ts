@@ -107,6 +107,27 @@ describe("internal errors", () => {
   });
 });
 
+describe("salt failures", () => {
+  it("still accepts events, with a null visitor hash and one clear log line", async () => {
+    await s.close();
+    const logs: string[] = [];
+    s = await startServer({
+      log: (m) => logs.push(m),
+      salt: {
+        forDay() {
+          throw Object.assign(new Error("EROFS: read-only file system"), { name: "Error" });
+        },
+      },
+    });
+    ({ key, app: { id: appId } } = s.store.createApp("demo", "test"));
+    const visit = () => requestEvent({ transient: { ip: "203.0.113.5", ua: "x" } });
+    expect((await post(s, batch([visit()]), { key })).status).toBe(202);
+    expect((await post(s, batch([visit()]), { key })).status).toBe(202);
+    expect(s.store.recentEvents(appId).map((e) => e.visitor_hash)).toEqual([null, null]);
+    expect(logs).toEqual(["salt rotation failed (Error); visitor hashes are null until it succeeds"]);
+  });
+});
+
 describe("routing", () => {
   it("serves /healthz and rejects other paths and methods", async () => {
     expect((await fetch(`${s.url}/healthz`)).status).toBe(200);

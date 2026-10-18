@@ -3,3 +3,4 @@ export type { App, AuditEntry, Deploy, IngestBatch, StoredEvent, StoreOptions } 
 export { generateIngestKey, hashIngestKey, INGEST_KEY_PREFIX, INGEST_KEY_RE } from "./keys.js";
 export { toRow } from "./rows.js";
 export type { Derived, EventRow } from "./rows.js";
+export { MIGRATIONS } from "./migrations.js";

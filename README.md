@@ -85,8 +85,11 @@ curl -i http://127.0.0.1:4318/ingest \
 
 Expect `202 {"accepted":1,"duplicates":0}`. Send it again and you get `"duplicates":1`.
 A wrong key gives 401, and adding a field such as `"email":"x"` to the event gives 400.
-Data lives in `./data/abigaail.db` (git-ignored). Configure with `ABIGAAIL_DB_PATH`,
-`ABIGAAIL_HOST` (default `127.0.0.1`) and `ABIGAAIL_PORT` (default `4318`).
+Data lives in `./data/` (git-ignored): the database `abigaail.db` and the daily
+visitor-hash salt `salt.bin`, which is kept out of the database on purpose. Configure with
+`ABIGAAIL_DB_PATH`, `ABIGAAIL_SALT_PATH`, `ABIGAAIL_HOST` (default `127.0.0.1`) and
+`ABIGAAIL_PORT` (default `4318`). Before hosting anywhere, go through
+[docs/HOSTING.md](docs/HOSTING.md).
 
 The client IP and user agent may be sent once per request event in `transient`. Ingest
 uses them in memory for a daily-salted, per-app visitor hash and a browser/bot class,

@@ -75,4 +75,13 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX audit_log_ts ON audit_log (ts);
   `,
+  // 2: the visitor-hash salt moves to its own file (apps/server/src/salt.ts),
+  // so the database, its WAL and its backups never hold it. The store runs
+  // VACUUM + checkpoint after this migration to erase old salt bytes.
+  `
+  DROP TABLE salts;
+  `,
 ];
+
+/** user_version after which the store purges free space (see Store.purgeFreeSpace). */
+export const MIGRATION_DROP_SALTS = 2;

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { visitorHash } from "@abigaail/server";
 import { batch, post, requestEvent, startServer, T0, type TestServer } from "./helpers.js";
 
 // Distinctive markers, so the scans cannot match legitimate stored strings
@@ -22,6 +23,12 @@ beforeEach(async () => {
 afterEach(async () => {
   await s.close();
 });
+
+/** The current salt file contents: [day, salt]. */
+const saltFile = (): [string, Buffer] => {
+  const bytes = readFileSync(s.saltPath);
+  return [bytes.toString("latin1", 0, 10), Buffer.from(bytes.subarray(10, 42))];
+};
 
 const visit = (transient: Record<string, string> = { ip: IP, ua: UA }) => requestEvent({ transient });
 
@@ -49,7 +56,7 @@ describe("transient IP and user agent never reach storage", () => {
 
     // Every column of every table.
     const tables = s.raw<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name);
-    expect(tables).toEqual(expect.arrayContaining(["apps", "events", "deploys", "salts", "audit_log"]));
+    expect(tables).toEqual(expect.arrayContaining(["apps", "events", "deploys", "audit_log"]));
     for (const table of tables) {
       const dump = JSON.stringify(s.raw(`SELECT * FROM "${table}"`));
       expect(dump, table).not.toContain(IP);
@@ -63,6 +70,23 @@ describe("transient IP and user agent never reach storage", () => {
         const bytes = readFileSync(path);
         expect(bytes.includes(IP), `${label} ${path}`).toBe(false);
         expect(bytes.includes(UA_MARKER), `${label} ${path}`).toBe(false);
+      }
+    };
+    expect(statSync(`${s.dbPath}-wal`).size).toBeGreaterThan(0);
+    scan("before checkpoint");
+    s.store.checkpoint();
+    scan("after checkpoint");
+  });
+
+  it("never puts the salt in the database file or its WAL file", async () => {
+    await post(s, batch([visit(), visit({ ip: "198.51.100.9", ua: UA })]), { key });
+    const [, salt] = saltFile();
+    const scan = (label: string) => {
+      for (const path of [s.dbPath, `${s.dbPath}-wal`]) {
+        if (!existsSync(path)) continue;
+        const bytes = readFileSync(path);
+        expect(bytes.includes(salt), `${label} ${path}`).toBe(false);
+        expect(bytes.includes(Buffer.from(salt.toString("hex"))), `${label} ${path} (hex)`).toBe(false);
       }
     };
     expect(statSync(`${s.dbPath}-wal`).size).toBeGreaterThan(0);
@@ -90,12 +114,16 @@ describe("visitor hash", () => {
     expect(inA).not.toBe(inB);
   });
 
-  it("changes the next UTC day, and yesterday's salt is deleted", async () => {
+  it("changes the next UTC day, hashing with the new salt from salt.bin", async () => {
     const [today] = await hashesFor(key, [visit()]);
+    const [, oldSalt] = saltFile();
     s.clock.now = T0 + DAY;
     const [tomorrow] = await hashesFor(key, [visit()]);
+    const [day, newSalt] = saltFile();
+    expect(day).toBe("2026-10-19");
+    expect(newSalt.equals(oldSalt)).toBe(false);
     expect(tomorrow).not.toBe(today);
-    expect(s.raw<{ day: string }>("SELECT day FROM salts").map((r) => r.day)).toEqual(["2026-10-19"]);
+    expect(tomorrow).toBe(visitorHash(newSalt, appId, IP, UA));
   });
 
   it("takes the salt day from receive time, not event time", async () => {
@@ -108,7 +136,7 @@ describe("visitor hash", () => {
     const [late] = await hashesFor(key, [retried], { sent_at: 1_000 + 10 * 60_000 });
     expect(s.store.recentEvents(appId).find((e) => e.event_id === retried.event_id)!.ts).toBeLessThan(midnight);
     expect(late).toBe(fresh);
-    expect(s.raw<{ day: string }>("SELECT day FROM salts").map((r) => r.day)).toEqual(["2026-10-19"]);
+    expect(saltFile()[0]).toBe("2026-10-19");
   });
 
   it("is not a plain hash of the IP", async () => {
