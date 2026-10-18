@@ -4,6 +4,7 @@ Self-hosted, multi-agent observability platform: full technical visibility into
 deployed apps with zero personal data. Requirements: @docs/SPEC.md.
 Decisions already made (do not re-litigate): @docs/DECISIONS.md.
 Progress and next chunk: @docs/ROADMAP.md.
+How agents must think (plan every agent against it): @docs/AGENTS.md.
 
 ## How we work
 
