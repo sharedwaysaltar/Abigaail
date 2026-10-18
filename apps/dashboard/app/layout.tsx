@@ -7,7 +7,8 @@ export const metadata: Metadata = {
   title: "Abigaail",
   description: "Abigaail: is everything OK right now?",
   robots: { index: false, follow: false },
-  referrer: "no-referrer",
+  // Not no-referrer: that makes the browser send "Origin: null" on our own form posts.
+  referrer: "same-origin",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

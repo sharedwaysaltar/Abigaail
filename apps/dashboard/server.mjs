@@ -74,7 +74,9 @@ const server = http.createServer((req, res) => {
   res.setHeader("content-security-policy", policy);
   res.setHeader("x-frame-options", "DENY");
   res.setHeader("x-content-type-options", "nosniff");
-  res.setHeader("referrer-policy", "no-referrer");
+  // same-origin, not no-referrer: with no-referrer Chromium sends "Origin: null" on
+  // our own form posts. Other sites still get no referrer.
+  res.setHeader("referrer-policy", "same-origin");
   res.setHeader("x-robots-tag", "noindex, nofollow");
   res.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=(), interest-cohort=()");
   res.setHeader("cross-origin-opener-policy", "same-origin");

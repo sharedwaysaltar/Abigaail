@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { REGION_RE } from "@abigaail/schema";
 import { openReadOnly, openStore } from "@abigaail/store";
 import { span } from "../lib/format";
+import { sameOrigin } from "../lib/http";
 import { livenessText } from "../lib/liveness";
 import { REGIONS } from "../lib/regions";
 import { LAND, MAP } from "../lib/worldmap";
@@ -115,5 +116,40 @@ describe("uptime wording", () => {
     expect(texts).toEqual(["Running for 3 d 4 h", "Silent for 12 min", "Stopped 2 h ago", "No events yet"]);
     for (const t of texts) expect(t).not.toContain("%");
     expect(span(59_000)).toBe("59 s");
+  });
+});
+
+describe("sameOrigin (CSRF check on POST)", () => {
+  const post = (headers: Record<string, string>) => new Request("http://localhost:4319/api/login", { method: "POST", headers });
+
+  it("accepts Sec-Fetch-Site: same-origin, even with Origin: null", () => {
+    expect(sameOrigin(post({ "sec-fetch-site": "same-origin", origin: "null", host: "localhost:4319" }))).toBe(true);
+    expect(sameOrigin(post({ "sec-fetch-site": "same-origin" }))).toBe(true);
+  });
+
+  it("rejects cross-site, same-site and none, whatever Origin says", () => {
+    for (const site of ["cross-site", "same-site", "none"]) {
+      expect(sameOrigin(post({ "sec-fetch-site": site, origin: "http://localhost:4319", host: "localhost:4319" }))).toBe(false);
+    }
+  });
+
+  it("without Sec-Fetch-Site, needs an Origin naming this host", () => {
+    expect(sameOrigin(post({ origin: "http://localhost:4319", host: "localhost:4319" }))).toBe(true);
+    expect(sameOrigin(post({ origin: "https://evil.example", host: "localhost:4319" }))).toBe(false);
+    expect(sameOrigin(post({ origin: "null", host: "localhost:4319" }))).toBe(false);
+    expect(sameOrigin(post({ host: "localhost:4319" }))).toBe(false);
+    expect(sameOrigin(post({}))).toBe(false);
+  });
+});
+
+describe("referrer policy", () => {
+  // "no-referrer" makes Chromium send "Origin: null" on our own form posts, which sameOrigin() refuses.
+  it("the wrapper and the page metadata never use no-referrer", () => {
+    const server = readFileSync(join(ROOT, "server.mjs"), "utf8");
+    const header = /setHeader\("referrer-policy", "([^"]+)"\)/.exec(server);
+    expect(header?.[1]).toBe("same-origin");
+    const layout = readFileSync(join(ROOT, "app/layout.tsx"), "utf8");
+    expect(layout).toMatch(/referrer: "same-origin"/);
+    expect(server + layout).not.toMatch(/["']no-referrer["']/);
   });
 });
