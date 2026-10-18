@@ -6,6 +6,7 @@ export type { BreakerState, BreakerOptions } from "./breaker.js";
 export { Sampler } from "./sampler.js";
 export { fetchTransport } from "./transport.js";
 export type { Transport, SendResult, FetchTransportOptions } from "./transport.js";
-export { RouteNormaliser, compilePatterns, heuristicRoute, isIdLike, pathOnly } from "./route.js";
+export { RouteNormaliser, compilePatterns, heuristicRoute, isIdLike, pathOnly, urlPattern } from "./route.js";
 export type { RouteNormaliserOptions } from "./route.js";
 export type * from "@abigaail/schema";
+export { sanitizeEvent, cleanHost, unmapIp } from "./sanitize.js";

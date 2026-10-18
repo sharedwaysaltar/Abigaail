@@ -22,7 +22,8 @@ Progress and next chunk: @docs/ROADMAP.md.
   docs/DECISIONS.md.
 - **New decisions** go in docs/DECISIONS.md; when a chunk is done, mark it in
   docs/ROADMAP.md.
-- Never put model identifiers in commits or files.
+- Never put model identifiers in commits or files. Commit trailers are exactly
+  `Co-Authored-By: Claude <noreply@anthropic.com>`, without a model name.
 
 ## Non-negotiables (from the spec, condensed)
 
@@ -44,14 +45,19 @@ Progress and next chunk: @docs/ROADMAP.md.
 | `npm run build` | Compile packages to `dist/` |
 | `npm run dev:server` | Build and start the ingest server |
 | `npm run app:create -- <name>` / `app:disable` / `app:list` | App admin CLI (audited) |
+| `npm run events:tail -- <name> [n]` | Print an app's recent events (read-only) |
+| `npm run demo:node` / `npm run demo:next` | Run a demo app (needs `apps/demo-*/.env`, see `.env.example`) |
 
 ## Layout
 
 - `packages/schema`: event schema v1. `src/index.ts` is types/constants (zero deps);
   `src/validate.ts` is strict zod validation for the server.
 - `packages/core`: `@abigaail/core` SDK (queue, breaker, sampler, transport, route normaliser).
+- `packages/node`: `@abigaail/node` adapter (`diagnostics_channel` capture, flags, stack frames, metrics).
+- `packages/next`: `@abigaail/next` (`register` / `onRequestError` for `instrumentation.ts`, routes manifest).
 - `packages/store`: `@abigaail/store`, the only code that touches SQL (`node:sqlite`, migrations).
 - `apps/server`: ingest server (`src/server.ts`), derivations (`src/derive.ts`), daily salt
   file (`src/salt.ts`, never in the DB), admin CLI. Hosting requirements: docs/HOSTING.md.
+- `apps/demo-node`, `apps/demo-next`: demo apps (not part of `npm run build`).
 - Tests live in `packages/*/test/*.test.ts` and `apps/*/test/*.test.ts` and import packages by name
   (`@abigaail/core`), resolved to sources via `vitest.config.ts` and `tsconfig.json`.

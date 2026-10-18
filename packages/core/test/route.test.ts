@@ -64,6 +64,21 @@ describe("RouteNormaliser with known patterns", () => {
     expect(n().normalise("/orders/99")).toBe("/orders/[id]");
   });
 
+  it("match() returns the known pattern or undefined, without counting a route", () => {
+    expect(n().match("/user/999")).toBe("/user/[id]");
+    expect(n().match("/.env")).toBeUndefined();
+  });
+
+  it.each([
+    ["/(marketing)/@modal/user/[id]", "/user/[id]"],
+    ["/(shop)/cart", "/cart"],
+    ["/api/[slug]/page", "/api/[slug]/page"],
+    ["/user/a b", "other"],
+    ["/user/%41", "other"],
+  ])("pattern(%s) -> %s", (input, expected) => {
+    expect(n().pattern(input)).toBe(expected);
+  });
+
   it("can report unknown paths as 'unmatched' instead", () => {
     const strict = new RouteNormaliser({ patterns: ["/a"], fallback: "unmatched" });
     expect(strict.normalise("/wp-login.php")).toBe("unmatched");

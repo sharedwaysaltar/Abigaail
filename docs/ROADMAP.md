@@ -8,7 +8,7 @@ Everything runs on a laptop first (VS Code + browser). Hosting comes later.
 |---|---|---|
 | 1 ✅ | Monorepo, event schema v1, `@abigaail/core` fail-open SDK | `npm run check` |
 | 2 ✅ | `@abigaail/store` (SQLite) + ingest server | `npm run dev:server`, curl a batch |
-| 3 | `@abigaail/node` + `@abigaail/next` adapters, demo app | Run demo app, watch events arrive |
+| 3 ✅ | `@abigaail/node` + `@abigaail/next` adapters, demo apps | `npm run demo:node` / `demo:next`, then `npm run events:tail -- demo` |
 | 4 | Agent runner + agents 1-3 (Usage, Health, Watchdog) | Findings appear in the store |
 | 5 | Dashboard: login + MFA, Status, Live, Usage | Browser at localhost |
 | 6 | Bad-traffic simulator, README for connecting an app | Run simulator, see findings |

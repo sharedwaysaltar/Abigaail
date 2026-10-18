@@ -10,15 +10,18 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -b packages/schema packages/core packages/store apps/server",
-    "typecheck": "tsc -b packages/schema packages/core packages/store apps/server && tsc -p tsconfig.json",
+    "build": "tsc -b packages/schema packages/core packages/node packages/next packages/store apps/server",
+    "typecheck": "tsc -b packages/schema packages/core packages/node packages/next packages/store apps/server && tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm test",
     "dev:server": "npm run build --silent && node apps/server/dist/main.js",
     "app:create": "npm run build --silent && node apps/server/dist/cli.js create",
     "app:disable": "npm run build --silent && node apps/server/dist/cli.js disable",
-    "app:list": "npm run build --silent && node apps/server/dist/cli.js list"
+    "app:list": "npm run build --silent && node apps/server/dist/cli.js list",
+    "events:tail": "npm run build --silent && node apps/server/dist/cli.js events",
+    "demo:node": "npm run build --silent && node --env-file=apps/demo-node/.env apps/demo-node/server.mjs",
+    "demo:next": "npm run build --silent && npm run build -w @abigaail/demo-next && npm run start -w @abigaail/demo-next"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

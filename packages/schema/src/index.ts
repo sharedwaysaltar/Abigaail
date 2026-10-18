@@ -167,3 +167,46 @@ export interface Batch {
   sent_at?: number;
   events: AbigaailEvent[];
 }
+
+// ---------------------------------------------------------------------------
+// Shared value patterns. The server validator and the SDK sanitiser both use
+// these, so an event the SDK queues is one the server accepts.
+
+/** A normalised route: path characters plus [param] placeholders. No query, fragment, %, space or "@". */
+export const ROUTE_RE = /^\/[A-Za-z0-9._~\-[\]/]*$/;
+/** Hostnames only: letters, digits, dots and hyphens (IDNs arrive as punycode). */
+export const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/;
+/** Identifiers: error class names and function names. */
+export const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$.]*$/;
+/** Release strings: git SHAs, semver, build ids. No spaces or free text. */
+export const RELEASE_RE = /^[A-Za-z0-9._\-+]+$/;
+/** Project-relative frame paths. Absolute paths would leak usernames and hostnames. */
+export const FRAME_PATH_RE = /^(?![/\\])(?![A-Za-z]:)[A-Za-z0-9._\-/@[\]()]+$/;
+export const IPV4_RE =
+  /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
+export const IPV6_RE =
+  /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
+
+/** RFC 9562 UUID (any version 1-8), the form of `event_id`. */
+export const EVENT_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+/** Longest duration an event may report (24 h). */
+export const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+
+/** Outbound host placeholders: an IP literal is never stored as a host. */
+export const HOST_IP_LITERAL = "ip-literal";
+export const HOST_INVALID = "invalid-host";
+export const MAX_UA_LENGTH = 512;
+export const MAX_FN_LENGTH = 100;
+
+export const isRoute = (r: unknown): r is string =>
+  typeof r === "string" &&
+  r.length <= LIMITS.maxRouteLength &&
+  (r === ROUTE_OTHER || r === ROUTE_UNMATCHED || ROUTE_RE.test(r));
+export const isHost = (h: unknown): h is string =>
+  typeof h === "string" && h.length <= LIMITS.maxHostLength && HOST_RE.test(h);
+export const isIdent = (s: unknown, max: number): s is string =>
+  typeof s === "string" && s.length <= max && IDENT_RE.test(s);
+export const isFramePath = (p: unknown): p is string =>
+  typeof p === "string" && p.length <= LIMITS.maxFramePathLength && FRAME_PATH_RE.test(p);
+export const isIp = (s: unknown): s is string =>
+  typeof s === "string" && s.length <= 45 && (IPV4_RE.test(s) || IPV6_RE.test(s));

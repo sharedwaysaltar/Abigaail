@@ -1,10 +1,11 @@
 // App administration: `npm run app:create -- <name>`, `app:disable -- <name>`, `app:list`.
 // Every change is written to the audit log with actor "cli".
+// `npm run events:tail -- <name> [n]` prints recent events (read-only, not audited).
 
 import { openStore } from "@abigaail/store";
 import { loadConfig } from "./config.js";
 
-const [command, name] = process.argv.slice(2);
+const [command, name, countArg] = process.argv.slice(2);
 const config = loadConfig();
 const store = openStore(config.dbPath);
 
@@ -39,8 +40,26 @@ try {
       }
       break;
     }
+    case "events": {
+      if (!name) throw new Error("usage: npm run events:tail -- <name> [count]");
+      const app = store.appByName(name);
+      if (!app) throw new Error(`no app named "${name}"`);
+      const count = Math.min(Math.max(Number(countArg ?? 30) || 30, 1), 1000);
+      const events = store.recentEvents(app.id, count).reverse();
+      if (!events.length) console.log(`No events for "${name}" yet.`);
+      for (const e of events) {
+        const what =
+          e.type === "request" ? `${e.method} ${e.route} ${e.status} ${e.duration_ms}ms`
+          : e.type === "outbound" ? `${e.method} ${e.host} ${e.status ?? "-"} ${e.duration_ms}ms`
+          : e.type === "metric" ? `${e.name}=${e.value}`
+          : [e.name, e.route].filter(Boolean).join(" ");
+        const who = e.visitor_hash ? ` visitor=${e.visitor_hash.slice(0, 8)} ${e.bot_class}/${e.browser ?? "-"}` : "";
+        console.log(`${fmt(e.ts)}  ${e.type.padEnd(9)} ${what}${who}${e.attrs ? `  ${e.attrs}` : ""}`);
+      }
+      break;
+    }
     default:
-      throw new Error("usage: cli.js create <name> | disable <name> | list");
+      throw new Error("usage: cli.js create <name> | disable <name> | list | events <name> [count]");
   }
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));

@@ -1,0 +1,40 @@
+{
+  "version": 3,
+  "basePath": "/shop",
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/about",
+      "regex": "^/about(?:/)?$"
+    },
+    {
+      "page": "/api/boom",
+      "regex": "^/api/boom(?:/)?$"
+    },
+    {
+      "page": "/api/outbound",
+      "regex": "^/api/outbound(?:/)?$"
+    },
+    {
+      "page": "/api/slow",
+      "regex": "^/api/slow(?:/)?$"
+    }
+  ],
+  "dynamicRoutes": [
+    {
+      "page": "/user/[id]",
+      "regex": "^/user/([^/]+?)(?:/)?$"
+    }
+  ]
+}

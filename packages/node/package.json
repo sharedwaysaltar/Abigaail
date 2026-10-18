@@ -1,0 +1,17 @@
+{
+  "name": "@abigaail/node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail Node adapter: requests, outbound calls, errors, metrics and lifecycle via diagnostics_channel. Fail-open.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@abigaail/core": "0.1.0",
+    "@abigaail/schema": "0.1.0"
+  }
+}

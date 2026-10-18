@@ -7,6 +7,7 @@ import {
 } from "@abigaail/schema";
 import { CircuitBreaker, type BreakerState } from "./breaker.js";
 import { BoundedQueue } from "./queue.js";
+import { sanitizeEvent } from "./sanitize.js";
 import { Sampler } from "./sampler.js";
 import { fetchTransport, type Transport } from "./transport.js";
 
@@ -44,7 +45,10 @@ export interface ClientOptions {
 
 export interface ClientStats {
   queued: number;
+  /** Dropped because the queue was full. */
   dropped: number;
+  /** Dropped because the event could not be made valid (see sanitize.ts). */
+  invalid: number;
   sampledOut: number;
   sent: number;
   rejected: number;
@@ -78,6 +82,7 @@ function uuid(): string {
 const NOOP_STATS: ClientStats = {
   queued: 0,
   dropped: 0,
+  invalid: 0,
   sampledOut: 0,
   sent: 0,
   rejected: 0,
@@ -132,7 +137,7 @@ class Client implements AbigaailClient {
   private timer: ReturnType<typeof setInterval> | undefined;
   private inFlight: Promise<void> | undefined;
   private closed = false;
-  private counters = { sampledOut: 0, sent: 0, rejected: 0, failedSends: 0 };
+  private counters = { invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0 };
 
   constructor(
     private readonly opts: ClientOptions,
@@ -166,12 +171,13 @@ class Client implements AbigaailClient {
 
   capture(input: EventInput): void {
     try {
-      if (this.closed || !input || typeof input !== "object") return;
-      const event = {
-        ...input,
-        event_id: input.event_id ?? uuid(),
-        client_ts: input.client_ts ?? this.now(),
-      } as AbigaailEvent;
+      if (this.closed) return;
+      // Rebuilt from allowed fields and mapped to values ingest accepts.
+      const event = sanitizeEvent(input, uuid, this.now);
+      if (!event) {
+        this.counters.invalid++;
+        return;
+      }
 
       // Only request events are sampled. Errors, metrics, outbound calls and
       // lifecycle events carry the signals agents need most and are low
