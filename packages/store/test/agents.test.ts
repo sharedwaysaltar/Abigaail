@@ -302,7 +302,8 @@ describe("hourly rollup", () => {
     const fx = seedHour(H);
     store.rollupHour(appA, H);
     expect(store.hourly(appA, "host", [H])).toMatchObject([
-      { key: "api.stripe.com", n: 4, failures: 1, status_5xx: 1, p50: 9, p95: 3000 },
+      // The 502 answer and the timeout both count as failed calls.
+      { key: "api.stripe.com", n: 4, failures: 2, status_5xx: 1, p50: 9, p95: 3000 },
     ]);
     const refs = fx.filter((f) => f.referrer && f.bot_class !== "crawler" && !f.flags?.includes("scanner_path"));
     const refRows = store.hourly(appA, "referrer", [H]);

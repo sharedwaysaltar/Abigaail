@@ -101,7 +101,7 @@ export interface StatRow {
   status_5xx: number;
   status_4xx: number;
   status_401_403: number;
-  /** Outbound calls that ended in error or timeout. */
+  /** Outbound calls that failed: error, timeout, or a 5xx answer. */
   failures: number;
   /** Percentiles of duration_ms (metric kind: of the value). Unweighted: sampling is uniform. */
   p50: number | null;
@@ -122,8 +122,15 @@ export const HOUR_MS = 3_600_000;
  * client, and not flagged as a scanner probe or injection attempt. "unknown"
  * (no user agent, or transient withheld) counts.
  */
-export const MATTERS_SQL = `(bot_class IS NULL OR bot_class NOT IN ('crawler', 'ai_crawler', 'automation'))
-  AND NOT EXISTS (SELECT 1 FROM json_each(events.attrs, '$.flags') WHERE value IN ('scanner_path', 'injection_like'))`;
+export const mattersSql = (t = "events") => `(${t}.bot_class IS NULL OR ${t}.bot_class NOT IN ('crawler', 'ai_crawler', 'automation'))
+  AND NOT EXISTS (SELECT 1 FROM json_each(${t}.attrs, '$.flags') WHERE value IN ('scanner_path', 'injection_like'))`;
+export const MATTERS_SQL = mattersSql();
+
+/** An outbound call that failed: an error or timeout, or a 5xx answer. */
+const FAILED_CALL_SQL = "(json_extract(o.attrs, '$.outcome') <> 'ok' OR o.status >= 500)";
+
+/** How far before a window outbound calls are looked at when linking them to requests in it. */
+const LINK_SLACK_MS = 60_000;
 
 /** Nearest-rank percentile of an ascending array. */
 export function percentile(sorted: readonly number[], p: number): number | null {
@@ -260,7 +267,8 @@ export class StoreReader {
         else if (r.status >= 400) row.status_4xx++;
         if (r.status === 401 || r.status === 403) row.status_401_403++;
       }
-      if (r.outcome !== null && r.outcome !== "ok") row.failures++;
+      // Same rule as FAILED_CALL_SQL: a dependency answering 5xx is failing too.
+      if (r.outcome !== null && (r.outcome !== "ok" || (r.status ?? 0) >= 500)) row.failures++;
       if (r.v !== null) a.values.push(r.v);
       if (r.visitor_hash !== null) a.visitors.add(r.visitor_hash);
     }
@@ -274,6 +282,61 @@ export class StoreReader {
       out.push(row);
     }
     return out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+
+  /** One metric's samples with ts in [from, to), oldest first. */
+  metricSeries(appId: string, name: string, from: number, to: number): { ts: number; value: number }[] {
+    return this.db
+      .prepare("SELECT ts, value FROM events WHERE app_id = ? AND type = 'metric' AND name = ? AND ts >= ? AND ts < ? ORDER BY ts")
+      .all(appId, name, from, to) as unknown as { ts: number; value: number }[];
+  }
+
+  /**
+   * Outbound calls with ts in [from, to), per host and the inbound route that
+   * made them (via parent_id). route is null for calls with no stored parent
+   * request (made outside a request, linking off, or the request was sampled out).
+   */
+  outboundByRoute(appId: string, from: number, to: number): { host: string; route: string | null; calls: number; failed: number }[] {
+    return this.db
+      .prepare(`
+        SELECT o.host AS host, r.route AS route, count(*) AS calls, sum(CASE WHEN ${FAILED_CALL_SQL} THEN 1 ELSE 0 END) AS failed
+        FROM events o LEFT JOIN events r ON r.app_id = o.app_id AND r.event_id = o.parent_id AND r.type = 'request'
+        WHERE o.app_id = ? AND o.type = 'outbound' AND o.ts >= ? AND o.ts < ?
+        GROUP BY o.host, r.route ORDER BY o.host, calls DESC`)
+      .all(appId, from, to) as unknown as { host: string; route: string | null; calls: number; failed: number }[];
+  }
+
+  /**
+   * Failing requests (5xx, traffic that matters, ts in [from, to)) that made a
+   * failed call to a host, per route and host. Driven from the outbound side,
+   * so the join uses the events primary key.
+   */
+  failingRequestCauses(appId: string, from: number, to: number): { route: string; host: string; requests: number }[] {
+    return this.db
+      .prepare(`
+        SELECT r.route AS route, o.host AS host, count(DISTINCT r.event_id) AS requests
+        FROM events o JOIN events r ON r.app_id = o.app_id AND r.event_id = o.parent_id
+        WHERE o.app_id = ? AND o.type = 'outbound' AND o.ts >= ? AND o.ts < ? AND ${FAILED_CALL_SQL}
+          AND r.type = 'request' AND r.ts >= ? AND r.ts < ? AND r.status >= 500 AND ${mattersSql("r")}
+        GROUP BY r.route, o.host`)
+      .all(appId, from - LINK_SLACK_MS, to + LINK_SLACK_MS, from, to) as unknown as { route: string; host: string; requests: number }[];
+  }
+
+  /** Keys of one kind present in the rollup with hour in [from, to). */
+  hourlyKeys(appId: string, kind: StatKind, from: number, to: number): Set<string> {
+    const rows = this.db
+      .prepare("SELECT DISTINCT key FROM hourly_route_stats WHERE app_id = ? AND kind = ? AND hour >= ? AND hour < ?")
+      .all(appId, kind, from, to) as { key: string }[];
+    return new Set(rows.map((r) => r.key));
+  }
+
+  /** First rolled-up hour of each key of one kind, for keys first seen at or after `since`. */
+  firstSeenSince(appId: string, kind: StatKind, since: number): Map<string, number> {
+    const rows = this.db
+      .prepare(`SELECT key, min(hour) AS first FROM hourly_route_stats WHERE app_id = ? AND kind = ?
+                GROUP BY key HAVING min(hour) >= ?`)
+      .all(appId, kind, since) as { key: string; first: number }[];
+    return new Map(rows.map((r) => [r.key, r.first]));
   }
 
   /** Distinct visitor hashes of traffic that matters with ts in [from, to). */

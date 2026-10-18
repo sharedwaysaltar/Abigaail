@@ -77,3 +77,99 @@ export const WATCHDOG = {
   /** /healthz turns 503 when the Watchdog has not completed a run for this long. */
   healthzStaleMs: 3 * MINUTE,
 };
+
+/** Which past hours count as "normal" (docs/AGENTS.md principle 1). */
+export const BASELINE = {
+  /** Same hour-of-week over this many past weeks... */
+  weeks: 4,
+  /** ...used when at least this many of them have data. */
+  minWeeks: 2,
+  /** Otherwise the same hour on this many past days, if at least minDays have data. */
+  days: 7,
+  minDays: 2,
+  /** A slot's p95 counts towards a route's normal only with this many requests. */
+  minSlotRequests: 5,
+  /** Slots with a usable p95 needed for a latency normal. */
+  minLatencySlots: 2,
+};
+
+export const HEALTH = {
+  /** Fewer requests that matter than this in 15 min: "too little traffic to judge" (grey). */
+  minRequests15: 20,
+
+  // 5xx per route (Wilson lower bound on the failure share).
+  minFailures: 5,
+  errorWarnFloor: 0.02,
+  errorWarnFactor: 3,
+  errorCritical: 0.1,
+  errorWarnNoBaseline: 0.05,
+  // 401/403 per route.
+  minAuthFailures: 10,
+  authWarnFactor: 3,
+  authWarnNoBaseline: 0.3,
+
+  // Latency per route (5-minute p95).
+  minLatencyRequests: 20,
+  latencyCriticalRatio: 2.5,
+  latencyWarnRatio: 1.75,
+  /** Absolute increase needed as well, so 2 ms -> 6 ms is not an alert. */
+  latencyFloorMs: 100,
+  /** p95 must also exceed median + this many MADs of the route's normal. */
+  latencyMads: 3,
+  /** Without a normal yet: a p95 this high is still worth a warning. */
+  latencyNoBaselineMs: 2_000,
+
+  // Saturation.
+  lagWarnMs: 100,
+  lagCriticalMs: 500,
+  /** Lag samples (one per 30 s by default) needed in the 5-minute window. */
+  minLagSamples: 2,
+  rssWarnRatio: 1.5,
+  cpuWarnPercent: 90,
+  /** Samples needed in the 15-minute window for RSS and CPU. */
+  minResourceSamples: 3,
+  slowestRoutes: 3,
+
+  // Dependencies (per outbound host, 5-minute window).
+  minCalls: 5,
+  minLatencyCalls: 10,
+  depWarnFloor: 0.05,
+  depWarnFactor: 3,
+  depCritical: 0.25,
+  depWarnNoBaseline: 0.1,
+  /** A route's 5xx folds into a host's finding when this share had a failed call to it. */
+  foldShare: 0.5,
+
+  // Traffic collapse (15-minute window).
+  collapseMinExpected: 30,
+  collapseShare: 0.1,
+  collapseP: 0.001,
+
+  // New error bursts (15-minute window).
+  minNewErrors: 3,
+  errorBurstFactor: 5,
+  errorHistoryMs: 7 * DAY,
+
+  // Data trust.
+  /** sdk_queue_size at this share of the SDK's default queue (1000) counts as near the cap. */
+  queueNearCap: 800,
+};
+
+export const USAGE = {
+  /** Change in yesterday's unique humans vs the same weekday that is worth noting. */
+  uniquesChange: 0.5,
+  uniquesMinAbs: 20,
+  /** A route "goes quiet" only if at least this many requests were expected in the hour. */
+  quietMinExpected: 10,
+  quietP: 0.001,
+  referrerMin: 10,
+  referrerFactor: 3,
+  referrerP: 0.001,
+  /** A referrer domain unseen in this long counts as new. */
+  referrerHistoryMs: 7 * DAY,
+  /** Releases first seen this recently are checked for route adoption. */
+  releaseWindowMs: 7 * DAY,
+  peakMads: 4,
+  peakFactor: 2,
+  peakMin: 50,
+};

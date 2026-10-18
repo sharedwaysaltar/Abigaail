@@ -1,6 +1,6 @@
 export { openReadOnly, openStore, Store, APP_NAME_RE } from "./store.js";
 export type { AuditEntry, FindingInput, IngestBatch, RecordRunOptions, RunInput, StoreOptions } from "./store.js";
-export { HOUR_MS, MATTERS_SQL, percentile, StoreReader } from "./reader.js";
+export { HOUR_MS, MATTERS_SQL, mattersSql, percentile, StoreReader } from "./reader.js";
 export type {
   AgentRun,
   App,
