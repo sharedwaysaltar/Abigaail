@@ -130,6 +130,12 @@ describe("validateBatch: envelope rules", () => {
     expect(validateBatch(batch([request], { schema_version: 0 })).ok).toBe(false);
   });
 
+  it("accepts an optional integer sent_at and rejects anything else", () => {
+    expect(validateBatch(batch([request], { sent_at: 1_700_000_000_500 })).ok).toBe(true);
+    expect(validateBatch(batch([request], { sent_at: -1 })).ok).toBe(false);
+    expect(validateBatch(batch([request], { sent_at: "now" })).ok).toBe(false);
+  });
+
   it("requires a uuid event_id", () => {
     expect(validateBatch(batch([{ ...request, event_id: "1" }])).ok).toBe(false);
   });

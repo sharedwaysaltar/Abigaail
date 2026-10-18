@@ -159,5 +159,11 @@ export interface Batch {
   /** Deploy version of the sending app, e.g. a git SHA. */
   release: string;
   environment: Environment;
+  /**
+   * Client clock (epoch ms) when this send attempt was made; refreshed on retry.
+   * The server only uses `sent_at - client_ts` (a duration on one clock), so a
+   * skewed client clock does not skew event times.
+   */
+  sent_at?: number;
   events: AbigaailEvent[];
 }

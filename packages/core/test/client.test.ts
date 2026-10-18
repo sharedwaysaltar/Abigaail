@@ -129,6 +129,31 @@ describe("batching", () => {
     expect(calls).toBe(1);
   });
 
+  it("stamps sent_at from the injected clock on every batch and refreshes it on retry", async () => {
+    let t = 1000;
+    let result: "ok" | "failed" = "failed";
+    const sent: { sent_at: number | undefined; client_ts: number }[] = [];
+    const transport: Transport = async (b) => {
+      sent.push({ sent_at: b.sent_at, client_ts: b.events[0]!.client_ts });
+      return result;
+    };
+    const c = createClient({ ...base, transport, now: () => t, batchSize: 1, sampleThreshold: 1 });
+    c.capture(err());
+    t = 1500;
+    await c.flush(); // fails, event is requeued
+    t = 9000;
+    result = "ok";
+    await c.flush(); // retry of the same event
+    c.capture(err());
+    t = 9100;
+    await c.flush();
+    expect(sent).toEqual([
+      { sent_at: 1500, client_ts: 1000 },
+      { sent_at: 9000, client_ts: 1000 },
+      { sent_at: 9100, client_ts: 9000 },
+    ]);
+  });
+
   it("drops a batch the server rejects as invalid, without retrying", async () => {
     const { batches, transport } = recording("rejected");
     const c = createClient({ ...base, transport });

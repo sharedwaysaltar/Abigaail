@@ -130,6 +130,7 @@ export const batchSchema = z.strictObject({
   }),
   release: z.string().min(1).max(LIMITS.maxReleaseLength).regex(RELEASE_RE),
   environment: z.enum(ENVIRONMENTS),
+  sent_at: clientTs.optional(),
   events: z.array(eventSchema).min(1).max(LIMITS.maxEventsPerBatch),
 });
 

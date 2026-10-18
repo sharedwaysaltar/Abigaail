@@ -210,6 +210,8 @@ class Client implements AbigaailClient {
           sdk: { name: SDK_NAME, version: SDK_VERSION },
           release: this.opts.release,
           environment: this.opts.environment,
+          // Per attempt, so a retried batch tells ingest how long its events waited.
+          sent_at: this.now(),
           events,
         };
         const result = await this.sendWithTimeout(batch);
