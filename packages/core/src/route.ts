@@ -1,4 +1,4 @@
-import { LIMITS, ROUTE_OTHER, ROUTE_UNMATCHED } from "@abigaail/schema";
+import { LIMITS, ROUTE_OTHER, ROUTE_UNMATCHED, isRoute } from "@abigaail/schema";
 
 // Route normalisation keeps cardinality bounded and keeps identifiers out of
 // stored data. Two layers:
@@ -16,16 +16,24 @@ interface CompiledPattern {
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
+ * A framework pattern as it appears in URLs: route groups "(group)" and
+ * parallel-route slots "@slot" are not URL segments, so they are removed.
+ */
+export function urlPattern(raw: string): string {
+  const segs = raw
+    .split("/")
+    .filter((s) => s && !(s.startsWith("(") && s.endsWith(")")) && !s.startsWith("@"));
+  return "/" + segs.join("/");
+}
+
+/**
  * Compile Next.js-style patterns: "[id]" (one segment), "[...slug]" (one or
- * more), "[[...slug]]" (zero or more). Route groups "(group)" are removed.
+ * more), "[[...slug]]" (zero or more). Groups and slots are removed first.
  */
 export function compilePatterns(patterns: readonly string[]): CompiledPattern[] {
   const compiled: CompiledPattern[] = [];
   for (const raw of patterns) {
-    const pattern = raw
-      .split("/")
-      .filter((s) => !(s.startsWith("(") && s.endsWith(")")))
-      .join("/") || "/";
+    const pattern = urlPattern(raw);
     let specificity = 0;
     let re = "";
     for (const seg of pattern.split("/").filter(Boolean)) {
@@ -113,15 +121,27 @@ export class RouteNormaliser {
     this.fallback = opts.fallback ?? "heuristic";
   }
 
+  /** The known pattern matching `url`, or undefined. Not counted against the route cap. */
+  match(url: string): string | undefined {
+    const path = pathOnly(url);
+    for (const c of this.compiled) {
+      if (c.regex.test(path)) return c.pattern;
+    }
+    return undefined;
+  }
+
+  /**
+   * Report a pattern the framework already resolved (e.g. Next's routePath).
+   * Groups and slots are removed; anything still not a valid route becomes "other".
+   */
+  pattern(raw: string): string {
+    const p = typeof raw === "string" ? urlPattern(raw) : "";
+    return isRoute(p) ? this.cap(p) : ROUTE_OTHER;
+  }
+
   normalise(url: string): string {
     const path = pathOnly(url);
-    let route: string | undefined;
-    for (const c of this.compiled) {
-      if (c.regex.test(path)) {
-        route = c.pattern;
-        break;
-      }
-    }
+    let route = this.match(path);
     route ??= this.fallback === "unmatched" ? ROUTE_UNMATCHED : heuristicRoute(path);
     return this.cap(route);
   }

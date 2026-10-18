@@ -5,21 +5,30 @@
 import { z } from "zod";
 import {
   ENVIRONMENTS,
+  EVENT_ID_RE,
+  FRAME_PATH_RE,
+  HOST_RE,
   HTTP_METHODS,
+  IDENT_RE,
+  IPV4_RE,
+  IPV6_RE,
   LIFECYCLE_KINDS,
   LIMITS,
+  MAX_DURATION_MS,
+  MAX_FN_LENGTH,
+  MAX_UA_LENGTH,
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
+  RELEASE_RE,
   REQUEST_FLAGS,
   ROUTE_OTHER,
+  ROUTE_RE,
   ROUTE_UNMATCHED,
   SUPPORTED_SCHEMA_VERSIONS,
   type Batch,
 } from "./index.js";
 
-// A normalised route: path characters plus [param] placeholders. No query
-// string, no fragment, no percent-encoding, no spaces, no "@".
-const ROUTE_RE = /^\/[A-Za-z0-9._~\-[\]/]*$/;
+// Patterns are shared with the SDK sanitiser (see ./index.ts).
 const route = z
   .string()
   .max(LIMITS.maxRouteLength)
@@ -27,26 +36,18 @@ const route = z
     message: "route must be a normalised pattern",
   });
 
-// Hostnames only: letters, digits, dots and hyphens (IDNs arrive as punycode).
-const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/;
 const host = z.string().max(LIMITS.maxHostLength).regex(HOST_RE, "must be a bare hostname");
 
-const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$.]*$/;
-// Release strings: git SHAs, semver, build ids. No spaces or free text.
-const RELEASE_RE = /^[A-Za-z0-9._\-+]+$/;
-// Project-relative frame paths. Absolute paths would leak usernames and hostnames.
-const FRAME_PATH_RE = /^(?![/\\])(?![A-Za-z]:)[A-Za-z0-9._\-/@[\]()]+$/;
-
-const eventId = z.uuid();
+const eventId = z.string().regex(EVENT_ID_RE, "must be a UUID");
 const clientTs = z.number().int().nonnegative();
 const method = z.enum(HTTP_METHODS);
-const durationMs = z.number().nonnegative().max(24 * 60 * 60 * 1000);
+const durationMs = z.number().nonnegative().max(MAX_DURATION_MS);
 const bytes = z.number().int().nonnegative();
 
 const transient = z
   .strictObject({
-    ip: z.union([z.ipv4(), z.ipv6()]).optional(),
-    ua: z.string().max(512).optional(),
+    ip: z.string().max(45).refine((ip) => IPV4_RE.test(ip) || IPV6_RE.test(ip), "must be an IP address").optional(),
+    ua: z.string().max(MAX_UA_LENGTH).optional(),
   })
   .optional();
 
@@ -79,7 +80,7 @@ export const errorEventSchema = z.strictObject({
         file: z.string().max(LIMITS.maxFramePathLength).regex(FRAME_PATH_RE, "must be a relative path"),
         line: z.number().int().nonnegative(),
         col: z.number().int().nonnegative().optional(),
-        fn: z.string().max(100).regex(IDENT_RE).optional(),
+        fn: z.string().max(MAX_FN_LENGTH).regex(IDENT_RE).optional(),
       }),
     )
     .max(LIMITS.maxStackFrames)
