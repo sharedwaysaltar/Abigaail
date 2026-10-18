@@ -521,9 +521,11 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
     }
     let routeCalls = linkedByWindow.get(failure.windowMs);
     if (!routeCalls) linkedByWindow.set(failure.windowMs, (routeCalls = ctx.store.outboundByRoute(app.id, end - failure.windowMs, end)));
-    if (!routeCalls.some((l) => l.route === failure.route)) {
-      // No call is linked to this route (linking off, or Node 22's default), so
-      // the link cannot be proven: keep both findings and name the likely cause.
+    if (!routeCalls.some((l) => l.route === failure.route) && !ctx.store.hasLinkedOutbound(app.id, end - failure.windowMs, end)) {
+      // Linking is off for this app (no outbound call carries a parent_id, e.g.
+      // Node 22's default), so the link cannot be proven: keep both findings
+      // and name the likely cause. With linking on, a route with no linked
+      // calls made none, so a failing dependency is not its cause.
       const failing = [...deps.values()].filter((d) => d.failing).sort((a, b) => b.row.failures - a.row.failures)[0];
       if (failing) {
         failure.finding.cause =

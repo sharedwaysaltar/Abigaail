@@ -174,6 +174,23 @@ describe("dependencies name the cause", () => {
     expect(found.find((f) => f.signal === "dependency")!.evidence.explains_routes).toEqual([]);
   });
 
+  it("with linking on, a route that made no calls gets no dependency cause", () => {
+    // /dependency-down fails through its (linked) dependency...
+    const ids = recent(15, { route: "/dependency-down", status: 502 });
+    ids.forEach((parent, i) => fx.outbound(E() - 3 * MIN + i * 1000, "localhost", { status: 503, parent }));
+    // ...while /boom fails with its own error and makes no outbound calls.
+    recent(10, { route: "/boom", status: 500 });
+    for (let i = 0; i < 10; i++) fx.error(E() - 2 * MIN + i, "RangeError", "/boom");
+    const found = fx.run(health);
+    expect(signals(found).filter((s) => !s.startsWith("new_error"))).toEqual([
+      "dependency:localhost:critical",
+      "server_errors:/boom:critical",
+    ]);
+    const boom = found.find((f) => f.signal === "server_errors")!;
+    expect(boom.cause).toBeUndefined();
+    expect(boom.evidence.likely_dependency).toBeUndefined();
+  });
+
   it("a slow route names the slow upstream it calls (the AGENTS.md example)", () => {
     fx.baselineWeeks(E(), 4, (h) => {
       const ids = fx.requests(h, h + HOUR_MS, 40, (i) => ({ route: "/api/chat", duration: 4600 + i }));

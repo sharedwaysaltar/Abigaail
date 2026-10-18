@@ -314,6 +314,13 @@ export class StoreReader {
       .all(appId, from, to) as unknown as { host: string; route: string | null; calls: number; failed: number }[];
   }
 
+  /** Whether any outbound event with ts in [from, to) carries a parent_id (linking is on for this app). */
+  hasLinkedOutbound(appId: string, from: number, to: number): boolean {
+    return !!this.db
+      .prepare("SELECT 1 FROM events WHERE app_id = ? AND type = 'outbound' AND ts >= ? AND ts < ? AND parent_id IS NOT NULL LIMIT 1")
+      .get(appId, from, to);
+  }
+
   /**
    * Failing requests (5xx, traffic that matters, ts in [from, to)) that made a
    * failed call to a host, per route and host. Driven from the outbound side,
