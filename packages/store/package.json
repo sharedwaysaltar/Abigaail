@@ -1,0 +1,13 @@
+{
+  "name": "@abigaail/store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail store: the only code that touches the database (SQLite via node:sqlite). Every query is scoped by app_id.",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "dependencies": {
+    "@abigaail/schema": "0.1.0"
+  }
+}

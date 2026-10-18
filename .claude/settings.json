@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(npm ci)",
+      "Bash(npm test)",
+      "Bash(npm run check)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run build)",
+      "Bash(npx vitest *)",
+      "Bash(npx tsc *)",
+      "Bash(git pull origin dev)",
+      "Bash(git push origin dev)",
+      "Bash(git push -u origin dev)"
+    ],
+    "deny": [
+      "Bash(git push *main*)",
+      "Bash(git push *--force*)",
+      "Bash(git push *-f *)",
+      "Bash(git push *--delete*)"
+    ]
+  }
+}
