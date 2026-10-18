@@ -29,10 +29,18 @@ export function utcDay(ms: number): string {
  */
 export function visitorHash(salt: Buffer, appId: string, ip: string, ua: string | undefined): string {
   return createHmac("sha256", salt)
-    .update(`${appId}\n${ip.toLowerCase()}\n${ua ?? ""}`)
+    .update(`${appId}\n${normaliseIp(ip)}\n${ua ?? ""}`)
     .digest()
     .subarray(0, 16)
     .toString("hex");
+}
+
+const IPV4_MAPPED_RE = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i;
+
+/** One spelling per address: lowercase, and IPv4-mapped IPv6 (::ffff:a.b.c.d) as plain IPv4. */
+export function normaliseIp(ip: string): string {
+  const lower = ip.toLowerCase();
+  return IPV4_MAPPED_RE.exec(lower)?.[1] ?? lower;
 }
 
 export type BotClass = "human" | "crawler" | "ai_crawler" | "automation" | "unknown";

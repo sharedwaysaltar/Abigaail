@@ -51,6 +51,12 @@ function sendAndClose(req: IncomingMessage, res: ServerResponse, status: number,
   send(res, status, body, { ...headers, connection: "close" });
 }
 
+/** The error's class name only, never its message. Anything not identifier-like is reported as "Error". */
+function errorClass(err: unknown): string {
+  const name = err instanceof Error ? err.name : "";
+  return /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(name) ? name : "Error";
+}
+
 type BodyResult = { ok: true; body: Buffer } | { ok: false; reason: "too_large" | "aborted" };
 
 /** Read the body with a hard byte cap; stops reading as soon as the cap is passed. */
@@ -194,13 +200,34 @@ export function createServer(opts: ServerOptions): http.Server {
       connectionsCheckingInterval: t.checkIntervalMs ?? 2_000,
     },
     (req, res) => {
-      handle(req, res).catch(() => {
-        log("ingest: internal error");
+      handle(req, res).catch((err: unknown) => {
+        log(`ingest: internal error (${errorClass(err)})`);
         if (!res.headersSent) sendAndClose(req, res, 500, { error: "internal" });
         else res.destroy();
       });
     },
   );
   server.keepAliveTimeout = t.keepAliveMs ?? 5_000;
+
+  // Rotate the salt at each UTC midnight even if no request arrives, so
+  // yesterday's salt never outlives its day. unref'd: never keeps the process alive.
+  let rotation: ReturnType<typeof setTimeout> | undefined;
+  const scheduleRotation = () => {
+    const t0 = now();
+    // Epoch time has no leap seconds, so UTC days are exactly 86,400,000 ms.
+    const nextMidnight = (Math.floor(t0 / 86_400_000) + 1) * 86_400_000;
+    rotation = setTimeout(() => {
+      try {
+        const day = utcDay(now());
+        salt = { day, value: store.saltFor(day) };
+      } catch (err) {
+        log(`salt rotation failed (${errorClass(err)})`);
+      }
+      scheduleRotation();
+    }, Math.max(1, nextMidnight - t0));
+    rotation.unref();
+  };
+  scheduleRotation();
+  server.on("close", () => clearTimeout(rotation));
   return server;
 }

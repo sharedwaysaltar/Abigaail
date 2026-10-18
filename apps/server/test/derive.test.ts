@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyUserAgent, eventTime, MAX_EVENT_AGE_MS, utcDay, TokenBucket } from "@abigaail/server";
+import { randomBytes } from "node:crypto";
+import { classifyUserAgent, eventTime, MAX_EVENT_AGE_MS, normaliseIp, utcDay, TokenBucket, visitorHash } from "@abigaail/server";
 
 describe("eventTime", () => {
   it("subtracts the client-side wait from the receive time", () => {
@@ -7,6 +8,22 @@ describe("eventTime", () => {
     expect(eventTime(10_000, undefined, 4_000)).toBe(10_000);
     expect(eventTime(10_000, 4_000, 5_000)).toBe(10_000);
     expect(eventTime(MAX_EVENT_AGE_MS * 3, MAX_EVENT_AGE_MS * 2, 0)).toBe(MAX_EVENT_AGE_MS * 2);
+  });
+});
+
+describe("visitorHash", () => {
+  it("gives IPv4 and its IPv4-mapped IPv6 form the same hash", () => {
+    const salt = randomBytes(32);
+    const v4 = visitorHash(salt, "app", "203.0.113.77", "ua");
+    expect(visitorHash(salt, "app", "::ffff:203.0.113.77", "ua")).toBe(v4);
+    expect(visitorHash(salt, "app", "::FFFF:203.0.113.77", "ua")).toBe(v4);
+    expect(visitorHash(salt, "app", "203.0.113.78", "ua")).not.toBe(v4);
+  });
+
+  it("normalises only the mapped form, and lowercases IPv6", () => {
+    expect(normaliseIp("::ffff:10.0.0.1")).toBe("10.0.0.1");
+    expect(normaliseIp("2001:DB8::1")).toBe("2001:db8::1");
+    expect(normaliseIp("::ffff:abcd")).toBe("::ffff:abcd");
   });
 });
 

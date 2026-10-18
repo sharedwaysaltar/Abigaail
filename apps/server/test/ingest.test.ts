@@ -93,6 +93,20 @@ describe("keys", () => {
   });
 });
 
+describe("internal errors", () => {
+  it("answers 500 and logs the error class name only, never its message", async () => {
+    await s.close();
+    const logs: string[] = [];
+    s = await startServer({ log: (m) => logs.push(m) });
+    s.store.appByKey = () => {
+      throw new TypeError("leaky message abk_secret 203.0.113.9");
+    };
+    const res = await post(s, batch([requestEvent()]), { key: "abk_any" });
+    expect(res.status).toBe(500);
+    expect(logs).toEqual(["ingest: internal error (TypeError)"]);
+  });
+});
+
 describe("routing", () => {
   it("serves /healthz and rejects other paths and methods", async () => {
     expect((await fetch(`${s.url}/healthz`)).status).toBe(200);

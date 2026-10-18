@@ -93,6 +93,8 @@ export class Store {
       PRAGMA synchronous = NORMAL;
       PRAGMA foreign_keys = ON;
       PRAGMA busy_timeout = 5000;
+      -- Overwrite deleted content (old salts) instead of leaving it in free space.
+      PRAGMA secure_delete = ON;
     `);
     this.migrate();
   }
@@ -236,19 +238,30 @@ export class Store {
 
   /**
    * The visitor-hash salt for a UTC day ("YYYY-MM-DD"), created on first use.
-   * Salts for earlier days are deleted, so old hashes cannot be recomputed.
+   * Salts for earlier days are deleted and checkpointed out of the WAL, so old
+   * hashes cannot be recomputed from the database files.
    */
   saltFor(day: string): Buffer {
-    return this.tx(() => {
-      this.db.prepare("DELETE FROM salts WHERE day < ?").run(day);
+    let rotated = false;
+    const salt = this.tx(() => {
       const row = this.db.prepare("SELECT salt FROM salts WHERE day = ?").get(day) as
         | { salt: Uint8Array }
         | undefined;
-      if (row) return Buffer.from(row.salt);
-      const salt = randomBytes(32);
-      this.db.prepare("INSERT INTO salts (day, salt) VALUES (?, ?)").run(day, salt);
-      return salt;
+      let value: Buffer;
+      if (row) {
+        value = Buffer.from(row.salt);
+      } else {
+        value = randomBytes(32);
+        this.db.prepare("INSERT INTO salts (day, salt) VALUES (?, ?)").run(day, value);
+      }
+      // Delete after inserting, so the new row never reuses (and hides) the old row's space.
+      rotated = Number(this.db.prepare("DELETE FROM salts WHERE day < ?").run(day).changes) > 0;
+      return value;
     });
+    // secure_delete zeroes the old row in the page; the checkpoint moves that
+    // page into the main file and truncates the WAL, which still held the old salt.
+    if (rotated) this.checkpoint();
+    return salt;
   }
 
   // ---- maintenance --------------------------------------------------------

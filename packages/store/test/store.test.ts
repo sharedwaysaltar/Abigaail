@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -165,6 +165,24 @@ describe("salts", () => {
     expect(d2.equals(d1)).toBe(false);
     const days = raw<{ day: string }>("SELECT day FROM salts").map((r) => r.day);
     expect(days).toEqual(["2026-10-18"]);
+  });
+});
+
+describe("salt erasure", () => {
+  it("leaves no bytes of a rotated-out salt in the database file or its WAL", () => {
+    const { app } = store.createApp("a", "test");
+    const old = store.saltFor("2026-10-17");
+    // Other writes around the salt, as in real use.
+    store.insertBatch(app.id, batch([request(), request()]));
+    store.checkpoint();
+    store.insertBatch(app.id, batch([request()]));
+    const dbPath = join(dir, "test.db");
+    expect(readFileSync(dbPath).includes(old) || readFileSync(`${dbPath}-wal`).includes(old)).toBe(true);
+
+    store.saltFor("2026-10-18");
+    for (const path of [dbPath, `${dbPath}-wal`]) {
+      if (existsSync(path)) expect(readFileSync(path).includes(old), path).toBe(false);
+    }
   });
 });
 
