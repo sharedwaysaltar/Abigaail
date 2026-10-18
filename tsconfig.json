@@ -1,0 +1,16 @@
+{
+  // Type-checks tests and config (packages build via their own tsconfig).
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "paths": {
+      "@abigaail/schema": ["./packages/schema/src/index.ts"],
+      "@abigaail/schema/validate": ["./packages/schema/src/validate.ts"],
+      "@abigaail/core": ["./packages/core/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/test", "vitest.config.ts"]
+}

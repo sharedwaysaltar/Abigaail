@@ -10,9 +10,10 @@
   },
   "scripts": {
     "build": "tsc -b packages/schema packages/core",
-    "typecheck": "tsc -b packages/schema packages/core --force",
+    "typecheck": "tsc -b packages/schema packages/core && tsc -p tsconfig.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
