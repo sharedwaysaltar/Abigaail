@@ -45,6 +45,10 @@ Other commands:
 | `npm run test:watch` | Re-run tests as you edit |
 | `npm run typecheck` | Type-check packages and tests |
 | `npm run build` | Compile packages to `dist/` |
+| `npm run dev:server` | Build and start the ingest server |
+| `npm run app:create -- <name>` | Register an app and print its ingest key (shown once) |
+| `npm run app:disable -- <name>` | Revoke an app's key (ingest returns 403) |
+| `npm run app:list` | List apps, their state and last event time |
 
 In VS Code, accept the recommended extensions (Vitest explorer) to run and debug
 tests from the Testing sidebar.
@@ -55,8 +59,38 @@ tests from the Testing sidebar.
 packages/
   schema/   Event schema v1: zero-dependency types + strict server-side validators
   core/     @abigaail/core: fail-open event client and route normaliser
+  store/    @abigaail/store: SQLite store (node:sqlite); every query scoped by app_id
+apps/
+  server/   Ingest server (POST /ingest) and the app admin CLI
 docs/       Roadmap and design notes
 ```
+
+## Run the ingest server
+
+```bash
+npm run app:create -- demo     # prints an abk_... key once; copy it
+npm run dev:server             # listens on http://127.0.0.1:4318/ingest
+```
+
+In a second terminal, send a batch (replace the key):
+
+```bash
+curl -i http://127.0.0.1:4318/ingest \
+  -H 'content-type: application/json' \
+  -H 'x-abigaail-key: abk_PASTE_YOUR_KEY' \
+  -d '{"schema_version":1,"sdk":{"name":"curl","version":"1"},"release":"abc123","environment":"development",
+       "events":[{"type":"request","event_id":"3f2b8c1e-9a4d-4e7f-8b2a-1c5d6e7f8a9b","client_ts":0,
+                  "method":"GET","route":"/user/[id]","status":200,"duration_ms":12}]}'
+```
+
+Expect `202 {"accepted":1,"duplicates":0}`. Send it again and you get `"duplicates":1`.
+A wrong key gives 401, and adding a field such as `"email":"x"` to the event gives 400.
+Data lives in `./data/abigaail.db` (git-ignored). Configure with `ABIGAAIL_DB_PATH`,
+`ABIGAAIL_HOST` (default `127.0.0.1`) and `ABIGAAIL_PORT` (default `4318`).
+
+The client IP and user agent may be sent once per request event in `transient`. Ingest
+uses them in memory for a daily-salted, per-app visitor hash and a browser/bot class,
+then discards them; they are never stored (see `apps/server/test/privacy.test.ts`).
 
 ## What the SDK guarantees (fail-open)
 

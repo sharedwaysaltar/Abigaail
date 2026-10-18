@@ -42,11 +42,15 @@ Progress and next chunk: @docs/ROADMAP.md.
 | `npm run check` | Type-check + tests; run before every commit |
 | `npm test` / `npm run test:watch` | Tests only |
 | `npm run build` | Compile packages to `dist/` |
+| `npm run dev:server` | Build and start the ingest server |
+| `npm run app:create -- <name>` / `app:disable` / `app:list` | App admin CLI (audited) |
 
 ## Layout
 
 - `packages/schema`: event schema v1. `src/index.ts` is types/constants (zero deps);
   `src/validate.ts` is strict zod validation for the server.
 - `packages/core`: `@abigaail/core` SDK (queue, breaker, sampler, transport, route normaliser).
-- Tests live in `packages/*/test/*.test.ts` and import packages by name
+- `packages/store`: `@abigaail/store`, the only code that touches SQL (`node:sqlite`, migrations).
+- `apps/server`: ingest server (`src/server.ts`), derivations (`src/derive.ts`), admin CLI.
+- Tests live in `packages/*/test/*.test.ts` and `apps/*/test/*.test.ts` and import packages by name
   (`@abigaail/core`), resolved to sources via `vitest.config.ts` and `tsconfig.json`.

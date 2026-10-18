@@ -9,8 +9,10 @@
     "paths": {
       "@abigaail/schema": ["./packages/schema/src/index.ts"],
       "@abigaail/schema/validate": ["./packages/schema/src/validate.ts"],
-      "@abigaail/core": ["./packages/core/src/index.ts"]
+      "@abigaail/core": ["./packages/core/src/index.ts"],
+      "@abigaail/store": ["./packages/store/src/index.ts"],
+      "@abigaail/server": ["./apps/server/src/index.ts"]
     }
   },
-  "include": ["packages/*/test", "vitest.config.ts"]
+  "include": ["packages/*/test", "apps/*/test", "vitest.config.ts"]
 }
