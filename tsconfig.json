@@ -11,6 +11,7 @@
       "@abigaail/schema/validate": ["./packages/schema/src/validate.ts"],
       "@abigaail/core": ["./packages/core/src/index.ts"],
       "@abigaail/node": ["./packages/node/src/index.ts"],
+      "@abigaail/next": ["./packages/next/src/index.ts"],
       "@abigaail/store": ["./packages/store/src/index.ts"],
       "@abigaail/server": ["./apps/server/src/index.ts"]
     }

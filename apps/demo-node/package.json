@@ -1,0 +1,10 @@
+{
+  "name": "@abigaail/demo-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Plain node:http app wired to @abigaail/node, for watching events arrive. No dependencies.",
+  "dependencies": {
+    "@abigaail/node": "0.1.0"
+  }
+}

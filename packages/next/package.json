@@ -1,0 +1,17 @@
+{
+  "name": "@abigaail/next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail Next.js adapter: register() and onRequestError for instrumentation.ts, routes from the build manifest.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@abigaail/core": "0.1.0",
+    "@abigaail/node": "0.1.0"
+  }
+}

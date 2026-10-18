@@ -67,6 +67,8 @@ export interface AbigaailNode {
 }
 
 const SINGLETON = Symbol.for("abigaail.node");
+/** Sampling interval of the event-loop delay histogram; every reading includes it. */
+const LOOP_RESOLUTION_MS = 20;
 type Global = typeof globalThis & { [SINGLETON]?: AbigaailNode };
 
 const NOOP: AbigaailNode = {
@@ -76,6 +78,11 @@ const NOOP: AbigaailNode = {
   shutdown: () => Promise.resolve(),
   stats: () => ({ queued: 0, dropped: 0, invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0, breaker: "closed" }),
 };
+
+/** The running instance, if init() succeeded; for framework hooks that must not start one. */
+export function current(): AbigaailNode | undefined {
+  return (globalThis as Global)[SINGLETON];
+}
 
 /** Problems the SDK reports about its own configuration. Messages never contain values. */
 export class AbigaailWarning extends Error {
@@ -215,7 +222,7 @@ class NodeAdapter implements AbigaailNode {
   private readonly outMeta = new WeakMap<object, { host: string; method: HttpMethod }>();
   private readonly unsubscribers: (() => void)[] = [];
   private readonly timers: ReturnType<typeof setInterval>[] = [];
-  private readonly loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  private readonly loopDelay = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
   private cpuPrev = process.cpuUsage();
   private wallPrev = performance.now();
   private warnedProxy = false;
@@ -437,8 +444,10 @@ class NodeAdapter implements AbigaailNode {
     // Process CPU time over wall time: can exceed 100 with several cores busy.
     if (wallMs > 0) metric("cpu_percent", ((cpu.user + cpu.system) / 1000 / wallMs) * 100);
     if (this.loopDelay.count > 0) {
-      metric("event_loop_lag_p50_ms", this.loopDelay.percentile(50) / 1e6);
-      metric("event_loop_lag_p99_ms", this.loopDelay.percentile(99) / 1e6);
+      // Readings are timer intervals, so the resolution itself is not lag.
+      const lag = (p: number) => Math.max(0, this.loopDelay.percentile(p) / 1e6 - LOOP_RESOLUTION_MS);
+      metric("event_loop_lag_p50_ms", lag(50));
+      metric("event_loop_lag_p99_ms", lag(99));
     }
     this.loopDelay.reset();
     metric("sdk_queue_size", stats.queued);
