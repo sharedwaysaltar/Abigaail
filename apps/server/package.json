@@ -5,10 +5,15 @@
   "type": "module",
   "description": "Abigaail server: ingest endpoint (and later SSE, scheduler, alerter).",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "dependencies": {
     "@abigaail/schema": "0.1.0",
-    "@abigaail/store": "0.1.0"
+    "@abigaail/store": "0.1.0",
+    "@abigaail/insights": "0.1.0",
+    "@abigaail/auth": "0.1.0"
   }
 }

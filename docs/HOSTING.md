@@ -18,3 +18,14 @@ decided later (see DECISIONS #2); this list grows as chunks land.
 - [ ] **External uptime check on `/healthz`.** It answers 503 when the Watchdog has
       stopped running (DECISIONS #45), so this check watches the watcher. Alert on
       anything but 200.
+- [ ] **The dashboard is never exposed publicly.** Reach it over a VPN (e.g. Tailscale) or put
+      an IP allowlist in front, plus TLS. It binds 127.0.0.1:4319 by default; behind one local
+      reverse proxy set `ABIGAAIL_DASHBOARD_TRUST_PROXY=1` so the sign-in throttle sees the
+      client's address (DECISIONS #62, #64).
+- [ ] `ABIGAAIL_DASHBOARD_SECRET` (`openssl rand -base64 32`) is set in the environment of both
+      the dashboard and anyone running `npm run user:*`. Losing it means re-enrolling every
+      user's authenticator (`user:reset-mfa`).
+- [ ] `data/auth.db` (users, sessions, sign-in audit) is in `data/`, mode 0600, and backed up
+      with the database.
+- [ ] Only `/ingest` and `/healthz` are proxied publicly. The Live feed listener (chunk 5b,
+      127.0.0.1:4320) stays on loopback.

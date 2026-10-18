@@ -4,8 +4,7 @@
 // last completed hour or day, so it resolves as soon as it stops being true.
 
 import { HOUR_MS, type App, type StatRow } from "@abigaail/store";
-import { baselineSlots, rowsByKey, totals, typicalCount } from "./baseline.js";
-import { mad, median, poissonCdf, poissonUpperTail } from "./stats.js";
+import { baselineSlots, mad, median, poissonCdf, poissonUpperTail, rowsByKey, totals, typicalCount } from "@abigaail/insights";
 import { SCHEDULE, USAGE as U } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 

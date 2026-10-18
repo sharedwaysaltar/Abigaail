@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -356,6 +357,69 @@ describe("hourly rollup", () => {
 
   it("refuses an hour that is not on the hour", () => {
     expect(() => store.rollupHour(appA, H + 1)).toThrow();
+  });
+});
+
+describe("app-wide rollup and rollup versions", () => {
+  const H = T0 - 2 * HOUR_MS;
+
+  it("the app kind is one row over every request that matters, matching a direct calculation", () => {
+    const fx = seedHour(H);
+    store.rollupHour(appA, H);
+    const got = store.hourly(appA, "app", [H]).map(({ hour, ...r }) => r);
+    expect(got).toEqual(expectedRoutes(fx.map((f) => ({ ...f, route: "*" }))));
+    expect(store.statsFor(appA, "app", H, H + HOUR_MS)).toEqual(got);
+  });
+
+  it("hours rolled by an older version count as missing but keep their rows until re-rolled", () => {
+    seedHour(H);
+    store.rollupHour(appA, H);
+    store.rollupHour(appA, H + HOUR_MS);
+    expect(store.missingHours(appA, H, H + 2 * HOUR_MS)).toEqual([]);
+    const db = new DatabaseSync(join(dir, "test.db"));
+    db.prepare("UPDATE rollup_hours SET version = 1 WHERE hour = ?").run(H);
+    db.prepare("DELETE FROM hourly_route_stats WHERE kind = 'app'").run();
+    db.close();
+    expect(store.missingHours(appA, H, H + 2 * HOUR_MS)).toEqual([H]);
+    // Baselines keep working meanwhile: the old hour still has its route rows and event count.
+    expect(store.hourly(appA, "route", [H]).length).toBeGreaterThan(0);
+    expect(store.rolledHours(appA, [H]).get(H)).toBe(49);
+    store.rollupHour(appA, H);
+    expect(store.missingHours(appA, H, H + 2 * HOUR_MS)).toEqual([]);
+    expect(store.hourly(appA, "app", [H])).toHaveLength(1);
+  });
+});
+
+describe("region", () => {
+  const boot = (ts: number, region?: string) => ({
+    event: { type: "lifecycle" as const, event_id: id(), client_ts: 1, kind: "boot" as const, ...(region ? { region } : {}) },
+    derived: { ts },
+  });
+  const regionOf = (appId: string) => store.listApps().find((a) => a.id === appId)!.region;
+
+  it("a boot sets the app's region and a later boot without one clears it", () => {
+    expect(regionOf(appA)).toBeNull();
+    insert(appA, [boot(T0, "LON1")]);
+    expect(regionOf(appA)).toBe("LON1");
+    expect(regionOf(appB)).toBeNull();
+    insert(appA, [boot(T0 + 1000, "FRA1")]);
+    expect(regionOf(appA)).toBe("FRA1");
+    insert(appA, [boot(T0 + 2000)]);
+    expect(regionOf(appA)).toBeNull();
+  });
+
+  it("an older boot arriving late (a retry) does not overwrite the latest", () => {
+    insert(appA, [boot(T0 + 5000, "LON1")]);
+    insert(appA, [boot(T0, "SFO3")]);
+    expect(regionOf(appA)).toBe("LON1");
+  });
+
+  it("a heartbeat never changes the region, and lastBoot reads the latest boot", () => {
+    insert(appA, [boot(T0, "LON1")]);
+    insert(appA, [{ event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "heartbeat" }, derived: { ts: T0 + 60_000 } }]);
+    expect(regionOf(appA)).toBe("LON1");
+    expect(store.lastBoot(appA)).toEqual({ ts: T0, release: "r1" });
+    expect(store.lastBoot(appB)).toBeUndefined();
   });
 });
 

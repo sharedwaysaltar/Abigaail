@@ -99,6 +99,7 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
       break;
     case "lifecycle":
       row.name = event.kind;
+      row.attrs = attrsJson({ region: event.region });
       break;
   }
   return row;

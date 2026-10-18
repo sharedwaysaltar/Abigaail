@@ -10,7 +10,8 @@ Everything runs on a laptop first (VS Code + browser). Hosting comes later.
 | 2 ✅ | `@abigaail/store` (SQLite) + ingest server | `npm run dev:server`, curl a batch |
 | 3 ✅ | `@abigaail/node` + `@abigaail/next` adapters, demo apps | `npm run demo:node` / `demo:next`, then `npm run events:tail -- demo` |
 | 4 ✅ | Agent runner + agents 1-3 (Usage, Health, Watchdog), request linking, hourly rollup | `npm run demo:node`, browse `/dependency-down` ~10×, then `npm run findings -- demo` |
-| 5 | Dashboard: login + MFA, Status, Live, Usage | Browser at localhost |
+| 5a ✅ | Dashboard: sign-in with password + TOTP, server-side sessions, app switcher, Overview (world map by region), App detail; `ABIGAAIL_REGION`; app-wide rollup; `@abigaail/insights`, `@abigaail/auth` | `npm run user:create -- owner`, `ABIGAAIL_REGION=LON1 npm run demo:node`, `npm run dashboard`, browser at http://localhost:4319 |
+| 5b | Live view (SSE from ingest on a loopback listener), Findings, Agents. Usage numbers live on the App page; a dedicated Usage view comes later | Browser at localhost |
 | 6 | Bad-traffic simulator, README for connecting an app | Run simulator, see findings |
 
 Later phases follow the original spec (scrubber + agents 4-7, alerts, retention,

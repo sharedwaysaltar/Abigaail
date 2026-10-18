@@ -4,8 +4,8 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AbigaailEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
-import { MIGRATION_DROP_SALTS, MIGRATIONS } from "./migrations.js";
-import { HOUR_MS, StoreReader, type App, type RunOutcome, type Severity, type StatKind } from "./reader.js";
+import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
+import { APP_COLUMNS, HOUR_MS, StoreReader, type App, type RunOutcome, type Severity, type StatKind } from "./reader.js";
 import { toRow, type Derived } from "./rows.js";
 
 export interface AuditEntry {
@@ -30,8 +30,6 @@ export interface StoreOptions {
 
 /** Lowercase app names: letters, digits and hyphens, up to 63 chars. */
 export const APP_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
-
-const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at";
 
 /** A finding as an agent run reports it; the runner has already set the fingerprint. */
 export interface FindingInput {
@@ -65,7 +63,7 @@ export interface RecordRunOptions {
   resolveAfter?: number;
 }
 
-const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric"];
+const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric", "app"];
 const DAY_MS = 86_400_000;
 
 export function openStore(path: string, opts: StoreOptions = {}): Store {
@@ -82,7 +80,7 @@ export function openReadOnly(path: string): StoreReader {
   return new StoreReader(db);
 }
 
-function openWritable(path: string): DatabaseSync {
+export function openWritable(path: string): DatabaseSync {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec(`
@@ -161,7 +159,7 @@ export class Store extends StoreReader {
   createApp(name: string, actor: string): { app: App; key: string } {
     if (!APP_NAME_RE.test(name)) throw new Error("app name must be lowercase letters, digits and hyphens");
     const key = generateIngestKey();
-    const app: App = { id: randomUUID(), name, created_at: this.now(), disabled_at: null, last_event_at: null };
+    const app: App = { id: randomUUID(), name, created_at: this.now(), disabled_at: null, last_event_at: null, region: null };
     this.tx(() => {
       this.db
         .prepare("INSERT INTO apps (id, name, key_hash, created_at) VALUES (?, ?, ?, ?)")
@@ -198,7 +196,8 @@ export class Store extends StoreReader {
 
   /**
    * Append a validated batch in one transaction. Duplicate event_ids (retries)
-   * are ignored and counted. Also records the deploy and the app's last-seen time.
+   * are ignored and counted. Also records the deploy and the app's last-seen
+   * time, and each boot sets the app's region (NULL if it sent none).
    */
   insertBatch(appId: string, batch: IngestBatch): { inserted: number; duplicates: number } {
     const insert = this.db.prepare(`
@@ -209,6 +208,7 @@ export class Store extends StoreReader {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     return this.tx(() => {
       let inserted = 0;
+      let latestBoot: { ts: number; region: string | null } | undefined;
       for (const { event, derived } of batch.events) {
         const r = toRow(event, derived);
         const { changes } = insert.run(
@@ -217,6 +217,14 @@ export class Store extends StoreReader {
           r.visitor_hash, r.browser, r.bot_class, r.attrs, r.parent_id,
         );
         inserted += Number(changes);
+        if (changes && event.type === "lifecycle" && event.kind === "boot") latestBoot = { ts: r.ts, region: event.region ?? null };
+      }
+      // The latest boot wins, also over boots stored by earlier batches.
+      if (latestBoot) {
+        this.db
+          .prepare(`UPDATE apps SET region = ? WHERE id = ? AND NOT EXISTS (
+                      SELECT 1 FROM events WHERE app_id = ? AND type = 'lifecycle' AND name = 'boot' AND ts > ?)`)
+          .run(latestBoot.region, appId, appId, latestBoot.ts);
       }
       this.db
         .prepare(`
@@ -328,9 +336,10 @@ export class Store extends StoreReader {
         }
       }
       this.db
-        .prepare(`INSERT INTO rollup_hours (app_id, hour, events, rolled_at) VALUES (?, ?, ?, ?)
-                  ON CONFLICT (app_id, hour) DO UPDATE SET events = excluded.events, rolled_at = excluded.rolled_at`)
-        .run(appId, hour, this.countEventsBetween(appId, hour, end), this.now());
+        .prepare(`INSERT INTO rollup_hours (app_id, hour, events, rolled_at, version) VALUES (?, ?, ?, ?, ?)
+                  ON CONFLICT (app_id, hour)
+                  DO UPDATE SET events = excluded.events, rolled_at = excluded.rolled_at, version = excluded.version`)
+        .run(appId, hour, this.countEventsBetween(appId, hour, end), this.now(), ROLLUP_VERSION);
       const dayStart = Math.floor(hour / DAY_MS) * DAY_MS;
       this.db
         .prepare(`INSERT INTO daily_uniques (app_id, day, humans) VALUES (?, ?, ?)
@@ -339,13 +348,16 @@ export class Store extends StoreReader {
     });
   }
 
-  /** Hour starts in [from, to) that have not been rolled up yet. */
+  /**
+   * Hour starts in [from, to) not rolled up yet, or rolled by an older rollup
+   * version. Those keep their rows (baselines still work) until re-rolled.
+   */
   missingHours(appId: string, from: number, to: number): number[] {
     const first = Math.ceil(from / HOUR_MS) * HOUR_MS;
     const done = new Set(
       (this.db
-        .prepare("SELECT hour FROM rollup_hours WHERE app_id = ? AND hour >= ? AND hour < ?")
-        .all(appId, first, to) as { hour: number }[]).map((r) => r.hour),
+        .prepare("SELECT hour FROM rollup_hours WHERE app_id = ? AND hour >= ? AND hour < ? AND version >= ?")
+        .all(appId, first, to, ROLLUP_VERSION) as { hour: number }[]).map((r) => r.hour),
     );
     const out: number[] = [];
     for (let h = first; h < to; h += HOUR_MS) if (!done.has(h)) out.push(h);

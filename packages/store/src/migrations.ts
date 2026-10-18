@@ -186,7 +186,18 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE findings ADD COLUMN resolves TEXT NOT NULL DEFAULT 'misses';
   `,
+  // 5: dashboard. apps.region is the hosting region code of the app's latest
+  // boot (NULL: none sent). rollup_hours.version says which rollup shape
+  // filled the hour; version 2 adds the app-wide 'app' kind, and older hours
+  // count as missing so the backfill re-rolls them in place.
+  `
+  ALTER TABLE apps ADD COLUMN region TEXT;
+  ALTER TABLE rollup_hours ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+  `,
 ];
+
+/** Shape of the hourly rollup; hours rolled with an older version are rolled again. */
+export const ROLLUP_VERSION = 2;
 
 /** user_version after which the store purges free space (see Store.purgeFreeSpace). */
 export const MIGRATION_DROP_SALTS = 2;

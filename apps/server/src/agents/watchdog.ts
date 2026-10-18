@@ -12,7 +12,7 @@ import { statfsSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import type { App } from "@abigaail/store";
 import { errorClass } from "./evaluate.js";
-import { humanDuration, median } from "./stats.js";
+import { humanDuration, median } from "@abigaail/insights";
 import { SCHEDULE, WATCHDOG as W } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 

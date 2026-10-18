@@ -4,6 +4,7 @@ import dc from "node:diagnostics_channel";
 import type { ClientRequest, IncomingMessage, ServerResponse } from "node:http";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import {
+  cleanRegion,
   createClient,
   pathOnly,
   RouteNormaliser,
@@ -57,6 +58,8 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
   linkOutbound?: boolean;
   /** Node version used to pick defaults. For tests; default process.versions.node. */
   nodeVersion?: string;
+  /** Hosting region code sent with the boot event, e.g. "LON1". Default ABIGAAIL_REGION. */
+  region?: string;
 }
 
 /** Linking is on by default only where AsyncLocalStorage is cheap (Node >= 24). */
@@ -183,8 +186,8 @@ function timeoutLike(err: unknown): boolean {
 }
 
 /**
- * Start capturing. Reads ABIGAAIL_ENDPOINT, ABIGAAIL_INGEST_KEY, ABIGAAIL_RELEASE
- * and ABIGAAIL_ENVIRONMENT unless given. Never throws: on any problem it returns
+ * Start capturing. Reads ABIGAAIL_ENDPOINT, ABIGAAIL_INGEST_KEY, ABIGAAIL_RELEASE,
+ * ABIGAAIL_ENVIRONMENT and ABIGAAIL_REGION unless given. Never throws: on any problem it returns
  * a no-op. Calling it again returns the running instance.
  */
 export function init(opts: NodeOptions = {}): AbigaailNode {
@@ -254,7 +257,12 @@ export function init(opts: NodeOptions = {}): AbigaailNode {
         );
       }
     }
-    const instance = new NodeAdapter(client, { ...opts, linkOutbound }, report, hostOf(endpoint), sendTransient);
+    const rawRegion = opts.region ?? env.ABIGAAIL_REGION;
+    const region = cleanRegion(rawRegion);
+    if (rawRegion && !region) {
+      report(new AbigaailWarning("ABIGAAIL_REGION is not a region code (letters, digits and hyphens, 2-24); sending no region"));
+    }
+    const instance = new NodeAdapter(client, { ...opts, linkOutbound, region }, report, hostOf(endpoint), sendTransient);
     g[SINGLETON] = instance;
     return instance;
   } catch (err) {
@@ -323,7 +331,7 @@ class NodeAdapter implements AbigaailNode {
     }
     const heartbeatMs = opts.heartbeatIntervalMs ?? 60_000;
     if (heartbeatMs > 0) this.every(heartbeatMs, () => this.client.capture({ type: "lifecycle", kind: "heartbeat" }));
-    this.client.capture({ type: "lifecycle", kind: "boot" });
+    this.client.capture({ type: "lifecycle", kind: "boot", ...(opts.region ? { region: opts.region } : {}) });
   }
 
   /** Subscribe with every handler guarded: a subscriber that throws would surface in the host app. */

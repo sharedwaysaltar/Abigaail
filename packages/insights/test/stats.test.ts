@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { humanDuration, mad, median, poissonCdf, poissonUpperTail, wilsonLower } from "@abigaail/server";
+import { humanDuration, mad, median, poissonCdf, poissonUpperTail, wilsonLower } from "@abigaail/insights";
 
 describe("stats", () => {
   it("median and MAD ignore one outlier", () => {

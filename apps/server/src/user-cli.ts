@@ -1,0 +1,47 @@
+// Entry point for `npm run user:*` (see users.ts).
+
+import { loadConfig } from "./config.js";
+import { runUserCommand } from "./users.js";
+
+/** Read one line; hidden input is not echoed (raw mode on a terminal). */
+function prompt(question: string, hidden: boolean): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    process.stdout.write(question);
+    const tty = stdin.isTTY && hidden;
+    if (tty) stdin.setRawMode(true);
+    stdin.setEncoding("utf8");
+    stdin.resume();
+    let value = "";
+    const done = (err?: Error) => {
+      stdin.off("data", onData);
+      if (tty) stdin.setRawMode(false);
+      stdin.pause();
+      if (tty) process.stdout.write("\n");
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === "\r" || ch === "\n") return done();
+        if (ch === "\u0003") return done(new Error("cancelled"));
+        if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
+        else value += ch;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+
+const [command, name] = process.argv.slice(2);
+try {
+  await runUserCommand(command, name, {
+    env: process.env,
+    authDbPath: loadConfig().authDbPath,
+    prompt,
+    print: (line) => console.log(line),
+  });
+} catch (err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exitCode = 1;
+}

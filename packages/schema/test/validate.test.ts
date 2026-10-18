@@ -169,3 +169,30 @@ describe("validateBatch: parent_id", () => {
     expect(validateBatch(batch([{ ...request, parent_id: ID }])).ok).toBe(false);
   });
 });
+
+describe("validateBatch: region", () => {
+  const boot = { type: "lifecycle", event_id: ID, client_ts: 1, kind: "boot" };
+
+  it("accepts a region code on boot", () => {
+    expect(validateBatch(batch([{ ...boot, region: "LON1" }])).ok).toBe(true);
+    expect(validateBatch(batch([{ ...boot, region: "US-EAST-1" }])).ok).toBe(true);
+  });
+
+  it("rejects a region on any other lifecycle kind", () => {
+    const r = validateBatch(batch([{ ...boot, kind: "heartbeat", region: "LON1" }]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.issues[0]!.path).toBe("events.0.region");
+  });
+
+  it("rejects free text, lowercase and oversized codes without echoing them", () => {
+    for (const region of ["lon1", "London office", "LON1; DROP", "A", "X".repeat(25), "jane@example.com"]) {
+      const r = validateBatch(batch([{ ...boot, region }]));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(JSON.stringify(r.issues)).not.toContain(region);
+    }
+  });
+
+  it("rejects a region on other event types", () => {
+    expect(validateBatch(batch([{ ...request, region: "LON1" }])).ok).toBe(false);
+  });
+});

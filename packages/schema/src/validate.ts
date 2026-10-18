@@ -19,6 +19,7 @@ import {
   MAX_UA_LENGTH,
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
+  REGION_RE,
   RELEASE_RE,
   REQUEST_FLAGS,
   ROUTE_OTHER,
@@ -108,12 +109,15 @@ export const metricEventSchema = z.strictObject({
   value: z.number().finite(),
 });
 
-export const lifecycleEventSchema = z.strictObject({
-  type: z.literal("lifecycle"),
-  event_id: eventId,
-  client_ts: clientTs,
-  kind: z.enum(LIFECYCLE_KINDS),
-});
+export const lifecycleEventSchema = z
+  .strictObject({
+    type: z.literal("lifecycle"),
+    event_id: eventId,
+    client_ts: clientTs,
+    kind: z.enum(LIFECYCLE_KINDS),
+    region: z.string().regex(REGION_RE, "must be a region code").optional(),
+  })
+  .refine((e) => e.region === undefined || e.kind === "boot", { message: "region is sent on boot only", path: ["region"] });
 
 export const eventSchema = z.discriminatedUnion("type", [
   requestEventSchema,

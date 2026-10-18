@@ -139,3 +139,26 @@ describe("sanitizeEvent: parent_id", () => {
     expect(JSON.stringify(batch)).not.toContain("parent_id");
   });
 });
+
+describe("sanitizeEvent: region", () => {
+  const boot = (region: unknown, kind = "boot") => ({ type: "lifecycle", kind, region });
+
+  it("uppercases a region code and keeps it on boot", async () => {
+    const { batch } = await send([boot(" lon1 ")]);
+    expect(batch!.events[0]).toMatchObject({ kind: "boot", region: "LON1" });
+    expect(validateBatch(batch).ok).toBe(true);
+  });
+
+  it("removes an invalid region but keeps the boot", async () => {
+    const { batch, invalid } = await send([boot("London, 3rd floor"), boot(42)]);
+    expect(invalid).toBe(0);
+    for (const e of batch!.events) expect(e).not.toHaveProperty("region");
+    expect(validateBatch(batch).ok).toBe(true);
+  });
+
+  it("never puts a region on a heartbeat or shutdown", async () => {
+    const { batch } = await send([boot("LON1", "heartbeat"), boot("LON1", "shutdown")]);
+    for (const e of batch!.events) expect(e).not.toHaveProperty("region");
+    expect(validateBatch(batch).ok).toBe(true);
+  });
+});

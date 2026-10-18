@@ -467,6 +467,29 @@ describe("fail-open", () => {
     adapter = undefined;
   });
 
+  it("sends ABIGAAIL_REGION on boot only, uppercased", async () => {
+    const { batches } = start({ env: { ABIGAAIL_REGION: "lon1" }, heartbeatIntervalMs: 5 });
+    await new Promise((r) => setTimeout(r, 20));
+    await adapter!.shutdown(100);
+    const life = batches.flatMap((b) => b.events).filter((e) => e.type === "lifecycle");
+    expect(life[0]).toMatchObject({ kind: "boot", region: "LON1" });
+    expect(life.length).toBeGreaterThan(2);
+    for (const e of life.slice(1)) expect(e).not.toHaveProperty("region");
+    for (const b of batches) expect(validateBatch(b).ok).toBe(true);
+    adapter = undefined;
+  });
+
+  it("warns once without the value and sends no region when ABIGAAIL_REGION is invalid", async () => {
+    const { batches, warnings } = start({ env: { ABIGAAIL_REGION: "Jane's rack" } });
+    await adapter!.shutdown(100);
+    const boot = batches.flatMap((b) => b.events).find((e) => e.type === "lifecycle");
+    expect(boot).not.toHaveProperty("region");
+    const msgs = warnings.map((w) => String((w as Error).message)).filter((m) => m.includes("ABIGAAIL_REGION"));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).not.toContain("Jane");
+    adapter = undefined;
+  });
+
   it("its timers never keep the process alive", async () => {
     const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
     start({ metricsIntervalMs: 10, heartbeatIntervalMs: 10, flushIntervalMs: 10 });

@@ -4,14 +4,10 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/**
- * Windows end this far before now, so events still in SDK queues or being
- * retried land in the window they belong to before it is judged.
- */
-export const EVAL_LAG_MS = 45_000;
+// Shared with the dashboard, re-exported so every tunable is findable here.
+import { STATUS_FRESH_MS } from "@abigaail/insights";
 
-/** End of the windows an agent run starting at `now` judges. */
-export const windowEnd = (now: number, lagMs = EVAL_LAG_MS): number => now - lagMs;
+export { BASELINE, EVAL_LAG_MS, STATUS_FRESH_MS, windowEnd } from "@abigaail/insights";
 
 export const SCHEDULE = {
   health: { everyMs: MINUTE, timeoutMs: 20_000 },
@@ -27,7 +23,7 @@ export const FINDINGS = {
   /** Evaluated runs without a finding before it resolves (AGENTS.md: 3 good runs). */
   resolveAfter: 3,
   /** Status turns grey when Health has not completed a run for this long. */
-  statusFreshMs: 3 * MINUTE,
+  statusFreshMs: STATUS_FRESH_MS,
 };
 
 export const ROLLUP = {
@@ -76,21 +72,6 @@ export const WATCHDOG = {
   growthMinSpanMs: HOUR,
   /** /healthz turns 503 when the Watchdog has not completed a run for this long. */
   healthzStaleMs: 3 * MINUTE,
-};
-
-/** Which past hours count as "normal" (docs/AGENTS.md principle 1). */
-export const BASELINE = {
-  /** Same hour-of-week over this many past weeks... */
-  weeks: 4,
-  /** ...used when at least this many of them have data. */
-  minWeeks: 2,
-  /** Otherwise the same hour on this many past days, if at least minDays have data. */
-  days: 7,
-  minDays: 2,
-  /** A slot's p95 counts towards a route's normal only with this many requests. */
-  minSlotRequests: 5,
-  /** Slots with a usable p95 needed for a latency normal. */
-  minLatencySlots: 2,
 };
 
 export const HEALTH = {
