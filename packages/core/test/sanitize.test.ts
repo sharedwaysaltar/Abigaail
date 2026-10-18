@@ -116,3 +116,26 @@ describe("sanitizeEvent: every queued event is one ingest accepts", () => {
     expect(cleanHost(undefined)).toBe("invalid-host");
   });
 });
+
+describe("sanitizeEvent: parent_id", () => {
+  const PARENT = "3f2b8c1e-9a4d-4e7f-8b2a-1c5d6e7f8a9b";
+
+  it("keeps a UUID parent_id on outbound and error events", async () => {
+    const { batch } = await send([
+      { ...outbound("api.stripe.com"), parent_id: PARENT },
+      { type: "error", error_type: "TypeError", handled: true, parent_id: PARENT },
+    ]);
+    expect(validateBatch(batch).ok).toBe(true);
+    expect(batch!.events.map((e) => (e as { parent_id?: string }).parent_id)).toEqual([PARENT, PARENT]);
+  });
+
+  it("drops an invalid parent_id but keeps the event, and never puts one on a request", async () => {
+    const { batch, invalid } = await send([
+      { ...outbound("api.stripe.com"), parent_id: "jane@example.com" },
+      { type: "request", method: "GET", route: "/", status: 200, duration_ms: 1, parent_id: PARENT },
+    ]);
+    expect(invalid).toBe(0);
+    expect(validateBatch(batch).ok).toBe(true);
+    expect(JSON.stringify(batch)).not.toContain("parent_id");
+  });
+});

@@ -119,6 +119,8 @@ export interface ErrorEvent extends BaseEvent {
   route?: string;
   handled: boolean;
   frames?: StackFrame[];
+  /** `event_id` of the inbound request this error happened in, if known. */
+  parent_id?: string;
 }
 
 export interface OutboundEvent extends BaseEvent {
@@ -129,6 +131,11 @@ export interface OutboundEvent extends BaseEvent {
   status?: number;
   duration_ms: number;
   outcome: OutboundOutcome;
+  /**
+   * `event_id` of the inbound request that made this call, if known. Not a new
+   * identifier: it repeats an id the request event already carries.
+   */
+  parent_id?: string;
 }
 
 export interface MetricEvent extends BaseEvent {

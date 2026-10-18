@@ -19,6 +19,8 @@ export interface TestServer {
   clock: { now: number };
   /** Query the database file over a separate connection, bypassing the Store API. */
   raw<T>(sql: string): T[];
+  /** Close the HTTP server only; the store stays open until close(). */
+  stopListening(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -46,6 +48,10 @@ export async function startServer(opts: Partial<Omit<ServerOptions, "store" | "n
       } finally {
         db.close();
       }
+    },
+    async stopListening() {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     },
     async close() {
       server.closeAllConnections();

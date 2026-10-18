@@ -85,6 +85,7 @@ export const errorEventSchema = z.strictObject({
     )
     .max(LIMITS.maxStackFrames)
     .optional(),
+  parent_id: eventId.optional(),
 });
 
 export const outboundEventSchema = z.strictObject({
@@ -96,6 +97,7 @@ export const outboundEventSchema = z.strictObject({
   status: z.number().int().min(100).max(599).optional(),
   duration_ms: durationMs,
   outcome: z.enum(OUTBOUND_OUTCOMES),
+  parent_id: eventId.optional(),
 });
 
 export const metricEventSchema = z.strictObject({

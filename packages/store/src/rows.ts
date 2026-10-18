@@ -30,6 +30,8 @@ export interface EventRow {
   browser: string | null;
   bot_class: string | null;
   attrs: string | null;
+  /** event_id of the inbound request (outbound and error events only). */
+  parent_id: string | null;
 }
 
 function attrsJson(attrs: Record<string, unknown>): string | null {
@@ -55,6 +57,7 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
     browser: null,
     bot_class: null,
     attrs: null,
+    parent_id: null,
   };
   switch (event.type) {
     case "request":
@@ -80,6 +83,7 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
         handled: event.handled,
         frames: event.frames?.map((f) => ({ file: f.file, line: f.line, col: f.col, fn: f.fn })),
       });
+      row.parent_id = event.parent_id ?? null;
       break;
     case "outbound":
       row.host = event.host;
@@ -87,6 +91,7 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
       row.status = event.status ?? null;
       row.duration_ms = event.duration_ms;
       row.attrs = attrsJson({ outcome: event.outcome });
+      row.parent_id = event.parent_id ?? null;
       break;
     case "metric":
       row.name = event.name;

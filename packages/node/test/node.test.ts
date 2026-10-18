@@ -1,7 +1,7 @@
 import http from "node:http";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { init, type AbigaailNode, type NodeOptions } from "@abigaail/node";
+import { defaultLinkOutbound, init, type AbigaailNode, type NodeOptions } from "@abigaail/node";
 import type { Transport } from "@abigaail/core";
 import type { AbigaailEvent, Batch, RequestEvent } from "@abigaail/schema";
 import { validateBatch } from "@abigaail/schema/validate";
@@ -33,6 +33,8 @@ function start(opts: NodeOptions = {}) {
     transport,
     onInternalError: (e) => warnings.push(e),
     env: {},
+    // Pinned so defaults do not depend on the Node running the tests.
+    nodeVersion: "24.0.0",
     ...opts,
   });
   const events = async (type?: AbigaailEvent["type"]) => {
@@ -242,6 +244,146 @@ describe("outbound calls", () => {
     await (await fetch(`${base}/ingest`)).text();
     expect(await events("outbound")).toHaveLength(0);
     expect(await events("request")).toHaveLength(1);
+  });
+});
+
+describe("linking outbound calls to their inbound request", () => {
+  type Linked = { type: string; host?: string; parent_id?: string; event_id: string; route?: string };
+
+  /** An app server whose handler calls `upstream` (fetch, then http.request) before answering. */
+  async function appCallingUpstream(upstream: string, delayMs = 0): Promise<string> {
+    return server(async (q, s) => {
+      const tag = new URL(q.url ?? "/", "http://x").pathname.slice(1);
+      await new Promise((r) => setTimeout(r, delayMs));
+      await (await fetch(`${upstream}/f?${tag}`)).text();
+      await new Promise<void>((r) => http.get(`${upstream}/h?${tag}`, (res) => res.resume().on("end", r)));
+      adapter!.captureError(new TypeError("x"));
+      s.end(tag);
+    });
+  }
+
+  // The test client reaches the app by IP (reported as "ip-literal"); the
+  // handlers reach the upstream as "localhost". Only the latter are counted.
+  const viaIp = (url: string) => url.replace("localhost", "127.0.0.1");
+  const byType = (all: Linked[]) => ({
+    requests: all.filter((e) => e.type === "request"),
+    outbound: all.filter((e) => e.type === "outbound" && e.host === "localhost"),
+    errors: all.filter((e) => e.type === "error"),
+  });
+
+  it("outbound calls and errors made while handling a request carry its event_id", async () => {
+    const { events } = start({ ignore: ["/f", "/h"] });
+    const upstream = await server();
+    const app = await appCallingUpstream(upstream);
+    expect(await raw(viaIp(app), "/one")).toBe(200);
+    const { requests, outbound, errors } = byType((await events()) as Linked[]);
+    expect(requests).toHaveLength(1);
+    expect(outbound).toHaveLength(2);
+    for (const e of [...outbound, ...errors]) expect(e.parent_id).toBe(requests[0]!.event_id);
+  });
+
+  it("concurrent requests do not cross-link", async () => {
+    const { events } = start({ ignore: ["/f", "/h"] });
+    const upstream = await server();
+    // The first request waits longest, so the two handlers interleave.
+    const app = await server(async (q, s) => {
+      const tag = new URL(q.url ?? "/", "http://x").pathname.slice(1);
+      await new Promise((r) => setTimeout(r, tag === "a" ? 40 : 5));
+      await (await fetch(`${upstream}/f?${tag}`)).text();
+      s.end(tag);
+    });
+    await Promise.all([raw(viaIp(app), "/a"), raw(viaIp(app), "/b")]);
+    const { requests, outbound } = byType((await events()) as Linked[]);
+    expect(requests).toHaveLength(2);
+    expect(outbound).toHaveLength(2);
+    const ids = new Set(requests.map((r) => r.event_id));
+    expect(new Set(outbound.map((o) => o.parent_id))).toEqual(ids);
+  });
+
+  it("two requests pipelined in one TCP packet on one socket each link to their own request", async () => {
+    const { events } = start({ ignore: ["/f/*"] });
+    const upstream = await server();
+    const app = await server(async (q, s) => {
+      const tag = new URL(q.url ?? "/", "http://x").pathname.slice(1);
+      await new Promise((r) => setTimeout(r, tag === "p1" ? 30 : 1));
+      await (await fetch(`${upstream}/f/${tag}`)).text();
+      s.end(tag);
+    });
+    const { port } = new URL(app);
+    await new Promise<void>((resolve, reject) => {
+      const sock = net.connect(Number(port), "127.0.0.1", () =>
+        sock.write("GET /p1 HTTP/1.1\r\nHost: x\r\n\r\nGET /p2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+      );
+      sock.on("data", () => {});
+      sock.on("end", resolve);
+      sock.on("error", reject);
+    });
+    const all = (await events()) as Linked[];
+    const { requests, outbound } = byType(all);
+    const idOf = (route: string) => requests.find((r) => r.route === route)!.event_id;
+    // Outbound events are captured in completion order: p2's call finishes first.
+    expect(outbound.map((o) => o.parent_id)).toEqual([idOf("/p2"), idOf("/p1")]);
+  });
+
+  it("an outbound call outside any request has no parent_id", async () => {
+    const { events } = start();
+    const upstream = await server();
+    await (await fetch(`${upstream}/x`)).text();
+    const [o] = (await events("outbound")) as Linked[];
+    expect(o!.parent_id).toBeUndefined();
+  });
+
+  it("linkOutbound: false sends no parent_id at all", async () => {
+    const { events } = start({ linkOutbound: false, ignore: ["/f", "/h"] });
+    const upstream = await server();
+    const app = await appCallingUpstream(upstream);
+    expect(await raw(viaIp(app), "/one")).toBe(200);
+    const all = (await events()) as Linked[];
+    expect(byType(all).outbound).toHaveLength(2);
+    expect(JSON.stringify(all)).not.toContain("parent_id");
+  });
+});
+
+describe("linkOutbound default per Node major", () => {
+  it("is on from Node 24, off before", () => {
+    expect(defaultLinkOutbound("24.0.0")).toBe(true);
+    expect(defaultLinkOutbound("v24.16.0")).toBe(true);
+    expect(defaultLinkOutbound("26.1.0")).toBe(true);
+    expect(defaultLinkOutbound("22.13.0")).toBe(false);
+    expect(defaultLinkOutbound("23.11.1")).toBe(false);
+    expect(defaultLinkOutbound("garbage")).toBe(false);
+  });
+
+  async function outboundInRequest(opts: NodeOptions) {
+    const { events, warnings } = start({ ignore: ["/f"], ...opts });
+    const upstream = await server();
+    const app = await server(async (_q, s) => {
+      await (await fetch(`${upstream}/f`)).text();
+      s.end("ok");
+    });
+    await raw(app.replace("localhost", "127.0.0.1"), "/x");
+    const out = (await events("outbound")).filter((e) => (e as { host: string }).host === "localhost");
+    const linkWarnings = warnings.filter((w) => String((w as Error).message).includes("linkOutbound: true"));
+    return { parent: (out[0] as { parent_id?: string }).parent_id, linkWarnings };
+  }
+
+  it("Node 24: linked, no warning", async () => {
+    const { parent, linkWarnings } = await outboundInRequest({ nodeVersion: "24.16.0" });
+    expect(parent).toBeDefined();
+    expect(linkWarnings).toHaveLength(0);
+  });
+
+  it("Node 22: off by default with exactly one warning", async () => {
+    const { parent, linkWarnings } = await outboundInRequest({ nodeVersion: "22.13.0" });
+    expect(parent).toBeUndefined();
+    expect(linkWarnings).toHaveLength(1);
+    expect((linkWarnings[0] as Error).name).toBe("AbigaailWarning");
+  });
+
+  it("Node 22 with linkOutbound: true links and does not warn", async () => {
+    const { parent, linkWarnings } = await outboundInRequest({ nodeVersion: "22.13.0", linkOutbound: true });
+    expect(parent).toBeDefined();
+    expect(linkWarnings).toHaveLength(0);
   });
 });
 

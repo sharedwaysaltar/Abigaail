@@ -1,8 +1,12 @@
 // App administration: `npm run app:create -- <name>`, `app:disable -- <name>`, `app:list`.
 // Every change is written to the audit log with actor "cli".
 // `npm run events:tail -- <name> [n]` prints recent events (read-only, not audited).
+// `npm run findings -- <name>` prints the app's status and open findings.
+// `npm run agents:once` runs the rollup and every agent once, then prints findings.
 
-import { openStore } from "@abigaail/store";
+import { openStore, type Finding } from "@abigaail/store";
+import { Runner } from "./agents/runner.js";
+import { FINDINGS } from "./agents/thresholds.js";
 import { loadConfig } from "./config.js";
 
 const [command, name, countArg] = process.argv.slice(2);
@@ -13,7 +17,25 @@ function fmt(ms: number | null): string {
   return ms === null ? "-" : new Date(ms).toISOString();
 }
 
-try {
+const ICON: Record<string, string> = { red: "🔴", amber: "🟠", grey: "⚪", green: "🟢" };
+
+function printFinding(f: Finding): void {
+  console.log(`  [${f.severity}] ${f.summary}`);
+  if (f.cause) console.log(`      cause:  ${f.cause}`);
+  console.log(`      action: ${f.action}`);
+  console.log(`      ${f.fingerprint}  hits=${f.hits} misses=${f.misses}  since ${fmt(f.first_seen)}`);
+}
+
+function printStatus(name: string): void {
+  const app = store.appByName(name);
+  if (!app) throw new Error(`no app named "${name}"`);
+  const { status, findings } = store.appStatus(app.id, { now: Date.now(), freshMs: FINDINGS.statusFreshMs });
+  console.log(`${ICON[status]} ${app.name}: ${status}`);
+  if (!findings.length) console.log("  no open findings");
+  for (const f of findings) printFinding(f);
+}
+
+async function main(): Promise<void> {
   switch (command) {
     case "create": {
       if (!name) throw new Error("usage: npm run app:create -- <name>");
@@ -54,13 +76,41 @@ try {
           : e.type === "metric" ? `${e.name}=${e.value}`
           : [e.name, e.route].filter(Boolean).join(" ");
         const who = e.visitor_hash ? ` visitor=${e.visitor_hash.slice(0, 8)} ${e.bot_class}/${e.browser ?? "-"}` : "";
-        console.log(`${fmt(e.ts)}  ${e.type.padEnd(9)} ${what}${who}${e.attrs ? `  ${e.attrs}` : ""}`);
+        const ids = e.type === "request" ? `  id=${e.event_id.slice(0, 8)}` : e.parent_id ? `  parent=${e.parent_id.slice(0, 8)}` : "";
+        console.log(`${fmt(e.ts)}  ${e.type.padEnd(9)} ${what}${who}${ids}${e.attrs ? `  ${e.attrs}` : ""}`);
       }
       break;
     }
+    case "findings": {
+      if (!name) throw new Error("usage: npm run findings -- <name>");
+      printStatus(name);
+      const system = store.systemFindings();
+      if (system.length) {
+        console.log("\nAbigaail itself:");
+        for (const f of system) printFinding(f);
+      }
+      break;
+    }
+    case "agents-once": {
+      const runner = new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, log: (m) => console.error(m) });
+      for (const { run, findings } of await runner.runOnce()) {
+        const err = run.error_class ? ` (${run.error_class})` : "";
+        console.log(`${run.agent}: ${run.outcome}${err}, ${findings} finding(s), ${run.finished_at - run.started_at} ms`);
+      }
+      console.log("");
+      for (const app of store.listApps()) printStatus(app.name);
+      const system = store.systemFindings();
+      console.log(system.length ? "\nAbigaail itself:" : "\nAbigaail itself: no open findings");
+      for (const f of system) printFinding(f);
+      break;
+    }
     default:
-      throw new Error("usage: cli.js create <name> | disable <name> | list | events <name> [count]");
+      throw new Error("usage: cli.js create <name> | disable <name> | list | events <name> [count] | findings <name> | agents-once");
   }
+}
+
+try {
+  await main();
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));
   process.exitCode = 1;

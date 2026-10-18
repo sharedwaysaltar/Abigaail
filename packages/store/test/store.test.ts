@@ -196,6 +196,24 @@ describe("migrations", () => {
     expect(onDisk(current)).toBe(false);
   });
 
+  it("migration 3 upgrades a version 2 database with events in place", () => {
+    store.close();
+    const path = join(dir, "v2.db");
+    const v2 = new DatabaseSync(path);
+    v2.exec(MIGRATIONS[0]!);
+    v2.exec(MIGRATIONS[1]!);
+    v2.exec("PRAGMA user_version = 2");
+    v2.prepare("INSERT INTO apps (id, name, key_hash, created_at) VALUES ('a', 'a', 'h', 1)").run();
+    v2.prepare(`INSERT INTO events (app_id, event_id, ts, received_at, client_ts, type, release, environment)
+                VALUES ('a', 'e1', 1, 1, 1, 'lifecycle', 'r', 'test')`).run();
+    v2.close();
+
+    store = openStore(path);
+    expect(store.recentEvents("a")).toMatchObject([{ event_id: "e1", parent_id: null }]);
+    expect(store.openFindings("a")).toEqual([]);
+    expect(store.missingHours("a", 0, 3_600_000)).toEqual([0]);
+  });
+
   it("reopening an existing database does not re-run migrations or lose data", () => {
     const { app } = store.createApp("a", "test");
     store.insertBatch(app.id, batch([request()]));

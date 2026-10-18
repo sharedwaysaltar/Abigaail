@@ -40,6 +40,7 @@ const isInt = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER): v is num
   Number.isInteger(v) && (v as number) >= min && (v as number) <= max;
 const isStatus = (v: unknown): v is number => isInt(v, 100, 599);
 const isDuration = (v: unknown): v is number => isNum(v) && v >= 0 && v <= MAX_DURATION_MS;
+const isEventId = (v: unknown): v is string => typeof v === "string" && EVENT_ID_RE.test(v);
 
 const IPV4_MAPPED_RE = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i;
 
@@ -97,7 +98,7 @@ function cleanFlags(flags: unknown): RequestFlag[] | undefined {
 export function sanitizeEvent(input: unknown, eventId: () => string, now: () => number): AbigaailEvent | undefined {
   if (!input || typeof input !== "object") return undefined;
   const e = input as Raw;
-  const event_id = typeof e.event_id === "string" && EVENT_ID_RE.test(e.event_id) ? e.event_id : eventId();
+  const event_id = isEventId(e.event_id) ? e.event_id : eventId();
   const client_ts = isInt(e.client_ts, 0) ? e.client_ts : Math.max(0, Math.floor(now()));
   const base = { event_id, client_ts };
 
@@ -133,6 +134,7 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
       if (e.route !== undefined) out.route = isRoute(e.route) ? e.route : ROUTE_OTHER;
       const frames = cleanFrames(e.frames);
       if (frames) out.frames = frames;
+      if (isEventId(e.parent_id)) out.parent_id = e.parent_id;
       return out;
     }
     case "outbound": {
@@ -148,6 +150,7 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
         outcome: e.outcome,
       };
       if (isStatus(e.status)) out.status = e.status;
+      if (isEventId(e.parent_id)) out.parent_id = e.parent_id;
       return out;
     }
     case "metric":
