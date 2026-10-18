@@ -1,0 +1,16 @@
+{
+  "name": "@abigaail/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail core SDK: fail-open, bounded, non-blocking event client. Zero runtime dependencies.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@abigaail/schema": "0.1.0"
+  }
+}

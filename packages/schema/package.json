@@ -1,0 +1,14 @@
+{
+  "name": "@abigaail/schema",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail event schema: types (zero-dependency) and server-side validators.",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./validate": { "types": "./dist/validate.d.ts", "default": "./dist/validate.js" }
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}
