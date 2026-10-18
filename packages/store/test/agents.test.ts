@@ -135,6 +135,20 @@ describe("recordRun", () => {
     expect(store.recentRuns("health").map((r) => r.outcome)).toEqual(["error", "skipped", "timeout", "error", "ok"]);
   });
 
+  it("a fact resolves on the first evaluated run without it; a signal needs 3", () => {
+    store.recordRun(run("health"), [{ ...finding(appA, "stopped", "warning"), fact: true }, finding(appA)], [appA]);
+    store.recordRun(run("health"), [], [appA]);
+    expect(store.openFindings(appA).map((f) => f.signal)).toEqual(["5xx"]);
+    expect(store.findingHistory(appA).find((f) => f.signal === "stopped")).toMatchObject({ state: "resolved", resolves: "fact", misses: 1 });
+  });
+
+  it("a fact stays open while its app cannot be evaluated", () => {
+    store.recordRun(run("health"), [{ ...finding(appA, "stopped", "warning"), fact: true }], [appA]);
+    store.recordRun(run("health", "ok", 1), [], [appB]);
+    store.recordRun(run("health", "timeout"), [], [appA]);
+    expect(store.openFindings(appA)).toMatchObject([{ signal: "stopped", misses: 0 }]);
+  });
+
   it("does not touch other agents' findings", () => {
     store.recordRun(run("health"), [finding(appA)], [appA]);
     for (let i = 0; i < 3; i++) store.recordRun(run("usage"), [], [appA]);

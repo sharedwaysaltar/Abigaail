@@ -44,6 +44,8 @@ export interface FindingInput {
   cause?: string | null;
   action: string;
   evidence: Record<string, unknown>;
+  /** A state rather than a signal: resolves on the first evaluated run without it. */
+  fact?: boolean;
 }
 
 export interface RunInput {
@@ -237,7 +239,8 @@ export class Store extends StoreReader {
    * Each emitted finding is upserted by (app, fingerprint): hits+1, misses
    * reset. An open finding of this agent that was not emitted gets misses+1
    * only if its scope is in `evaluated` (apps the agent finished successfully;
-   * null = Abigaail itself), and resolves after `resolveAfter` such runs. Runs
+   * null = Abigaail itself), and resolves after `resolveAfter` such runs, or
+   * after the first one if it is a fact (FindingInput.fact). Runs
    * that failed, timed out or were skipped change no finding, so an agent that
    * cannot see an app never "recovers" it.
    */
@@ -264,33 +267,36 @@ export class Store extends StoreReader {
           AND resolved_at >= ? ORDER BY resolved_at DESC, id DESC LIMIT 1`);
       const refresh = this.db.prepare(`
         UPDATE findings SET state = 'open', resolved_at = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
-          misses = 0, signal = ?, severity = ?, summary = ?, cause = ?, action = ?, evidence = ?, last_seen = ?
+          misses = 0, signal = ?, severity = ?, summary = ?, cause = ?, action = ?, evidence = ?, resolves = ?,
+          last_seen = ?
         WHERE id = ?`);
       const insert = this.db.prepare(`
         INSERT INTO findings (app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence,
-                              hits, misses, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 1, 0, ?, ?)`);
+                              resolves, hits, misses, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1, 0, ?, ?)`);
 
       for (const f of emitted.values()) {
         const scope = f.app_id ?? "";
         const evidence = JSON.stringify(f.evidence);
+        const resolves = f.fact ? "fact" : "misses";
         const existing = (findOpen.get(scope, f.fingerprint) ?? findRecent.get(scope, f.fingerprint, now - cooldownMs)) as
           | { id: number }
           | undefined;
         if (existing) {
-          refresh.run(f.signal, f.severity, f.summary, f.cause ?? null, f.action, evidence, now, existing.id);
+          refresh.run(f.signal, f.severity, f.summary, f.cause ?? null, f.action, evidence, resolves, now, existing.id);
         } else {
           insert.run(f.app_id, f.agent, f.fingerprint, f.signal, f.severity, f.summary, f.cause ?? null, f.action,
-            evidence, now, now);
+            evidence, resolves, now, now);
         }
       }
 
       const openOfScope = this.db.prepare(
         "SELECT id, fingerprint FROM findings WHERE agent = ? AND coalesce(app_id, '') = ? AND state = 'open'");
+      // A fact resolves on its first miss; a signal after resolveAfter misses.
       const miss = this.db.prepare(`
         UPDATE findings SET misses = misses + 1,
-          state = CASE WHEN misses + 1 >= ? THEN 'resolved' ELSE state END,
-          resolved_at = CASE WHEN misses + 1 >= ? THEN ? ELSE resolved_at END
+          state = CASE WHEN resolves = 'fact' OR misses + 1 >= ? THEN 'resolved' ELSE state END,
+          resolved_at = CASE WHEN resolves = 'fact' OR misses + 1 >= ? THEN ? ELSE resolved_at END
         WHERE id = ?`);
       for (const appId of new Set(evaluated)) {
         const scope = appId ?? "";

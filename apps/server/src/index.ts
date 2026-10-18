@@ -7,7 +7,7 @@ export type { BotClass, BrowserFamily } from "./derive.js";
 export { TokenBucket } from "./ratelimit.js";
 export { openSaltFile, SaltFile, SALT_FILE_BYTES } from "./salt.js";
 export type { SaltSource } from "./salt.js";
-export { Runner } from "./agents/runner.js";
+export { findingInputs, Runner } from "./agents/runner.js";
 export type { RunnerOptions, RunReport } from "./agents/runner.js";
 export { evaluate, errorClass } from "./agents/evaluate.js";
 export { AGENTS, agentByName } from "./agents/registry.js";

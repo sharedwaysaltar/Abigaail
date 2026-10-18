@@ -1,7 +1,7 @@
 import http from "node:http";
 import net, { type AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { init, type AbigaailNode, type NodeOptions } from "@abigaail/node";
+import { defaultLinkOutbound, init, type AbigaailNode, type NodeOptions } from "@abigaail/node";
 import type { Transport } from "@abigaail/core";
 import type { AbigaailEvent, Batch, RequestEvent } from "@abigaail/schema";
 import { validateBatch } from "@abigaail/schema/validate";
@@ -33,6 +33,8 @@ function start(opts: NodeOptions = {}) {
     transport,
     onInternalError: (e) => warnings.push(e),
     env: {},
+    // Pinned so defaults do not depend on the Node running the tests.
+    nodeVersion: "24.0.0",
     ...opts,
   });
   const events = async (type?: AbigaailEvent["type"]) => {
@@ -339,6 +341,49 @@ describe("linking outbound calls to their inbound request", () => {
     const all = (await events()) as Linked[];
     expect(byType(all).outbound).toHaveLength(2);
     expect(JSON.stringify(all)).not.toContain("parent_id");
+  });
+});
+
+describe("linkOutbound default per Node major", () => {
+  it("is on from Node 24, off before", () => {
+    expect(defaultLinkOutbound("24.0.0")).toBe(true);
+    expect(defaultLinkOutbound("v24.16.0")).toBe(true);
+    expect(defaultLinkOutbound("26.1.0")).toBe(true);
+    expect(defaultLinkOutbound("22.13.0")).toBe(false);
+    expect(defaultLinkOutbound("23.11.1")).toBe(false);
+    expect(defaultLinkOutbound("garbage")).toBe(false);
+  });
+
+  async function outboundInRequest(opts: NodeOptions) {
+    const { events, warnings } = start({ ignore: ["/f"], ...opts });
+    const upstream = await server();
+    const app = await server(async (_q, s) => {
+      await (await fetch(`${upstream}/f`)).text();
+      s.end("ok");
+    });
+    await raw(app.replace("localhost", "127.0.0.1"), "/x");
+    const out = (await events("outbound")).filter((e) => (e as { host: string }).host === "localhost");
+    const linkWarnings = warnings.filter((w) => String((w as Error).message).includes("linkOutbound: true"));
+    return { parent: (out[0] as { parent_id?: string }).parent_id, linkWarnings };
+  }
+
+  it("Node 24: linked, no warning", async () => {
+    const { parent, linkWarnings } = await outboundInRequest({ nodeVersion: "24.16.0" });
+    expect(parent).toBeDefined();
+    expect(linkWarnings).toHaveLength(0);
+  });
+
+  it("Node 22: off by default with exactly one warning", async () => {
+    const { parent, linkWarnings } = await outboundInRequest({ nodeVersion: "22.13.0" });
+    expect(parent).toBeUndefined();
+    expect(linkWarnings).toHaveLength(1);
+    expect((linkWarnings[0] as Error).name).toBe("AbigaailWarning");
+  });
+
+  it("Node 22 with linkOutbound: true links and does not warn", async () => {
+    const { parent, linkWarnings } = await outboundInRequest({ nodeVersion: "22.13.0", linkOutbound: true });
+    expect(parent).toBeDefined();
+    expect(linkWarnings).toHaveLength(0);
   });
 });
 

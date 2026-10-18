@@ -18,8 +18,10 @@ export interface AgentConfig {
   saltPath?: string;
   /** Every scheduled agent and maintenance step, for the Watchdog. */
   schedules: AgentSchedule[];
-  /** When the runner started, so a new install is not "stalled" at once. */
+  /** When the runner started, so a new install or a restart is not "stalled" at once. */
   runnerStartedAt: number;
+  /** When any agent last finished before this start: the end of Abigaail's last up period. */
+  lastRunBeforeStart: number | null;
 }
 
 export interface AgentContext {
@@ -45,6 +47,11 @@ export interface AgentFinding {
   action: string;
   /** Numbers, windows and baselines behind the finding. */
   evidence: Record<string, unknown>;
+  /**
+   * A state, not a signal ("never sent an event", "stopped cleanly"): it
+   * resolves on the first run where it is no longer true, not after 3 misses.
+   */
+  fact?: boolean;
 }
 
 export interface Agent extends AgentSchedule {

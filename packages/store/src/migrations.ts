@@ -180,6 +180,12 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (app_id, day)
   );
   `,
+  // 4: how a finding resolves. 'misses': after N evaluated runs without it
+  // (signals that can flap). 'fact': on the first evaluated run where it is no
+  // longer true (states such as "never sent an event" or "stopped cleanly").
+  `
+  ALTER TABLE findings ADD COLUMN resolves TEXT NOT NULL DEFAULT 'misses';
+  `,
 ];
 
 /** user_version after which the store purges free space (see Store.purgeFreeSpace). */

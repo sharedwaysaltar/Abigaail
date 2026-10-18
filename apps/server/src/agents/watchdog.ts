@@ -2,6 +2,11 @@
 // heartbeat rhythm and separates a dead process from a revoked or rate-limited
 // key, then watches the agents and Abigaail itself. "No human traffic while
 // heartbeats continue" belongs to Health, not here.
+//
+// After Abigaail itself restarts, apps may still be backing off (up to the
+// SDK's longest breaker cooldown), so for a grace period silence is reported
+// as "reconnecting" (grey) rather than critical: Abigaail's own downtime must
+// never turn every app red.
 
 import { statfsSync, statSync } from "node:fs";
 import { dirname } from "node:path";
@@ -68,6 +73,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
       summary: `${app.name} has never sent an event.`,
       action: "Set ABIGAAIL_ENDPOINT, ABIGAAIL_INGEST_KEY and ABIGAAIL_RELEASE in the app and start it.",
       evidence: { created_at: app.created_at },
+      fact: true,
     });
     return out;
   }
@@ -96,6 +102,19 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
       cause: "The process shut down normally (a deploy, a stop, or a scale-down).",
       action: "If this was not planned, start the app again.",
       evidence: { ...evidence, shutdown_at: last.ts },
+      fact: true,
+    });
+  } else if (ctx.now - ctx.config.runnerStartedAt < W.sdkMaxBackoffMs + silentAfter) {
+    const graceEnds = ctx.config.runnerStartedAt + W.sdkMaxBackoffMs + silentAfter;
+    out.push({
+      signal: "reconnecting",
+      subject: "",
+      severity: "unknown",
+      summary: `Waiting for ${app.name} to reconnect after Abigaail restarted; nothing received for ${humanDuration(quietFor)}.`,
+      cause: "While Abigaail was down the app's SDK backed off, and it can wait up to 5 min before trying again.",
+      action: `Nothing yet. If ${app.name} has not reconnected by ${new Date(graceEnds).toISOString()}, it is reported as silent.`,
+      evidence: { ...evidence, runner_started_at: ctx.config.runnerStartedAt, grace_ends_at: graceEnds },
+      fact: true,
     });
   } else {
     out.push({
@@ -116,14 +135,15 @@ function agentHealth(ctx: AgentContext): AgentFinding[] {
   for (const s of ctx.config.schedules) {
     const runs = ctx.store.recentRuns(s.name, Math.max(W.failingRuns, W.slowRuns));
     const lastOk = ctx.store.lastOkRun(s.name);
-    const since = lastOk ?? ctx.config.runnerStartedAt;
+    // A run before Abigaail restarted says nothing about this process.
+    const since = Math.max(lastOk ?? 0, ctx.config.runnerStartedAt);
     const staleFor = ctx.now - since;
     if (staleFor > W.stalledFactor * s.everyMs) {
       out.push({
         signal: "agent_stalled",
         subject: s.name,
         severity: "critical",
-        summary: lastOk === undefined
+        summary: lastOk === undefined || lastOk < ctx.config.runnerStartedAt
           ? `Agent ${s.name} has not completed a run since Abigaail started ${humanDuration(staleFor)} ago.`
           : `Agent ${s.name} has not completed a run for ${humanDuration(staleFor)}; it runs every ${humanDuration(s.everyMs)}.`,
         cause: "The agent keeps failing, timing out or being skipped, so its view of the apps is out of date.",
@@ -160,6 +180,28 @@ function agentHealth(ctx: AgentContext): AgentFinding[] {
     }
   }
   return out;
+}
+
+/**
+ * Abigaail's own downtime, from the gap in its run history before this start.
+ * Reported (as one deduplicated info finding) during the restart grace period.
+ */
+function downtime(ctx: AgentContext): AgentFinding[] {
+  const from = ctx.config.lastRunBeforeStart;
+  const to = ctx.config.runnerStartedAt;
+  if (from === null || to - from < W.downMinMs) return [];
+  if (ctx.now - to >= W.sdkMaxBackoffMs + W.silentMinMs) return [];
+  const iso = (t: number) => new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  return [{
+    signal: "abigaail_down",
+    subject: String(from),
+    severity: "info",
+    summary: `Abigaail was down from ${iso(from)} to ${iso(to)} (${humanDuration(to - from)}).`,
+    cause: "Apps kept their events queued and retried; anything beyond their queue size, or sent during a long breaker cooldown, is missing.",
+    action: "Expect a gap in charts for this period. If it was not a planned restart, check the server log and the host.",
+    evidence: { down_from: from, down_to: to, down_ms: to - from },
+    fact: true,
+  }];
 }
 
 function database(ctx: AgentContext): AgentFinding[] {
@@ -250,6 +292,7 @@ export const watchdog: Agent = {
   forApp,
   forSystem: (ctx) => [
     ...guarded(ctx, "agents", agentHealth),
+    ...guarded(ctx, "downtime", downtime),
     ...guarded(ctx, "disk", database),
     ...guarded(ctx, "salt", salt),
     ...guarded(ctx, "ingest keys", unknownKeys),

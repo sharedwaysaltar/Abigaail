@@ -47,6 +47,15 @@ export const WATCHDOG = {
   /** Silent after max(silentFactor × usual gap, silentMinMs). */
   silentFactor: 3,
   silentMinMs: 3 * MINUTE,
+  /**
+   * The SDK's longest circuit-breaker cooldown (maxCooldownMs in
+   * @abigaail/core). After Abigaail restarts, an app may wait this long before
+   * it sends again, so silence within this + the silent threshold of the
+   * restart is "reconnecting" (grey), never critical.
+   */
+  sdkMaxBackoffMs: 5 * MINUTE,
+  /** A gap this long in Abigaail's own run history is reported as downtime. */
+  downMinMs: 3 * MINUTE,
   /** Window for ingest refusals (403, 429, unknown-key 401). */
   rejectionWindowMs: 5 * MINUTE,
   /** Unknown-key requests in the window before Abigaail reports them. */

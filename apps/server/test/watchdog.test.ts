@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { evaluate, watchdog, type AgentContext } from "@abigaail/server";
+import { evaluate, findingInputs, watchdog, type AgentContext } from "@abigaail/server";
 import { openStore, type App, type RunInput, type Store } from "@abigaail/store";
 
 const MIN = 60_000;
@@ -42,8 +42,10 @@ function ctx(overrides: Partial<AgentContext["config"]> = {}): AgentContext {
     config: {
       dbPath,
       saltPath,
-      schedules: [{ name: "watchdog", everyMs: MIN, timeoutMs: 20_000 }],
-      runnerStartedAt: now - MIN,
+      // By default Abigaail has been up for an hour, with no agents to watch.
+      schedules: [],
+      runnerStartedAt: now - 60 * MIN,
+      lastRunBeforeStart: null,
       ...overrides,
     },
   };
@@ -127,7 +129,10 @@ describe("ingest refusals", () => {
   });
 });
 
+const WATCHDOG_SCHEDULE = [{ name: "watchdog", everyMs: MIN, timeoutMs: 20_000 }];
+
 describe("agents", () => {
+  const wd = (o: Partial<AgentContext["config"]> = {}) => ctx({ schedules: WATCHDOG_SCHEDULE, ...o });
   let at = 0;
   const record = (agent: string, outcome: RunInput["outcome"], durationMs = 100) => {
     at += MIN;
@@ -135,13 +140,13 @@ describe("agents", () => {
   };
 
   it("a new install is not stalled", () => {
-    expect(signals()).toEqual([]);
+    expect(signals(wd({ runnerStartedAt: now - MIN }))).toEqual([]);
   });
 
   it("an agent with no good run for 3 schedules is stalled", () => {
     at = now - 10 * MIN;
     record("watchdog", "ok");
-    expect(signals()).toEqual(["system:agent_stalled:critical"]);
+    expect(signals(wd())).toEqual(["system:agent_stalled:critical"]);
   });
 
   it("3 failed runs in a row is failing; a good run in between is not", () => {
@@ -149,15 +154,15 @@ describe("agents", () => {
     record("watchdog", "ok");
     record("watchdog", "error");
     record("watchdog", "timeout");
-    expect(signals()).toEqual([]);
+    expect(signals(wd())).toEqual([]);
     record("watchdog", "error");
-    expect(run().findings).toMatchObject([{ signal: "agent_failing", subject: "watchdog", severity: "critical" }]);
+    expect(run(wd()).findings).toMatchObject([{ signal: "agent_failing", subject: "watchdog", severity: "critical" }]);
   });
 
   it("runs taking over half the timeout are slowing", () => {
     at = now - 5 * MIN;
     for (let i = 0; i < 4; i++) record("watchdog", "ok", 12_000);
-    expect(signals()).toEqual(["system:agent_slowing:warning"]);
+    expect(signals(wd())).toEqual(["system:agent_slowing:warning"]);
   });
 
   it("watches the hourly rollup like an agent", () => {
@@ -218,10 +223,146 @@ describe("disk", () => {
     samples([[now - DAY, 1], [now - MIN, 2]]);
     at = now - 10 * MIN;
     store.recordRun({ agent: "watchdog", started_at: at, finished_at: at, outcome: "ok", apps_ok: 0, apps_failed: 0 }, [], []);
-    const result = run(ctx({ dbPath: join(dir, "no-such-dir", "x.db") }));
+    const result = run(ctx({ schedules: WATCHDOG_SCHEDULE, dbPath: join(dir, "no-such-dir", "x.db") }));
     expect(result.findings.map((f) => `${f.signal}:${f.subject}`).sort()).toEqual(["agent_stalled:watchdog", "check_failed:disk"]);
     expect(result.evaluated).toContain(null);
   });
 });
 
 let at = 0;
+
+describe("Abigaail restarts", () => {
+  /**
+   * Record one Watchdog run at `t` exactly as the runner does: findings,
+   * evaluated scopes and the run itself. A Health run is recorded too, so the
+   * app's status reflects findings rather than "no Health run yet".
+   */
+  function tick(t: number, startedAt: number, lastRunBeforeStart: number | null): void {
+    now = t;
+    const c = ctx({ schedules: WATCHDOG_SCHEDULE, runnerStartedAt: startedAt, lastRunBeforeStart });
+    const result = evaluate(watchdog, c);
+    store.recordRun(
+      { agent: "watchdog", started_at: t - 100, finished_at: t, outcome: "ok", apps_ok: result.evaluated.length, apps_failed: 0 },
+      findingInputs("watchdog", result),
+      result.evaluated,
+    );
+    store.recordRun({ agent: "health", started_at: t - 100, finished_at: t, outcome: "ok", apps_ok: 1, apps_failed: 0 }, [], []);
+  }
+
+  function heartbeat(appId: string, t: number): void {
+    store.insertBatch(appId, {
+      receivedAt: t,
+      release: "r",
+      environment: "test",
+      events: [{ event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "heartbeat" }, derived: { ts: t } }],
+    });
+  }
+
+  // Abigaail runs until T-4 min, is down for 4 minutes, and restarts at T.
+  const T = Date.UTC(2026, 9, 19, 10, 0, 0);
+  const downFrom = T - 4 * MIN;
+
+  function upUntilOutage(): App {
+    const app = appWith("live", every(MIN, downFrom - MIN, 30));
+    for (let t = downFrom - 10 * MIN; t <= downFrom; t += MIN) tick(t, downFrom - 60 * MIN, null);
+    expect(store.appStatus(app.id, { now: downFrom }).status).toBe("green");
+    return app;
+  }
+
+  it("Abigaail down 4 min while an app runs: no red after restart, and the app is green once it reconnects", () => {
+    const app = upUntilOutage();
+    const statuses: string[] = [];
+    // The app's SDK backs off and reconnects 5 minutes after the restart.
+    for (let t = T + MIN; t <= T + 10 * MIN; t += MIN) {
+      if (t >= T + 5 * MIN) heartbeat(app.id, t - 1_000);
+      tick(t, T, downFrom);
+      statuses.push(store.appStatus(app.id, { now: t }).status);
+      expect(store.openFindings(app.id).map((f) => f.signal)).not.toContain("silent");
+    }
+    expect(statuses).not.toContain("red");
+    expect(statuses).not.toContain("amber");
+    // Grey while waiting (the app had been quiet past the silent threshold), green once back.
+    expect(statuses.slice(0, 3)).toEqual(["grey", "grey", "grey"]);
+    expect(statuses.slice(4)).toEqual(Array(6).fill("green"));
+    // "reconnecting" is a fact: it resolved on the first run after the app came back.
+    const reconnecting = store.findingHistory(app.id).filter((f) => f.signal === "reconnecting");
+    expect(reconnecting).toMatchObject([{ state: "resolved", resolved_at: T + 5 * MIN }]);
+  });
+
+  it("reports Abigaail's downtime once, as info, and resolves it after the grace period", () => {
+    upUntilOutage();
+    for (let t = T + MIN; t <= T + 10 * MIN; t += MIN) tick(t, T, downFrom);
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = db.prepare("SELECT severity, summary, state, hits FROM findings WHERE signal = 'abigaail_down'").all();
+    db.close();
+    expect(rows).toEqual([{
+      severity: "info",
+      summary: "Abigaail was down from 2026-10-19 09:56 UTC to 2026-10-19 10:00 UTC (4 min).",
+      state: "resolved",
+      hits: 7,
+    }]);
+  });
+
+  it("the first run after a restart does not call any agent stalled because of the outage", () => {
+    upUntilOutage();
+    tick(T + MIN, T, downFrom);
+    expect(store.systemFindings().map((f) => f.signal)).toEqual(["abigaail_down"]);
+  });
+
+  it("a short restart (under 3 min) is not reported as downtime", () => {
+    upUntilOutage();
+    tick(T + MIN, downFrom + 2 * MIN, downFrom);
+    expect(store.systemFindings().map((f) => f.signal)).not.toContain("abigaail_down");
+  });
+
+  it("an app that never comes back is silent (critical) once the grace period ends", () => {
+    const app = upUntilOutage();
+    for (let t = T + MIN; t <= T + 9 * MIN; t += MIN) tick(t, T, downFrom);
+    // Grace = 5 min SDK backoff + 3 min silent threshold.
+    expect(store.openFindings(app.id).map((f) => `${f.signal}:${f.severity}`)).toEqual(["silent:critical"]);
+    expect(store.findingHistory(app.id).find((f) => f.signal === "reconnecting")?.state).toBe("resolved");
+  });
+});
+
+describe("fact-style findings", () => {
+  function tick(c: AgentContext): void {
+    const result = evaluate(watchdog, c);
+    store.recordRun(
+      { agent: "watchdog", started_at: c.now - 100, finished_at: c.now, outcome: "ok", apps_ok: 1, apps_failed: 0 },
+      findingInputs("watchdog", result),
+      result.evaluated,
+    );
+  }
+
+  it("'never sent an event' resolves on the first run after the app's first event", () => {
+    const { app } = store.createApp("new", "test");
+    tick(ctx());
+    expect(store.openFindings(app.id).map((f) => f.signal)).toEqual(["no_data_yet"]);
+    now += MIN;
+    store.insertBatch(app.id, {
+      receivedAt: now,
+      release: "r",
+      environment: "test",
+      events: [{ event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "boot" }, derived: { ts: now } }],
+    });
+    tick(ctx());
+    expect(store.openFindings(app.id)).toEqual([]);
+    expect(store.findingHistory(app.id)[0]).toMatchObject({ signal: "no_data_yet", state: "resolved", misses: 1 });
+  });
+
+  it("'stopped cleanly' resolves on the first run after the app is back", () => {
+    const a = appWith("a", [...every(MIN, now - 10 * MIN), { ts: now - 9 * MIN, kind: "shutdown" }]);
+    tick(ctx());
+    expect(store.openFindings(a.id).map((f) => f.signal)).toEqual(["stopped"]);
+    now += MIN;
+    store.insertBatch(a.id, {
+      receivedAt: now,
+      release: "r",
+      environment: "test",
+      events: [{ event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "boot" }, derived: { ts: now } }],
+    });
+    tick(ctx());
+    expect(store.openFindings(a.id)).toEqual([]);
+  });
+});
+

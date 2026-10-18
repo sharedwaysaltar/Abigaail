@@ -51,9 +51,18 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
   env?: NodeJS.ProcessEnv;
   /**
    * Link outbound calls and errors to the inbound request that caused them
-   * (`parent_id`), via AsyncLocalStorage. Default true.
+   * (`parent_id`), via AsyncLocalStorage. Default: true on Node >= 24, false
+   * on older Node, where it costs more (DECISIONS #38).
    */
   linkOutbound?: boolean;
+  /** Node version used to pick defaults. For tests; default process.versions.node. */
+  nodeVersion?: string;
+}
+
+/** Linking is on by default only where AsyncLocalStorage is cheap (Node >= 24). */
+export function defaultLinkOutbound(nodeVersion: string): boolean {
+  const major = Number.parseInt(nodeVersion.replace(/^v/, ""), 10);
+  return Number.isFinite(major) && major >= 24;
 }
 
 export interface ErrorContext {
@@ -234,7 +243,18 @@ export function init(opts: NodeOptions = {}): AbigaailNode {
         ),
       );
     }
-    const instance = new NodeAdapter(client, opts, report, hostOf(endpoint), sendTransient);
+    let linkOutbound = opts.linkOutbound;
+    if (linkOutbound === undefined) {
+      linkOutbound = defaultLinkOutbound(opts.nodeVersion ?? process.versions.node);
+      if (!linkOutbound) {
+        report(
+          new AbigaailWarning(
+            "linking outbound calls to requests is off on this Node version for performance; set linkOutbound: true to enable it",
+          ),
+        );
+      }
+    }
+    const instance = new NodeAdapter(client, { ...opts, linkOutbound }, report, hostOf(endpoint), sendTransient);
     g[SINGLETON] = instance;
     return instance;
   } catch (err) {

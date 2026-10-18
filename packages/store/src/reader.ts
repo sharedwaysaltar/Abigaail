@@ -64,6 +64,8 @@ export interface Finding {
   hits: number;
   /** Consecutive successfully evaluated runs that did not emit it. */
   misses: number;
+  /** "misses": resolves after N runs without it; "fact": on the first run without it. */
+  resolves: "misses" | "fact";
   first_seen: number;
   last_seen: number;
   resolved_at: number | null;
@@ -158,7 +160,7 @@ const STAT_SQL: Record<StatKind, string> = {
 
 const STAT_COLUMNS = "key, n, weighted_n, status_5xx, status_4xx, status_401_403, failures, p50, p95, p99, uniques";
 const FINDING_COLUMNS =
-  "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, first_seen, last_seen, resolved_at";
+  "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, resolves, first_seen, last_seen, resolved_at";
 const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at";
 
 function toFinding(row: Record<string, unknown>): Finding {
@@ -357,6 +359,12 @@ export class StoreReader {
       .prepare(`SELECT id, agent, started_at, finished_at, outcome, duration_ms, findings, error_class, apps_ok, apps_failed
                 FROM agent_runs WHERE agent = ? ORDER BY started_at DESC, id DESC LIMIT ?`)
       .all(agent, limit) as unknown as AgentRun[];
+  }
+
+  /** Finish time of the last run of any agent that finished before `ts`. */
+  lastRunBefore(ts: number): number | undefined {
+    const row = this.db.prepare("SELECT max(finished_at) AS t FROM agent_runs WHERE finished_at < ?").get(ts) as { t: number | null };
+    return row.t ?? undefined;
   }
 
   /** Finish time of the agent's last successful run. */

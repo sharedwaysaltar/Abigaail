@@ -52,9 +52,26 @@ function isResult(m: unknown): m is WorkerResult {
         typeof f.action === "string" &&
         typeof f.evidence === "object" &&
         f.evidence !== null &&
+        (f.fact === undefined || typeof f.fact === "boolean") &&
         (f.app_id === null || typeof f.app_id === "string"),
     )
   );
+}
+
+/** What the store records for a worker's findings. The fingerprint is built here, so an agent cannot shape it. */
+export function findingInputs(agent: string, result: WorkerResult | undefined): FindingInput[] {
+  return (result?.findings ?? []).map((f) => ({
+    app_id: f.app_id,
+    agent,
+    fingerprint: `${agent}:${f.signal}:${f.subject}`,
+    signal: f.signal,
+    severity: f.severity,
+    summary: f.summary,
+    cause: f.cause ?? null,
+    action: f.action,
+    evidence: f.evidence,
+    ...(f.fact ? { fact: true } : {}),
+  }));
 }
 
 export class Runner {
@@ -86,6 +103,7 @@ export class Runner {
         { name: "rollup", everyMs: SCHEDULE.rollup.everyMs },
       ],
       runnerStartedAt: this.startedAt,
+      lastRunBeforeStart: this.store.lastRunBefore(this.startedAt) ?? null,
     };
   }
 
@@ -194,18 +212,7 @@ export class Runner {
       apps_failed: failed.filter((f) => f.app_id !== null).length,
       ...(partial.error_class ? {} : failed.length ? { error_class: failed[0]!.error_class } : {}),
     };
-    const findings: FindingInput[] = (result?.findings ?? []).map((f) => ({
-      app_id: f.app_id,
-      agent: partial.agent,
-      // Built here, so an agent cannot produce a fingerprint of another shape.
-      fingerprint: `${partial.agent}:${f.signal}:${f.subject}`,
-      signal: f.signal,
-      severity: f.severity,
-      summary: f.summary,
-      cause: f.cause ?? null,
-      action: f.action,
-      evidence: f.evidence,
-    }));
+    const findings = findingInputs(partial.agent, result);
     try {
       this.store.recordRun(run, findings, result?.evaluated ?? [], {
         cooldownMs: FINDINGS.cooldownMs,
