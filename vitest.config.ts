@@ -10,6 +10,7 @@ export default defineConfig({
       { find: /^@abigaail\/schema\/validate$/, replacement: `${src("packages/schema")}/validate.ts` },
       { find: /^@abigaail\/schema$/, replacement: `${src("packages/schema")}/index.ts` },
       { find: /^@abigaail\/core$/, replacement: `${src("packages/core")}/index.ts` },
+      { find: /^@abigaail\/node$/, replacement: `${src("packages/node")}/index.ts` },
       { find: /^@abigaail\/store$/, replacement: `${src("packages/store")}/index.ts` },
       { find: /^@abigaail\/server$/, replacement: `${src("apps/server")}/index.ts` },
     ],

@@ -10,8 +10,8 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -b packages/schema packages/core packages/store apps/server",
-    "typecheck": "tsc -b packages/schema packages/core packages/store apps/server && tsc -p tsconfig.json",
+    "build": "tsc -b packages/schema packages/core packages/node packages/store apps/server",
+    "typecheck": "tsc -b packages/schema packages/core packages/node packages/store apps/server && tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm test",
