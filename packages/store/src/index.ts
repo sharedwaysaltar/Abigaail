@@ -18,4 +18,6 @@ export type {
 export { generateIngestKey, hashIngestKey, INGEST_KEY_PREFIX, INGEST_KEY_RE } from "./keys.js";
 export { toRow } from "./rows.js";
 export type { Derived, EventRow } from "./rows.js";
-export { MIGRATIONS } from "./migrations.js";
+export { MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
+export { AuthStore, openAuthStore, USER_NAME_RE } from "./auth.js";
+export type { AuthAuditEntry, SessionRow, User } from "./auth.js";

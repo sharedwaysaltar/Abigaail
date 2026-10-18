@@ -16,6 +16,7 @@ import {
   isHost,
   isIdent,
   isIp,
+  isRegion,
   isRoute,
   type AbigaailEvent,
   type ErrorEvent,
@@ -55,6 +56,13 @@ export function cleanHost(host: unknown): string {
   const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   if (isIp(unmapIp(bare)) || isIp(bare.split("%")[0])) return HOST_IP_LITERAL;
   return isHost(host) ? host.toLowerCase() : HOST_INVALID;
+}
+
+/** A region code in its one spelling (uppercase), or undefined if it is not one. */
+export function cleanRegion(region: unknown): string | undefined {
+  if (typeof region !== "string") return undefined;
+  const up = region.trim().toUpperCase();
+  return isRegion(up) ? up : undefined;
 }
 
 function cleanTransient(t: unknown): Transient | undefined {
@@ -156,9 +164,11 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
     case "metric":
       if (!has(METRIC_NAMES, e.name) || !isNum(e.value)) return undefined;
       return { type: "metric", ...base, name: e.name, value: e.value };
-    case "lifecycle":
+    case "lifecycle": {
       if (!has(LIFECYCLE_KINDS, e.kind)) return undefined;
-      return { type: "lifecycle", ...base, kind: e.kind };
+      const region = e.kind === "boot" ? cleanRegion(e.region) : undefined;
+      return { type: "lifecycle", ...base, kind: e.kind, ...(region ? { region } : {}) };
+    }
     default:
       return undefined;
   }

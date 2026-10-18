@@ -1,0 +1,22 @@
+{
+  "name": "@abigaail/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail dashboard: read-only on the monitoring store, password + TOTP sign-in.",
+  "scripts": {
+    "build": "NEXT_TELEMETRY_DISABLED=1 next build"
+  },
+  "dependencies": {
+    "@abigaail/auth": "0.1.0",
+    "@abigaail/insights": "0.1.0",
+    "@abigaail/store": "0.1.0",
+    "geist": "1.7.2",
+    "next": "16.4.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0"
+  }
+}

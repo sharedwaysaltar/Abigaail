@@ -147,6 +147,11 @@ export interface MetricEvent extends BaseEvent {
 export interface LifecycleEvent extends BaseEvent {
   type: "lifecycle";
   kind: LifecycleKind;
+  /**
+   * Where the app runs, as a hosting region code (e.g. "LON1"). Boot events
+   * only; the dashboard places the app on its map from it.
+   */
+  region?: string;
 }
 
 export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent;
@@ -194,6 +199,9 @@ export const IPV4_RE =
 export const IPV6_RE =
   /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
 
+/** Hosting region codes (e.g. "LON1", "US-EAST-1"): uppercase letters, digits and hyphens. */
+export const REGION_RE = /^[A-Z0-9-]{2,24}$/;
+
 /** RFC 9562 UUID (any version 1-8), the form of `event_id`. */
 export const EVENT_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 /** Longest duration an event may report (24 h). */
@@ -215,5 +223,6 @@ export const isIdent = (s: unknown, max: number): s is string =>
   typeof s === "string" && s.length <= max && IDENT_RE.test(s);
 export const isFramePath = (p: unknown): p is string =>
   typeof p === "string" && p.length <= LIMITS.maxFramePathLength && FRAME_PATH_RE.test(p);
+export const isRegion = (s: unknown): s is string => typeof s === "string" && REGION_RE.test(s);
 export const isIp = (s: unknown): s is string =>
   typeof s === "string" && s.length <= 45 && (IPV4_RE.test(s) || IPV6_RE.test(s));

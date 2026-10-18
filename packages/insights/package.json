@@ -1,0 +1,13 @@
+{
+  "name": "@abigaail/insights",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Abigaail insights: baselines, statistics and the dashboard's read models, shared by the agents and the dashboard. Reads through StoreReader only.",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "dependencies": {
+    "@abigaail/store": "0.1.0"
+  }
+}

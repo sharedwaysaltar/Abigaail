@@ -1,0 +1,331 @@
+// Read models for the dashboard. Pure functions over a StoreReader, scoped by
+// app, so the numbers on screen come from the same rollup and baseline rules
+// the agents judge with (DECISIONS #42, #49). Where evidence is short they
+// return null with a reason; the dashboard shows that grey, never as healthy.
+
+import { HOUR_MS, type App, type AppStatus, type Finding, type StatRow, type StoreReader } from "@abigaail/store";
+import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
+import { median, poissonCdf, poissonUpperTail } from "./stats.js";
+import { BASELINE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
+
+const MIN = 60_000;
+
+/** Worst first. Grey ranks above green: not knowing is never "fine". */
+const STATUS_RANK: Record<AppStatus, number> = { red: 0, amber: 1, grey: 2, green: 3 };
+const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, unknown: 2, info: 3 };
+
+export const worstStatus = (statuses: readonly AppStatus[]): AppStatus =>
+  statuses.reduce<AppStatus>((w, s) => (STATUS_RANK[s] < STATUS_RANK[w] ? s : w), "green");
+
+/** The finding that explains the app's status: most severe, then longest held. Info never counts. */
+export function topFinding(findings: readonly Finding[]): Finding | undefined {
+  return findings
+    .filter((f) => f.severity !== "info")
+    .sort((a, b) => SEVERITY_RANK[a.severity]! - SEVERITY_RANK[b.severity]! || b.hits - a.hits || a.first_seen - b.first_seen)[0];
+}
+
+// ---- one line per app ---------------------------------------------------------------
+
+export type Liveness =
+  | { kind: "running"; since: number }
+  | { kind: "silent"; since: number }
+  | { kind: "stopped"; since: number }
+  | { kind: "never" };
+
+export interface AppSummary {
+  app: App;
+  status: AppStatus;
+  /** One line: the top finding's summary, or "Healthy" / "Too little data". */
+  line: string;
+  top: Finding | undefined;
+  open: Finding[];
+  /** Process uptime from the latest boot. Never an availability percentage. */
+  liveness: Liveness;
+  /** Weighted requests that matter per minute over the last 15 min. */
+  rpm: number;
+  /** App-wide p95 over the last 15 min; null below VIEWS.minRequests. */
+  p95: number | null;
+  requests: number;
+}
+
+export function appSummary(store: StoreReader, app: App, now: number): AppSummary {
+  const { status, findings } = store.appStatus(app.id, { now, freshMs: STATUS_FRESH_MS });
+  const top = topFinding(findings);
+  const end = windowEnd(now);
+  const row = store.statsFor(app.id, "app", end - V.windowMs, end)[0];
+  const requests = row?.n ?? 0;
+  return {
+    app,
+    status,
+    line: top ? top.summary : status === "green" ? "Healthy" : "Too little data",
+    top,
+    open: findings,
+    liveness: liveness(store, app, findings),
+    rpm: (row?.weighted_n ?? 0) / (V.windowMs / MIN),
+    p95: row && requests >= V.minRequests ? row.p95 : null,
+    requests,
+  };
+}
+
+function liveness(store: StoreReader, app: App, open: readonly Finding[]): Liveness {
+  const boot = store.lastBoot(app.id);
+  // The Watchdog decides silence (it knows each app's rhythm); the view only reports it.
+  const silent = open.find((f) => f.agent === "watchdog" && f.signal === "silent");
+  if (silent) return { kind: "silent", since: app.last_event_at ?? silent.first_seen };
+  const stopped = open.find((f) => f.agent === "watchdog" && f.signal === "stopped");
+  if (stopped) return { kind: "stopped", since: store.lastLifecycle(app.id)?.ts ?? stopped.first_seen };
+  if (!boot) return app.last_event_at === null ? { kind: "never" } : { kind: "running", since: app.created_at };
+  return { kind: "running", since: boot.ts };
+}
+
+// ---- the map --------------------------------------------------------------------------
+
+export interface RegionInfo {
+  lat: number;
+  lon: number;
+  city: string;
+}
+
+export interface Server {
+  region: string;
+  info: RegionInfo;
+  status: AppStatus;
+  apps: AppSummary[];
+}
+
+/**
+ * Apps grouped by region (one pin per region code), worst first, plus the apps
+ * that cannot be placed: no region sent, or a code the table does not know.
+ */
+export function servers(
+  summaries: readonly AppSummary[],
+  lookup: (region: string) => RegionInfo | undefined,
+): { servers: Server[]; unplaced: AppSummary[] } {
+  const byRegion = new Map<string, Server>();
+  const unplaced: AppSummary[] = [];
+  for (const s of summaries) {
+    const region = s.app.region;
+    const info = region ? lookup(region) : undefined;
+    if (!region || !info) {
+      unplaced.push(s);
+      continue;
+    }
+    let server = byRegion.get(region);
+    if (!server) byRegion.set(region, (server = { region, info, status: "green", apps: [] }));
+    server.apps.push(s);
+  }
+  const list = [...byRegion.values()];
+  for (const server of list) server.status = worstStatus(server.apps.map((a) => a.status));
+  list.sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || a.region.localeCompare(b.region));
+  return { servers: list, unplaced };
+}
+
+/** "Is everything OK?" in one sentence (SPEC lesson 11). */
+export function headline(summaries: readonly AppSummary[]): { status: AppStatus; text: string } {
+  const need = summaries.filter((s) => s.status === "red" || s.status === "amber").length;
+  const grey = summaries.filter((s) => s.status === "grey").length;
+  if (!summaries.length) return { status: "grey", text: "No apps yet" };
+  if (need) return { status: worstStatus(summaries.map((s) => s.status)), text: `${need} ${need === 1 ? "app needs" : "apps need"} you` };
+  if (grey) return { status: "grey", text: `Nothing needs you; ${grey} ${grey === 1 ? "app has" : "apps have"} too little data` };
+  return { status: "green", text: "Everything is fine" };
+}
+
+// ---- the app page ------------------------------------------------------------------------
+
+export type Reason = "too little data" | "no baseline yet";
+
+export interface Measure {
+  label: string;
+  unit: "/min" | "%" | "ms";
+  /** Now (last 15 min). null: too little data to show one. */
+  value: number | null;
+  /** Usual value for this hour; null with `reason` when there is none. */
+  usual: number | null;
+  source: BaselineSource;
+  reason?: Reason;
+}
+
+/** Requests/min, 5xx rate, p95 and event-loop lag, each against its usual value. */
+export function fourNumbers(store: StoreReader, appId: string, now: number): Measure[] {
+  const end = windowEnd(now);
+  const from = end - V.windowMs;
+  const row = store.statsFor(appId, "app", from, end)[0];
+  const n = row?.n ?? 0;
+  const enough = n >= V.minRequests;
+  const slots = baselineSlots(store, appId, end);
+  const appRows = rowsByKey(store, appId, "app", slots).get("*");
+  const lag = store.statsFor(appId, "metric", from, end).find((r) => r.key === "event_loop_lag_p99_ms");
+  const lagRows = rowsByKey(store, appId, "metric", slots).get("event_loop_lag_p99_ms");
+  const minutes = V.windowMs / MIN;
+
+  // Counts use the route rollup, which every rolled hour has; the app kind
+  // only exists for hours rolled since it was added.
+  const usualHourly = median(totals(store, appId, "route", slots).map((t) => t.weighted_n));
+  const usualRpm = usualHourly === undefined ? null : usualHourly / 60;
+  const usualRate = typicalRate(appRows, (r) => r.status_5xx);
+  const usualP95 = typicalP95(appRows)?.median;
+  const usualLag = typicalLevel(lagRows);
+
+  const measure = (label: string, unit: Measure["unit"], value: number | null, usual: number | null | undefined, enoughNow: boolean): Measure => {
+    const m: Measure = { label, unit, value: enoughNow ? value : null, usual: usual ?? null, source: slots.source };
+    if (!enoughNow) m.reason = "too little data";
+    else if (m.usual === null) m.reason = "no baseline yet";
+    return m;
+  };
+  return [
+    measure("Requests", "/min", (row?.weighted_n ?? 0) / minutes, usualRpm, true),
+    measure("Server errors", "%", row && n ? (100 * row.status_5xx) / n : null, usualRate === undefined ? null : 100 * usualRate, enough),
+    measure("Response time p95", "ms", row?.p95 ?? null, usualP95, enough),
+    measure("Event-loop lag p99", "ms", lag?.p50 ?? null, usualLag, (lag?.n ?? 0) >= V.minLagSamples),
+  ];
+}
+
+export type PointState = "ok" | "few" | "no-data" | "building";
+
+export interface SeriesPoint {
+  hour: number;
+  p95: number | null;
+  state: PointState;
+  requests: number;
+  /** The normal band for this hour, or null without a baseline. */
+  band: { lo: number; mid: number; hi: number } | null;
+}
+
+/**
+ * Hourly app-wide p95 over the last `hours` closed hours, against each hour's
+ * normal band. An hour with no events is a gap ("no-data"), never zero; an
+ * hour rolled before the app-wide kind existed is "building".
+ */
+export function responseSeries(store: StoreReader, appId: string, now: number, hours = 24): SeriesPoint[] {
+  const closedEnd = Math.floor(windowEnd(now) / HOUR_MS) * HOUR_MS;
+  const from = closedEnd - hours * HOUR_MS;
+  const appRows = new Map(store.hourlyRange(appId, "app", from, closedEnd).map((r) => [r.hour, r]));
+  const routeHours = new Set(store.hourlyRange(appId, "route", from, closedEnd).map((r) => r.hour));
+  const list = Array.from({ length: hours }, (_, k) => from + k * HOUR_MS);
+  const rolled = store.rolledHours(appId, list);
+  return list.map((hour) => {
+    const row = appRows.get(hour);
+    let state: PointState = "ok";
+    if (!row) state = (rolled.get(hour) ?? 0) === 0 ? "no-data" : routeHours.has(hour) ? "building" : "few";
+    else if (row.n < BASELINE.minSlotRequests || row.p95 === null) state = "few";
+    return { hour, p95: state === "ok" ? row!.p95 : null, state, requests: row?.n ?? 0, band: band(store, appId, hour) };
+  });
+}
+
+function band(store: StoreReader, appId: string, hour: number): SeriesPoint["band"] {
+  const slots = baselineSlots(store, appId, hour);
+  const normal = typicalP95(rowsByKey(store, appId, "app", slots).get("*"));
+  if (!normal) return null;
+  const spread = Math.max(V.bandMads * 1.4826 * normal.mad, V.bandMinShare * normal.median);
+  return { lo: Math.max(0, normal.median - spread), mid: normal.median, hi: normal.median + spread };
+}
+
+export interface Dependency {
+  host: string;
+  /** Calls in the last hour. */
+  calls: number;
+  /** Failed share (error, timeout or 5xx) in the last hour, %; null below VIEWS.minCalls. */
+  failedPct: number | null;
+  p95: number | null;
+  usualP95: number | null;
+}
+
+/** Outbound hosts the app called in the last 24 h, with the last hour's numbers. */
+export function dependsOn(store: StoreReader, appId: string, now: number): Dependency[] {
+  const end = windowEnd(now);
+  const hour = store.statsFor(appId, "host", end - HOUR_MS, end);
+  const known = store.hourlyKeys(appId, "host", end - 24 * HOUR_MS, end);
+  const base = rowsByKey(store, appId, "host", baselineSlots(store, appId, end));
+  const byHost = new Map(hour.map((r) => [r.key, r]));
+  const hosts = [...new Set([...known, ...byHost.keys()])];
+  return hosts
+    .map((host) => {
+      const r = byHost.get(host);
+      const enough = (r?.n ?? 0) >= V.minCalls;
+      return {
+        host,
+        calls: r?.n ?? 0,
+        failedPct: r && enough ? (100 * r.failures) / r.n : null,
+        p95: r && enough ? r.p95 : null,
+        usualP95: typicalP95(base.get(host))?.median ?? null,
+      };
+    })
+    .sort((a, b) => (b.failedPct ?? -1) - (a.failedPct ?? -1) || b.calls - a.calls || a.host.localeCompare(b.host));
+}
+
+export interface RouteChange {
+  route: string;
+  kind: "new" | "slower" | "faster" | "busier" | "quieter";
+  now: number | null;
+  usual: number | null;
+}
+
+/**
+ * Routes whose last closed hour differs from their normal: new since the
+ * current release, p95 well above or below normal, or traffic far outside
+ * what the baseline predicts (Poisson tails). Empty with a reason without a baseline.
+ */
+export function routesThatChanged(store: StoreReader, appId: string, now: number): { changes: RouteChange[]; reason?: Reason } {
+  const hour = Math.floor(windowEnd(now) / HOUR_MS) * HOUR_MS - HOUR_MS;
+  const rows = new Map(store.hourly(appId, "route", [hour]).map((r) => [r.key, r as StatRow]));
+  const changes: RouteChange[] = [];
+
+  const release = store.lastBoot(appId)?.release;
+  const deploy = release ? store.deploys(appId).find((d) => d.release === release) : undefined;
+  const fresh = deploy ? store.firstSeenSince(appId, "route", Math.floor(deploy.first_seen / HOUR_MS) * HOUR_MS) : new Map<string, number>();
+  // Routes older than the release are not new, even if the deploy is the app's first.
+  const older = deploy ? store.hourlyKeys(appId, "route", 0, Math.floor(deploy.first_seen / HOUR_MS) * HOUR_MS) : new Set<string>();
+  const hadHistory = older.size > 0;
+  if (hadHistory) for (const route of fresh.keys()) changes.push({ route, kind: "new", now: rows.get(route)?.n ?? null, usual: null });
+
+  const slots = baselineSlots(store, appId, hour);
+  if (slots.source === "none") return { changes: changes.slice(0, V.maxRouteChanges), reason: "no baseline yet" };
+  const base = rowsByKey(store, appId, "route", slots);
+  const score: number[] = changes.map(() => Infinity);
+
+  for (const route of new Set([...rows.keys(), ...base.keys()])) {
+    if (fresh.has(route) && hadHistory) continue;
+    const row = rows.get(route);
+    const n = row?.n ?? 0;
+    const p95 = typicalP95(base.get(route));
+    if (row?.p95 != null && n >= V.routeMinRequests && p95 && p95.median > 0) {
+      const ratio = row.p95 / p95.median;
+      if (Math.abs(row.p95 - p95.median) >= V.routeP95MinMs && (ratio >= V.routeP95Ratio || ratio <= 1 / V.routeP95Ratio)) {
+        changes.push({ route, kind: ratio > 1 ? "slower" : "faster", now: row.p95, usual: p95.median });
+        score.push(Math.abs(Math.log(ratio)));
+        continue;
+      }
+    }
+    const expected = typicalCount(base.get(route));
+    if (expected >= V.routeTrafficMin && poissonCdf(n, expected) < V.routeTrafficP) {
+      changes.push({ route, kind: "quieter", now: n, usual: expected });
+      score.push(Math.log((expected + 1) / (n + 1)));
+    } else if (n >= V.routeTrafficMin && n >= 2 * expected && poissonUpperTail(n, Math.max(expected, 0.5)) < V.routeTrafficP) {
+      changes.push({ route, kind: "busier", now: n, usual: expected });
+      score.push(Math.log((n + 1) / (expected + 1)));
+    }
+  }
+  const order = changes.map((c, i) => ({ c, s: score[i]! })).sort((a, b) => b.s - a.s || a.c.route.localeCompare(b.c.route));
+  return { changes: order.slice(0, V.maxRouteChanges).map((o) => o.c) };
+}
+
+export type EarlierItem =
+  | { kind: "finding"; ts: number; finding: Finding }
+  | { kind: "deploy"; ts: number; release: string; environment: string };
+
+/** The last 7 days: resolved findings, facts (deploys, restarts) and releases, newest first. */
+export function earlier(store: StoreReader, appId: string, now: number): EarlierItem[] {
+  const since = now - V.earlierMs;
+  const items: EarlierItem[] = [];
+  for (const f of store.findingsSince(appId, since)) {
+    // Open problems are on the issue card already; open facts (info) belong here.
+    if (f.state === "open" && f.severity !== "info") continue;
+    // Deploy findings repeat the deploys table.
+    if (f.signal === "deploy") continue;
+    items.push({ kind: "finding", ts: f.resolved_at ?? f.first_seen, finding: f });
+  }
+  for (const d of store.deploys(appId)) {
+    if (d.first_seen >= since) items.push({ kind: "deploy", ts: d.first_seen, release: d.release, environment: d.environment });
+  }
+  return items.sort((a, b) => b.ts - a.ts).slice(0, V.maxEarlier);
+}

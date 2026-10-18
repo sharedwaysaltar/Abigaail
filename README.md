@@ -49,6 +49,8 @@ Other commands:
 | `npm run app:create -- <name>` | Register an app and print its ingest key (shown once) |
 | `npm run app:disable -- <name>` | Revoke an app's key (ingest returns 403) |
 | `npm run app:list` | List apps, their state and last event time |
+| `npm run dashboard` | Build and start the dashboard (http://localhost:4319) |
+| `npm run user:create -- <name>` | Create a dashboard user (password + authenticator app) |
 
 In VS Code, accept the recommended extensions (Vitest explorer) to run and debug
 tests from the Testing sidebar.
@@ -60,8 +62,11 @@ packages/
   schema/   Event schema v1: zero-dependency types + strict server-side validators
   core/     @abigaail/core: fail-open event client and route normaliser
   store/    @abigaail/store: SQLite store (node:sqlite); every query scoped by app_id
+  insights/ @abigaail/insights: baselines and the dashboard's read models
+  auth/     @abigaail/auth: passwords, TOTP, sessions for the dashboard
 apps/
-  server/   Ingest server (POST /ingest) and the app admin CLI
+  server/   Ingest server (POST /ingest), agents, and the app and user admin CLIs
+  dashboard/ Next.js dashboard, read-only on the store
 docs/       Roadmap and design notes
 ```
 
@@ -94,6 +99,23 @@ visitor-hash salt `salt.bin`, which is kept out of the database on purpose. Conf
 The client IP and user agent may be sent once per request event in `transient`. Ingest
 uses them in memory for a daily-salted, per-app visitor hash and a browser/bot class,
 then discards them; they are never stored (see `apps/server/test/privacy.test.ts`).
+
+## Run the dashboard
+
+```bash
+cp apps/dashboard/.env.example apps/dashboard/.env
+# set ABIGAAIL_DASHBOARD_SECRET in it: openssl rand -base64 32
+set -a; . apps/dashboard/.env; set +a        # the user CLI needs the same secret
+npm run user:create -- owner                 # prompts for a password, shows a TOTP secret once
+npm run dev:server                           # in another terminal (creates the database)
+npm run dashboard                            # http://localhost:4319
+```
+
+Add the secret to an authenticator app, confirm a code, then sign in with name, password and
+code. To place an app on the map, set `ABIGAAIL_REGION` (e.g. `LON1`) in its environment;
+apps without one are listed as "not on the map". The dashboard opens the monitoring
+database read-only and keeps users and sessions in `data/auth.db`. It is meant for your
+machine or a VPN, never the public internet (see [docs/HOSTING.md](docs/HOSTING.md)).
 
 ## What the SDK guarantees (fail-open)
 

@@ -11,6 +11,8 @@ export interface App {
   created_at: number;
   disabled_at: number | null;
   last_event_at: number | null;
+  /** Hosting region code from the app's latest boot, if it sent one. */
+  region: string | null;
 }
 
 export interface Deploy {
@@ -88,8 +90,8 @@ export interface AgentRun {
 
 export type AppStatus = "red" | "amber" | "grey" | "green";
 
-/** What a rollup or a window read reports per key. */
-export type StatKind = "route" | "host" | "referrer" | "error" | "metric";
+/** What a rollup or a window read reports per key. "app" has one key, "*": all requests that matter. */
+export type StatKind = "route" | "host" | "referrer" | "error" | "metric" | "app";
 
 export interface StatRow {
   /** Route pattern, host, referrer domain, "ErrorType route" or metric name. */
@@ -151,6 +153,8 @@ interface StatSource {
 const STAT_SQL: Record<StatKind, string> = {
   route: `SELECT route AS key, status, duration_ms AS v, sample_rate, visitor_hash, NULL AS outcome
           FROM events WHERE app_id = ? AND type = 'request' AND ts >= ? AND ts < ? AND ${MATTERS_SQL}`,
+  app: `SELECT '*' AS key, status, duration_ms AS v, sample_rate, visitor_hash, NULL AS outcome
+        FROM events WHERE app_id = ? AND type = 'request' AND ts >= ? AND ts < ? AND ${MATTERS_SQL}`,
   referrer: `SELECT json_extract(attrs, '$.referrer_domain') AS key, NULL AS status, NULL AS v, sample_rate,
                     visitor_hash, NULL AS outcome
              FROM events WHERE app_id = ? AND type = 'request' AND ts >= ? AND ts < ? AND ${MATTERS_SQL}
@@ -168,7 +172,7 @@ const STAT_SQL: Record<StatKind, string> = {
 const STAT_COLUMNS = "key, n, weighted_n, status_5xx, status_4xx, status_401_403, failures, p50, p95, p99, uniques";
 const FINDING_COLUMNS =
   "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, resolves, first_seen, last_seen, resolved_at";
-const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at";
+export const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at, region";
 
 function toFinding(row: Record<string, unknown>): Finding {
   return { ...(row as unknown as Finding), evidence: JSON.parse(String(row.evidence)) as Record<string, unknown> };
@@ -239,6 +243,13 @@ export class StoreReader {
       .prepare("SELECT release FROM events WHERE app_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1")
       .get(appId, ts) as { release: string } | undefined;
     return row?.release;
+  }
+
+  /** The latest boot, if any: when the running process started. */
+  lastBoot(appId: string): { ts: number; release: string } | undefined {
+    return this.db
+      .prepare("SELECT ts, release FROM events WHERE app_id = ? AND type = 'lifecycle' AND name = 'boot' ORDER BY ts DESC LIMIT 1")
+      .get(appId) as { ts: number; release: string } | undefined;
   }
 
   /** The latest lifecycle event, if any. */
@@ -429,6 +440,20 @@ export class StoreReader {
         .prepare(`SELECT ${FINDING_COLUMNS} FROM findings WHERE app_id = ? ORDER BY last_seen DESC, id DESC LIMIT ?`)
         .all(appId, limit) as Record<string, unknown>[]
     ).map(toFinding);
+  }
+
+  /** Findings of an app, open or resolved, seen at or after `since`, newest first. */
+  findingsSince(appId: string, since: number, limit = 100): Finding[] {
+    return (
+      this.db
+        .prepare(`SELECT ${FINDING_COLUMNS} FROM findings WHERE app_id = ? AND last_seen >= ? ORDER BY last_seen DESC, id DESC LIMIT ?`)
+        .all(appId, since, limit) as Record<string, unknown>[]
+    ).map(toFinding);
+  }
+
+  /** Every agent (and the rollup) that has logged a run, by name. */
+  agentNames(): string[] {
+    return (this.db.prepare("SELECT DISTINCT agent FROM agent_runs ORDER BY agent").all() as { agent: string }[]).map((r) => r.agent);
   }
 
   /** Latest runs of an agent, newest first. */

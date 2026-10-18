@@ -7,15 +7,18 @@
 import { HOUR_MS, type App, type Severity, type StatRow } from "@abigaail/store";
 import {
   baselineSlots,
+  humanDuration,
+  median,
+  poissonCdf,
   rowsByKey,
   totals,
   typicalCount,
   typicalLevel,
   typicalP95,
   typicalRate,
+  wilsonLower,
   type Slots,
-} from "./baseline.js";
-import { humanDuration, median, poissonCdf, wilsonLower } from "./stats.js";
+} from "@abigaail/insights";
 import { HEALTH as H, SCHEDULE, WATCHDOG } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 

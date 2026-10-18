@@ -25,6 +25,7 @@ Configuration comes from the environment unless you pass it to `init`:
 | `ABIGAAIL_INGEST_KEY` | Per-app write-only key from `npm run app:create -- <name>` |
 | `ABIGAAIL_RELEASE` | Deploy version, e.g. the git SHA |
 | `ABIGAAIL_ENVIRONMENT` | `production`, `staging`, `development` or `test` |
+| `ABIGAAIL_REGION` | Optional hosting region code, e.g. `LON1`; sent once at boot and places the app on the dashboard map |
 
 If the endpoint or key is missing, the SDK does nothing. Never prefix these
 variables with `NEXT_PUBLIC_`: the SDK refuses to start if you do, because Next

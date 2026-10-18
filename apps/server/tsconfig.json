@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "dist" },
   "include": ["src"],
-  "references": [{ "path": "../../packages/schema" }, { "path": "../../packages/store" }]
+  "references": [{ "path": "../../packages/schema" }, { "path": "../../packages/store" }, { "path": "../../packages/insights" }, { "path": "../../packages/auth" }]
 }

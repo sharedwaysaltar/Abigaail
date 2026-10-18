@@ -13,6 +13,8 @@ export default defineConfig({
       { find: /^@abigaail\/node$/, replacement: `${src("packages/node")}/index.ts` },
       { find: /^@abigaail\/next$/, replacement: `${src("packages/next")}/index.ts` },
       { find: /^@abigaail\/store$/, replacement: `${src("packages/store")}/index.ts` },
+      { find: /^@abigaail\/insights$/, replacement: `${src("packages/insights")}/index.ts` },
+      { find: /^@abigaail\/auth$/, replacement: `${src("packages/auth")}/index.ts` },
       { find: /^@abigaail\/server$/, replacement: `${src("apps/server")}/index.ts` },
     ],
   },

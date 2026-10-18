@@ -7,6 +7,8 @@ export interface Config {
   port: number;
   /** ABIGAAIL_AGENTS=off disables the agent runner (ingest only). */
   agents: boolean;
+  /** Dashboard users and sessions, apart from monitoring data. */
+  authDbPath: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -18,5 +20,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     host: env.ABIGAAIL_HOST || "127.0.0.1",
     port,
     agents: (env.ABIGAAIL_AGENTS ?? "on").toLowerCase() !== "off",
+    authDbPath: env.ABIGAAIL_AUTH_DB_PATH || "./data/auth.db",
   };
 }
