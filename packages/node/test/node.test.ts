@@ -186,6 +186,35 @@ describe("client IP", () => {
   });
 });
 
+describe("transient over plain http", () => {
+  const ua = { headers: { "user-agent": "Mozilla/5.0 Firefox/130.0" } };
+
+  it("withholds IP and UA when the endpoint is http to another machine, and warns once", async () => {
+    const { warnings, events } = start({ endpoint: "http://ingest.example.com/ingest" });
+    const base = await server();
+    await raw(base, "/", ua);
+    await raw(base, "/", ua);
+    const reqs = await requests(events);
+    expect(reqs).toHaveLength(2);
+    for (const r of reqs) expect(r.transient).toBeUndefined();
+    const msgs = warnings.map((w) => (w as Error).message).filter((m) => m.includes("withheld until the endpoint uses https"));
+    expect(msgs).toHaveLength(1);
+  });
+
+  it.each(["http://127.0.0.1:4318/ingest", "http://localhost:4318/ingest", "http://[::1]:4318/ingest", "https://ingest.example.com/ingest"])(
+    "keeps IP and UA for %s",
+    async (endpoint) => {
+      const { warnings, events } = start({ endpoint });
+      const base = await server();
+      await raw(base, "/", ua);
+      const [r] = await requests(events);
+      expect(r!.transient?.ua).toBe("Mozilla/5.0 Firefox/130.0");
+      expect(r!.transient?.ip).toBeDefined();
+      expect(warnings.some((w) => String((w as Error).message).includes("withheld"))).toBe(false);
+    },
+  );
+});
+
 describe("outbound calls", () => {
   it("records fetch and http.request by host only", async () => {
     const { events } = start();

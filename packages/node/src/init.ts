@@ -144,6 +144,22 @@ function hostOf(url: string | undefined): string | undefined {
   }
 }
 
+/**
+ * Whether visitor IP and user agent may be sent to `endpoint`: only over https,
+ * or over plain http to this machine (127.0.0.0/8, ::1, localhost).
+ */
+export function transientAllowed(endpoint: string): boolean {
+  try {
+    const u = new URL(endpoint);
+    if (u.protocol === "https:") return true;
+    if (u.protocol !== "http:") return false;
+    const h = u.hostname.toLowerCase();
+    return h === "localhost" || h === "[::1]" || /^127(\.\d{1,3}){3}$/.test(h);
+  } catch {
+    return false;
+  }
+}
+
 function timeoutLike(err: unknown): boolean {
   const e = err as { name?: unknown; code?: unknown } | undefined;
   const s = `${String(e?.name ?? "")} ${String(e?.code ?? "")}`;
@@ -203,7 +219,15 @@ export function init(opts: NodeOptions = {}): AbigaailNode {
       environment: opts.environment ?? environmentFrom(env),
       onInternalError: report,
     });
-    const instance = new NodeAdapter(client, opts, report, hostOf(endpoint));
+    const sendTransient = transientAllowed(endpoint);
+    if (!sendTransient) {
+      report(
+        new AbigaailWarning(
+          "ABIGAAIL_ENDPOINT is plain http to another machine; visitor IP/UA are withheld until the endpoint uses https",
+        ),
+      );
+    }
+    const instance = new NodeAdapter(client, opts, report, hostOf(endpoint), sendTransient);
     g[SINGLETON] = instance;
     return instance;
   } catch (err) {
@@ -233,6 +257,8 @@ class NodeAdapter implements AbigaailNode {
     opts: NodeOptions,
     private readonly report: (err: unknown) => void,
     private readonly ownHost: string | undefined,
+    /** False when the endpoint is plain http off this machine (DECISIONS #36). */
+    private readonly sendTransient: boolean,
   ) {
     this.routes = new RouteNormaliser({
       ...(opts.routes ? { patterns: opts.routes } : {}),
@@ -338,7 +364,9 @@ class NodeAdapter implements AbigaailNode {
       ...(resBytes !== undefined ? { res_bytes: resBytes } : {}),
       ...(referrer ? { referrer_domain: referrer } : {}),
       ...(flags ? { flags } : {}),
-      transient: { ...(ip ? { ip } : {}), ...(typeof ua === "string" ? { ua } : {}) },
+      ...(this.sendTransient
+        ? { transient: { ...(ip ? { ip } : {}), ...(typeof ua === "string" ? { ua } : {}) } }
+        : {}),
     });
   }
 

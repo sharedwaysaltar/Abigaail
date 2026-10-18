@@ -11,4 +11,7 @@ decided later (see DECISIONS #2); this list grows as chunks land.
       old one would let that day's visitor hashes be recomputed. A lost salt only
       means a new one is generated.
 - [ ] `data/` owned by the service user, directory mode 0700; `salt.bin` stays 0600.
+- [ ] **Ingest only over HTTPS.** Apps must reach `/ingest` through TLS (e.g. Caddy in
+      front). Over plain http to another machine the SDK withholds visitor IP/UA
+      (DECISIONS #36), so visitor hashes, bot class and geo stay empty.
 - [ ] Ingest keys and other secrets come from the environment, never from files in the repo.

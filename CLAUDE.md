@@ -22,7 +22,8 @@ Progress and next chunk: @docs/ROADMAP.md.
   docs/DECISIONS.md.
 - **New decisions** go in docs/DECISIONS.md; when a chunk is done, mark it in
   docs/ROADMAP.md.
-- Never put model identifiers in commits or files.
+- Never put model identifiers in commits or files. Commit trailers are exactly
+  `Co-Authored-By: Claude <noreply@anthropic.com>`, without a model name.
 
 ## Non-negotiables (from the spec, condensed)
 
