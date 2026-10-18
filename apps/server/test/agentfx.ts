@@ -106,8 +106,8 @@ export class Fx {
     this.put([{ event: { type: "metric", event_id: id(), client_ts: ts, name, value }, derived: { ts } }]);
   }
 
-  lifecycle(ts: number, kind: "boot" | "heartbeat" | "shutdown"): void {
-    this.put([{ event: { type: "lifecycle", event_id: id(), client_ts: ts, kind }, derived: { ts } }]);
+  lifecycle(ts: number, kind: "boot" | "heartbeat" | "shutdown", release = "r1"): void {
+    this.put([{ event: { type: "lifecycle", event_id: id(), client_ts: ts, kind }, derived: { ts } }], release);
   }
 
   /** Heartbeats every minute over [from, to). */

@@ -227,10 +227,18 @@ export class StoreReader {
   }
 
   /** Lifecycle events (boot, heartbeat, shutdown) with ts in [from, to), oldest first. */
-  lifecycle(appId: string, from: number, to: number): { ts: number; kind: string }[] {
+  lifecycle(appId: string, from: number, to: number): { ts: number; kind: string; release: string }[] {
     return this.db
-      .prepare("SELECT ts, name AS kind FROM events WHERE app_id = ? AND type = 'lifecycle' AND ts >= ? AND ts < ? ORDER BY ts")
-      .all(appId, from, to) as unknown as { ts: number; kind: string }[];
+      .prepare("SELECT ts, name AS kind, release FROM events WHERE app_id = ? AND type = 'lifecycle' AND ts >= ? AND ts < ? ORDER BY ts")
+      .all(appId, from, to) as unknown as { ts: number; kind: string; release: string }[];
+  }
+
+  /** Release of the app's last event of any type before `ts`, if any. */
+  releaseBefore(appId: string, ts: number): string | undefined {
+    const row = this.db
+      .prepare("SELECT release FROM events WHERE app_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1")
+      .get(appId, ts) as { release: string } | undefined;
+    return row?.release;
   }
 
   /** The latest lifecycle event, if any. */

@@ -160,6 +160,20 @@ describe("dependencies name the cause", () => {
     expect(signals(fx.run(health))).toEqual(["server_errors:/api/checkout:critical"]);
   });
 
+  it("unlinked calls (linkOutbound: false): both findings stay, the route names the likely dependency", () => {
+    // What an app with linkOutbound: false sends: outbound events with no parent_id.
+    recent(30, (i) => ({ route: "/api/checkout", status: i < 12 ? 502 : 200 }));
+    for (let i = 0; i < 30; i++) fx.outbound(E() - 3 * MIN + i * 1000, "api.stripe.com", i < 12 ? { outcome: "timeout" } : {});
+    const found = fx.run(health);
+    // With no baseline a failing dependency alone is a warning (DECISIONS #50); nothing folds into it.
+    expect(signals(found)).toEqual(["dependency:api.stripe.com:warning", "server_errors:/api/checkout:critical"]);
+    const route = found.find((f) => f.signal === "server_errors")!;
+    expect(route.cause).toBe("At the same time api.stripe.com failed 12 of 30 calls; likely related (calls are not linked on this Node version).");
+    expect(route.evidence.likely_dependency).toMatchObject({ host: "api.stripe.com", linked: false });
+    // Not folded: the dependency finding does not claim the route.
+    expect(found.find((f) => f.signal === "dependency")!.evidence.explains_routes).toEqual([]);
+  });
+
   it("a slow route names the slow upstream it calls (the AGENTS.md example)", () => {
     fx.baselineWeeks(E(), 4, (h) => {
       const ids = fx.requests(h, h + HOUR_MS, 40, (i) => ({ route: "/api/chat", duration: 4600 + i }));
@@ -206,6 +220,28 @@ describe("other signals", () => {
     fx.lifecycle(fx.now - 5 * MIN, "shutdown");
     fx.lifecycle(fx.now - 4 * MIN, "boot");
     expect(only("restart")[0]!.evidence).toMatchObject({ boots_without_shutdown: [fx.now - 10 * MIN] });
+  });
+
+  it("a boot on a new release is a deploy (info, no warning)", () => {
+    recent(40);
+    fx.lifecycle(fx.now - 30 * MIN, "boot", "r1");
+    fx.lifecycle(fx.now - 20 * MIN, "heartbeat", "r1");
+    // No shutdown before it, but the release changed: a deploy, not a crash.
+    fx.lifecycle(fx.now - 10 * MIN, "boot", "r2");
+    const found = fx.run(health);
+    expect(signals(found)).toEqual(["deploy:r2:info"]);
+    expect(found[0]).toMatchObject({ fact: true, evidence: { release: "r2", previous_release: "r1" } });
+    expect(found[0]!.summary).toMatch(/^app deployed release r2 \(was r1\) at \d\d:\d\d UTC\.$/);
+  });
+
+  it("a second boot on the same new release without a shutdown is a crash", () => {
+    fx.requests(E() - 4 * MIN, E() - 1_000, 40, {}, "r2");
+    fx.lifecycle(fx.now - 30 * MIN, "heartbeat", "r1");
+    fx.lifecycle(fx.now - 12 * MIN, "boot", "r2");
+    fx.lifecycle(fx.now - 8 * MIN, "heartbeat", "r2");
+    fx.lifecycle(fx.now - 4 * MIN, "boot", "r2");
+    expect(signals(fx.run(health))).toEqual(["deploy:r2:info", "restart::warning"]);
+    expect(only("restart")[0]!.evidence).toMatchObject({ boots_without_shutdown: [fx.now - 4 * MIN] });
   });
 
   it("event-loop lag names the slowest routes in the same window", () => {

@@ -43,18 +43,38 @@ interface Windows {
 
 const byKey = (rows: StatRow[]) => new Map(rows.map((r) => [r.key, r]));
 
-// ---- 1. restarts -------------------------------------------------------------
+// ---- 1. restarts and deploys ---------------------------------------------------
 
+/**
+ * A boot on a new release is a deploy (info). A boot on the same release with
+ * no shutdown before it is a crash or kill (warning). The release comes from
+ * the app's last event of any type before the boot.
+ */
 function restarts(ctx: AgentContext, app: App): AgentFinding[] {
   const events = ctx.store.lifecycle(app.id, ctx.now - DAY_MS, ctx.now + 1);
   const crashes: number[] = [];
+  const out: AgentFinding[] = [];
   events.forEach((e, i) => {
-    if (e.kind !== "boot" || e.ts < ctx.now - 15 * MIN || i === 0) return;
-    // A boot whose previous lifecycle event is not a shutdown: crash or kill.
-    if (events[i - 1]!.kind !== "shutdown") crashes.push(e.ts);
+    if (e.kind !== "boot" || e.ts < ctx.now - 15 * MIN) return;
+    const previous = ctx.store.releaseBefore(app.id, e.ts);
+    if (previous === undefined) return; // the app's first boot ever
+    if (previous !== e.release) {
+      out.push({
+        signal: "deploy",
+        subject: e.release,
+        severity: "info",
+        summary: `${app.name} deployed release ${e.release} (was ${previous}) at ${new Date(e.ts).toISOString().slice(11, 16)} UTC.`,
+        action: "Nothing to do. Health compares the new release with the app's normal; watch for findings in the next minutes.",
+        evidence: { release: e.release, previous_release: previous, booted_at: e.ts },
+        fact: true,
+      });
+      return;
+    }
+    // Same release, and the previous lifecycle event is not a shutdown: crash or kill.
+    if (i > 0 && events[i - 1]!.kind !== "shutdown") crashes.push(e.ts);
   });
-  if (!crashes.length) return [];
-  return [{
+  if (!crashes.length) return out;
+  return [...out, {
     signal: "restart",
     subject: "",
     severity: "warning",
@@ -475,6 +495,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   // Dependencies first, so failing routes they explain fold into them.
   const deps = dependencies(ctx, app, w, slots);
   const causesByWindow = new Map<number, { route: string; host: string; requests: number }[]>();
+  const linkedByWindow = new Map<number, { host: string; route: string | null; calls: number; failed: number }[]>();
   for (const failure of routeErrors(app, w, slots, routeBase)) {
     let causes = causesByWindow.get(failure.windowMs);
     if (!causes) causesByWindow.set(failure.windowMs, (causes = ctx.store.failingRequestCauses(app.id, end - failure.windowMs, end)));
@@ -497,6 +518,19 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
       dep.severity = worse(dep.severity, failure.finding.severity);
       dep.explains.push({ route: failure.route, failing_requests: top.requests, failures: failure.row.status_5xx, window_ms: failure.windowMs });
       continue;
+    }
+    let routeCalls = linkedByWindow.get(failure.windowMs);
+    if (!routeCalls) linkedByWindow.set(failure.windowMs, (routeCalls = ctx.store.outboundByRoute(app.id, end - failure.windowMs, end)));
+    if (!routeCalls.some((l) => l.route === failure.route)) {
+      // No call is linked to this route (linking off, or Node 22's default), so
+      // the link cannot be proven: keep both findings and name the likely cause.
+      const failing = [...deps.values()].filter((d) => d.failing).sort((a, b) => b.row.failures - a.row.failures)[0];
+      if (failing) {
+        failure.finding.cause =
+          `At the same time ${failing.host} failed ${failing.row.failures} of ${failing.row.n} calls; ` +
+          "likely related (calls are not linked on this Node version).";
+        failure.finding.evidence.likely_dependency = { host: failing.host, calls: failing.row.n, failed_calls: failing.row.failures, linked: false };
+      }
     }
     out.push(failure.finding);
   }
