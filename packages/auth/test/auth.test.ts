@@ -262,6 +262,40 @@ describe("Authenticator", () => {
     expect(actions()[0]).toBe("logout");
   });
 
+  it("peekSession is read-only: an open Live stream re-checking every minute does not extend the idle timeout", async () => {
+    const r = await attempt();
+    if (!r.ok) throw new Error("expected sign-in");
+    const lastSeen = () => store.sessionByHash(hashToken(r.token))?.last_seen;
+    const start = lastSeen();
+    for (let m = 1; m <= 120; m++) {
+      now += 60_000;
+      expect(auth.peekSession(r.token)?.user).toBe("owner");
+    }
+    expect(lastSeen()).toBe(start);
+    now += 1;
+    expect(auth.peekSession(r.token)).toBeUndefined();
+    expect(auth.session(r.token)).toBeUndefined();
+  });
+
+  it("peekSession follows the same rules as session: disabled, absolute expiry, odd tokens", async () => {
+    const r = await attempt();
+    if (!r.ok) throw new Error("expected sign-in");
+    // Keep it fresh through session() (page loads), past the 12 h absolute limit.
+    for (let h = 0; h < 12; h++) {
+      now += 3_600_000;
+      auth.session(r.token);
+    }
+    now += 1;
+    expect(auth.peekSession(r.token)).toBeUndefined();
+    const b = await attempt();
+    if (!b.ok) throw new Error("expected sign-in");
+    expect(auth.peekSession(b.token)?.user).toBe("owner");
+    store.disableUser("owner", "test");
+    expect(auth.peekSession(b.token)).toBeUndefined();
+    expect(auth.peekSession(undefined)).toBeUndefined();
+    expect(auth.peekSession("x".repeat(500))).toBeUndefined();
+  });
+
   it("refuses odd tokens without a lookup", () => {
     expect(auth.session(undefined)).toBeUndefined();
     expect(auth.session("x".repeat(500))).toBeUndefined();

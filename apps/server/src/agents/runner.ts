@@ -84,6 +84,8 @@ export class Runner {
   private readonly running = new Map<string, Worker>();
   private readonly lastSlot = new Map<string, number>();
   private readonly lastOk = new Map<string, number>();
+  /** Agents that restarted after a gap longer than their resolve window: no reopening of findings resolved before startedAt. */
+  private readonly reopenFrom = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private rolledThrough: number | undefined;
   private maintaining = false;
@@ -105,6 +107,29 @@ export class Runner {
       runnerStartedAt: this.startedAt,
       lastRunBeforeStart: this.store.lastRunBefore(this.startedAt) ?? null,
     };
+    this.closeUnobserved();
+  }
+
+  /**
+   * After a gap longer than an agent's resolve window (FINDINGS.resolveAfter
+   * runs), its open findings were not observed while Abigaail was down. They
+   * are resolved as such rather than continued with their old first_seen and
+   * hits; whatever is still true is found again, fresh, by the next run.
+   * The cooldown cannot reach across the gap either: a finding that resolved
+   * normally before the gap is not reopened (its resolved_reason is left as it is).
+   */
+  private closeUnobserved(): void {
+    for (const a of this.agents) {
+      const last = this.store.lastAgentRunBefore(a.name, this.startedAt);
+      if (last !== undefined && this.startedAt - last <= FINDINGS.resolveAfter * a.everyMs) continue;
+      this.reopenFrom.set(a.name, this.startedAt);
+      try {
+        const n = this.store.resolveUnobserved(a.name, this.startedAt);
+        if (n) this.log(`${a.name}: ${n} open finding${n === 1 ? "" : "s"} closed as not observed while Abigaail was down`);
+      } catch (err) {
+        this.log(`${a.name}: could not close unobserved findings (${errorClass(err)})`);
+      }
+    }
   }
 
   /** Tick at every minute boundary until stop(). Never keeps the process alive. */
@@ -217,6 +242,7 @@ export class Runner {
       this.store.recordRun(run, findings, result?.evaluated ?? [], {
         cooldownMs: FINDINGS.cooldownMs,
         resolveAfter: FINDINGS.resolveAfter,
+        ...(this.reopenFrom.has(run.agent) ? { reopenFrom: this.reopenFrom.get(run.agent)! } : {}),
       });
       if (run.outcome === "ok") this.lastOk.set(run.agent, run.finished_at);
     } catch (err) {

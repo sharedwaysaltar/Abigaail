@@ -71,6 +71,8 @@ export interface Finding {
   first_seen: number;
   last_seen: number;
   resolved_at: number | null;
+  /** "not_observed": closed because Abigaail was down longer than the resolve window. */
+  resolved_reason: "not_observed" | null;
 }
 
 export type RunOutcome = "ok" | "error" | "timeout" | "skipped";
@@ -171,7 +173,7 @@ const STAT_SQL: Record<StatKind, string> = {
 
 const STAT_COLUMNS = "key, n, weighted_n, status_5xx, status_4xx, status_401_403, failures, p50, p95, p99, uniques";
 const FINDING_COLUMNS =
-  "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, resolves, first_seen, last_seen, resolved_at";
+  "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, resolves, first_seen, last_seen, resolved_at, resolved_reason";
 export const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at, region";
 
 function toFinding(row: Record<string, unknown>): Finding {
@@ -195,6 +197,10 @@ export class StoreReader {
 
   appByName(name: string): App | undefined {
     return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps WHERE name = ?`).get(name) as App | undefined;
+  }
+
+  appById(id: string): App | undefined {
+    return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps WHERE id = ?`).get(id) as App | undefined;
   }
 
   listApps(): App[] {
@@ -464,9 +470,27 @@ export class StoreReader {
       .all(agent, limit) as unknown as AgentRun[];
   }
 
+  /** Runs of an agent started at or after `since`, counted per outcome. */
+  runOutcomes(agent: string, since: number): Record<RunOutcome, number> {
+    const out: Record<RunOutcome, number> = { ok: 0, error: 0, timeout: 0, skipped: 0 };
+    const rows = this.db
+      .prepare("SELECT outcome, count(*) AS n FROM agent_runs WHERE agent = ? AND started_at >= ? GROUP BY outcome")
+      .all(agent, since) as { outcome: RunOutcome; n: number }[];
+    for (const r of rows) out[r.outcome] = Number(r.n);
+    return out;
+  }
+
   /** Finish time of the last run of any agent that finished before `ts`. */
   lastRunBefore(ts: number): number | undefined {
     const row = this.db.prepare("SELECT max(finished_at) AS t FROM agent_runs WHERE finished_at < ?").get(ts) as { t: number | null };
+    return row.t ?? undefined;
+  }
+
+  /** Finish time of the agent's last run of any outcome that finished at or before `ts`. */
+  lastAgentRunBefore(agent: string, ts: number): number | undefined {
+    const row = this.db
+      .prepare("SELECT max(finished_at) AS t FROM agent_runs WHERE agent = ? AND finished_at <= ?")
+      .get(agent, ts) as { t: number | null };
     return row.t ?? undefined;
   }
 

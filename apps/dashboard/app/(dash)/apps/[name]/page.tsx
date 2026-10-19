@@ -1,5 +1,6 @@
-import { appSummary, dependsOn, earlier, fourNumbers, responseSeries, routesThatChanged, type RouteChange } from "@abigaail/insights";
+import { appSummary, dependsOn, earlier, fourNumbers, responseSeries, routesThatChanged, usageNumbers, type RouteChange } from "@abigaail/insights";
 import { notFound } from "next/navigation";
+import { AppNav } from "@/components/AppNav";
 import { Figures } from "@/components/Figures";
 import { ResponseChart } from "@/components/ResponseChart";
 import { Status } from "@/components/Status";
@@ -19,6 +20,8 @@ const CHANGE: Record<RouteChange["kind"], (c: RouteChange) => string> = {
   quieter: (c) => `quieter: ${c.now} requests last hour, usually ${Math.round(c.usual ?? 0)}`,
 };
 
+const count = (v: number) => Math.round(v).toLocaleString("en-GB");
+
 export default async function AppPage({ params }: { params: Promise<{ name: string }> }) {
   await requireSession();
   const { name } = await params;
@@ -32,9 +35,11 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
   const deps = dependsOn(r, app.id, now);
   const routes = routesThatChanged(r, app.id, now);
   const past = earlier(r, app.id, now);
+  const usage = usageNumbers(r, app.id, now);
   const region = app.region ? regionInfo(app.region) : undefined;
   const top = s.top && s.top.severity !== "unknown" ? s.top : undefined;
   const hasPoints = series.some((p) => p.p95 !== null);
+  const more = s.open.filter((f) => f.severity !== "info").length - 1;
 
   return (
     <main>
@@ -48,6 +53,7 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
           {app.region ? <span><span className="mono">{app.region}</span>{region ? ` ${region.city}` : " (not on the map)"}</span> : null}
           {app.disabled_at !== null ? <span>disabled {when(app.disabled_at)}</span> : null}
         </div>
+        <AppNav name={app.name} current="overview" />
       </div>
 
       <section className="first">
@@ -62,8 +68,10 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
             <div>
               <h3>What to do</h3>
               <p>{top.action}</p>
-              {s.open.filter((f) => f.severity !== "info").length > 1 ? (
-                <p className="since">{s.open.filter((f) => f.severity !== "info").length - 1} more open finding(s) for this app.</p>
+              {more > 0 ? (
+                <p className="since">
+                  <a href={`/findings?app=${encodeURIComponent(app.name)}`}>{more} more open finding{more === 1 ? "" : "s"}</a> for this app.
+                </p>
               ) : null}
             </div>
           </div>
@@ -110,6 +118,70 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
         ) : (
           <p className="empty">Too little data: no hour in the last day had enough requests to chart.</p>
         )}
+      </section>
+
+      <section>
+        <h2>Usage, last 24 hours</h2>
+        <div className="figures usagefigs">
+          <div className="figure">
+            <div className="label">Requests</div>
+            <div className={`value${usage.requests === null ? " grey" : ""}`}>{usage.requests === null ? "—" : count(usage.requests)}</div>
+            <div className="usual">
+              {usage.requests === null
+                ? "No data in the last day"
+                : usage.hoursWithData < 24
+                  ? `${usage.hoursWithData} of 24 hours had data`
+                  : "Humans only, bots and probes left out"}
+            </div>
+          </div>
+          <div className="figure">
+            <div className="label">Unique humans, {usage.uniques.day}</div>
+            <div className={`value${usage.uniques.value === null ? " grey" : ""}`}>{usage.uniques.value === null ? "—" : count(usage.uniques.value)}</div>
+            <div className="usual">
+              {usage.uniques.value === null
+                ? "Too little data"
+                : usage.uniques.usual === null
+                  ? "No usual value yet"
+                  : `Usually ${count(usage.uniques.usual)} on a ${usage.uniques.weekday}`}
+            </div>
+            <div className="faint small">Counted per UTC day; the same visitor can't be linked across days, by design.</div>
+          </div>
+          <div className="figure span2">
+            <div className="label">Top routes</div>
+            {usage.topRoutes.length ? (
+              <ul className="toplist">
+                {usage.topRoutes.map((t) => (
+                  <li key={t.route}><span className="mono">{t.route}</span><span className="num">{count(t.requests)}</span></li>
+                ))}
+              </ul>
+            ) : <div className="usual">No data in the last day</div>}
+          </div>
+        </div>
+        <div className="cols usagecols">
+          <div>
+            <h3 className="minor">Referrers</h3>
+            {usage.topReferrers.length ? (
+              <ul className="toplist">
+                {usage.topReferrers.map((t) => (
+                  <li key={t.domain}><span className="mono">{t.domain}</span><span className="num">{count(t.requests)}</span></li>
+                ))}
+              </ul>
+            ) : <p className="empty small">No referrers in the last day.</p>}
+          </div>
+          <div style={{ gridColumn: "span 2" }}>
+            <h3 className="minor">Noticed</h3>
+            {usage.noticed.length ? (
+              <ul className="plain">
+                {usage.noticed.map((f) => (
+                  <li key={f.id} style={{ display: "block" }}>
+                    <div>{f.summary}</div>
+                    <div className="small muted">{f.action}</div>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="empty small">Nothing unusual in how the app is used.</p>}
+          </div>
+        </div>
       </section>
 
       <div className="cols">
@@ -166,7 +238,9 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
                   ) : (
                     <div>
                       {e.finding.summary}{" "}
-                      <span className="muted small">{e.finding.state === "resolved" ? "resolved" : "noted"}</span>
+                      <span className="muted small">
+                        {e.finding.resolved_reason === "not_observed" ? "not observed while Abigaail was down" : e.finding.state === "resolved" ? "resolved" : "noted"}
+                      </span>
                     </div>
                   )}
                 </li>

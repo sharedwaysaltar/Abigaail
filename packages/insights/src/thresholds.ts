@@ -26,6 +26,18 @@ export const BASELINE = {
   minLatencySlots: 2,
 };
 
+/**
+ * How often each agent runs and its hard timeout. The runner schedules from
+ * this; the dashboard's Agents view shows it. A new agent adds a line here.
+ */
+export const SCHEDULE = {
+  health: { everyMs: 60_000, timeoutMs: 20_000 },
+  watchdog: { everyMs: 60_000, timeoutMs: 20_000 },
+  usage: { everyMs: 15 * 60_000, timeoutMs: 60_000 },
+  /** Not an agent: the hourly rollup runs in the main thread. */
+  rollup: { everyMs: 3_600_000 },
+} as const;
+
 /** Status turns grey when Health has not completed a run for this long. */
 export const STATUS_FRESH_MS = 3 * 60_000;
 
@@ -56,4 +68,10 @@ export const VIEWS = {
   /** How far back "Earlier" looks. */
   earlierMs: 7 * 24 * 3_600_000,
   maxEarlier: 20,
+  /** Resolved findings shown per app (from the last earlierMs). */
+  maxResolved: 100,
+  /** Top routes and referrers in the App page's Usage section. */
+  usageTop: 5,
+  /** Recent runs per agent on the Agents page. */
+  agentRuns: 30,
 };

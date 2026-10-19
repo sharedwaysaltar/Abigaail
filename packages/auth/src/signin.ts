@@ -125,6 +125,20 @@ export class Authenticator {
     return { user: s.user_name, session: s };
   }
 
+  /**
+   * The same rules as session(), but read-only: never refreshes last_seen and
+   * never deletes. For checks that are not the user's own activity (an open
+   * Live stream re-checking its session), so they cannot extend the idle timeout.
+   */
+  peekSession(token: string | undefined): { user: string; session: SessionRow } | undefined {
+    if (!token || token.length > 128) return undefined;
+    const s = this.store.sessionByHash(hashToken(token));
+    if (!s) return undefined;
+    const t = this.now();
+    if (s.disabled_at !== null || s.activated_at === null || t - s.last_seen > AUTH.sessionIdleMs || t - s.created_at > AUTH.sessionMaxMs) return undefined;
+    return { user: s.user_name, session: s };
+  }
+
   signOut(token: string | undefined): void {
     if (!token || token.length > 128) return;
     const s = this.store.sessionByHash(hashToken(token));

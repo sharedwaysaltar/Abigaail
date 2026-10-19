@@ -231,6 +231,8 @@ interface Dependency {
   host: string;
   severity: Severity;
   row: StatRow;
+  /** The window `row` covers: 5 min, or a folded route finding's window when the calls fell outside it. */
+  windowMs: number;
   failing?: { lb: number; share: number; base: number | undefined };
   slow?: LatencyJudgement;
   /** Routes whose 5xx this host explains (folded route findings). */
@@ -241,7 +243,7 @@ function dependencies(ctx: AgentContext, app: App, w: Windows, slots: Slots): Ma
   const base = rowsByKey(ctx.store, app.id, "host", slots);
   const deps = new Map<string, Dependency>();
   for (const row of ctx.store.statsFor(app.id, "host", w.end - 5 * MIN, w.end)) {
-    const dep: Dependency = { host: row.key, severity: "info", row, explains: [] };
+    const dep: Dependency = { host: row.key, severity: "info", row, windowMs: 5 * MIN, explains: [] };
     if (row.n >= H.minCalls && row.failures > 0) {
       const lb = wilsonLower(row.failures, row.n);
       const rate = typicalRate(base.get(row.key), (r) => r.failures);
@@ -269,9 +271,10 @@ function dependencies(ctx: AgentContext, app: App, w: Windows, slots: Slots): Ma
 function dependencyFinding(dep: Dependency, linked: { route: string | null; calls: number; failed: number }[], slots: Slots, end: number): AgentFinding {
   const { host, row } = dep;
   const parts: string[] = [];
-  if (dep.failing) {
-    parts.push(`${host} is failing: ${row.failures} of ${row.n} calls in 5 min ended in an error, timeout or 5xx` +
-      (dep.failing.base === undefined ? "" : ` (usually ${pct(dep.failing.base)})`));
+  // A folded dependency judged in its route's window still says what failed, with its numbers.
+  if (dep.failing || (!dep.slow && row.failures > 0)) {
+    parts.push(`${host} is failing: ${row.failures} of ${row.n} calls in ${humanDuration(dep.windowMs)} ended in an error, timeout or 5xx` +
+      (dep.failing?.base === undefined ? "" : ` (usually ${pct(dep.failing.base)})`));
   }
   if (dep.slow) {
     parts.push(dep.slow.normal
@@ -290,7 +293,7 @@ function dependencyFinding(dep: Dependency, linked: { route: string | null; call
     action: `Check ${host}'s status page; consider a shorter timeout with a fallback so callers fail fast.`,
     evidence: {
       host,
-      window_ms: 5 * MIN,
+      window_ms: dep.windowMs,
       calls: row.n,
       failed_calls: row.failures,
       p50: row.p50,
@@ -515,7 +518,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
           out.push(failure.finding);
           continue;
         }
-        dep = { host: top.host, severity: "info", row, explains: [] };
+        dep = { host: top.host, severity: "info", row, windowMs: failure.windowMs, explains: [] };
         deps.set(top.host, dep);
       }
       dep.severity = worse(dep.severity, failure.finding.severity);
@@ -541,11 +544,17 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   }
 
   const linked = ctx.store.outboundByRoute(app.id, end - 5 * MIN, end);
+  const linkedIn = (windowMs: number) => {
+    if (windowMs === 5 * MIN) return linked;
+    let l = linkedByWindow.get(windowMs);
+    if (!l) linkedByWindow.set(windowMs, (l = ctx.store.outboundByRoute(app.id, end - windowMs, end)));
+    return l;
+  };
   const slowHosts = new Map<string, Dependency>();
   for (const dep of deps.values()) {
     if (dep.severity === "info") continue;
     if (dep.slow) slowHosts.set(dep.host, dep);
-    out.push(dependencyFinding(dep, linked.filter((l) => l.host === dep.host), slots, end));
+    out.push(dependencyFinding(dep, linkedIn(dep.windowMs).filter((l) => l.host === dep.host), slots, end));
   }
 
   for (const { route, finding } of routeLatency(w, slots, routeBase)) {

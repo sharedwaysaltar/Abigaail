@@ -4,7 +4,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { LIMITS } from "@abigaail/schema";
 import { validateBatch } from "@abigaail/schema/validate";
-import type { App, Store } from "@abigaail/store";
+import type { App, EventRow, Store } from "@abigaail/store";
 import { classifyUserAgent, eventTime, utcDay, visitorHash } from "./derive.js";
 import { TokenBucket } from "./ratelimit.js";
 import type { SaltSource } from "./salt.js";
@@ -36,6 +36,11 @@ export interface ServerOptions {
   healthz?: () => { ok: boolean; agents?: "off" };
   /** How often refusal counts (401/403/429) are written to the store. Default 60 s. */
   rejectionFlushMs?: number;
+  /**
+   * Live feed (live.ts). Gets each batch's newly stored rows after the 202 is
+   * sent; a failure there is logged and never reaches the ingest response.
+   */
+  live?: { publish(appId: string, rows: readonly EventRow[], release: string): void };
 }
 
 const JSON_TYPE = "application/json";
@@ -110,6 +115,7 @@ export function createServer(opts: ServerOptions): http.Server {
   // One bucket per known app: bounded by the number of apps, not by callers.
   const appBuckets = new Map<string, TokenBucket>();
   let saltFailing = false;
+  let liveFailing = false;
 
   // Refusals per (app, minute, status), kept in memory and flushed in one
   // transaction a minute, so a flood of bad requests never means a write per
@@ -225,13 +231,23 @@ export function createServer(opts: ServerOptions): http.Server {
       };
     });
 
-    const { inserted, duplicates } = store.insertBatch(app.id, {
+    const { inserted, duplicates, rows } = store.insertBatch(app.id, {
       receivedAt,
       release: batch.release,
       environment: batch.environment,
       events,
     });
     send(res, 202, { accepted: inserted, duplicates });
+    if (opts.live) {
+      try {
+        opts.live.publish(app.id, rows, batch.release);
+        liveFailing = false;
+      } catch (err) {
+        // Logged once per failure streak; ingest has already answered.
+        if (!liveFailing) log(`live: could not publish (${errorClass(err)})`);
+        liveFailing = true;
+      }
+    }
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {

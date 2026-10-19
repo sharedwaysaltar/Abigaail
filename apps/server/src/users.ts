@@ -56,7 +56,7 @@ export async function runUserCommand(command: string | undefined, name: string |
       case "unlock": {
         if (!store.userByName(name)) throw new Error(`no user named "${name}"`);
         const cleared = store.unlock(name, "cli");
-        deps.print(cleared ? `Unlocked "${name}" (${cleared} recent failure(s) cleared).` : `"${name}" was not locked.`);
+        deps.print(cleared ? `Unlocked "${name}" (${cleared} recent failure${cleared === 1 ? "" : "s"} cleared).` : `"${name}" was not locked.`);
         break;
       }
     }

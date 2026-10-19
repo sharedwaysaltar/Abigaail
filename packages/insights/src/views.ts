@@ -3,10 +3,10 @@
 // the agents judge with (DECISIONS #42, #49). Where evidence is short they
 // return null with a reason; the dashboard shows that grey, never as healthy.
 
-import { HOUR_MS, type App, type AppStatus, type Finding, type StatRow, type StoreReader } from "@abigaail/store";
+import { HOUR_MS, type AgentRun, type App, type AppStatus, type Finding, type RunOutcome, type StatRow, type StoreReader } from "@abigaail/store";
 import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
 import { median, poissonCdf, poissonUpperTail } from "./stats.js";
-import { BASELINE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
+import { BASELINE, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
 
 const MIN = 60_000;
 
@@ -328,4 +328,153 @@ export function earlier(store: StoreReader, appId: string, now: number): Earlier
     if (d.first_seen >= since) items.push({ kind: "deploy", ts: d.first_seen, release: d.release, environment: d.environment });
   }
   return items.sort((a, b) => b.ts - a.ts).slice(0, V.maxEarlier);
+}
+
+// ---- findings --------------------------------------------------------------------------
+
+/** Worst first: severity, then held longest (most runs), then oldest. */
+const worstFirst = (a: Finding, b: Finding) =>
+  SEVERITY_RANK[a.severity]! - SEVERITY_RANK[b.severity]! || b.hits - a.hits || a.first_seen - b.first_seen || a.id - b.id;
+
+/**
+ * One app's findings: open ones worst first, or those resolved in the last
+ * VIEWS.earlierMs, most recently resolved first. Scoped by app: the Findings
+ * page calls this once per app and never reads across apps.
+ */
+export function findingsFor(store: StoreReader, appId: string, opts: { state: "open" | "resolved"; now: number }): Finding[] {
+  if (opts.state === "open") return store.openFindings(appId).sort(worstFirst);
+  return store
+    .findingsSince(appId, opts.now - V.earlierMs, V.maxResolved)
+    .filter((f) => f.state === "resolved")
+    .sort((a, b) => (b.resolved_at ?? 0) - (a.resolved_at ?? 0) || b.id - a.id);
+}
+
+/** Open findings about Abigaail itself (app_id NULL), worst first. */
+export function systemFindingsView(store: StoreReader): Finding[] {
+  return store.systemFindings().sort(worstFirst);
+}
+
+// ---- usage on the app page ---------------------------------------------------------------
+
+export interface UsageNumbers {
+  /** The closed hours looked at: [from, to). */
+  from: number;
+  to: number;
+  /** Of the 24 hours: how many are rolled up, and how many of those had any events. */
+  hoursRolled: number;
+  hoursWithData: number;
+  /** Requests that matter, weighted; null when no hour had data. */
+  requests: number | null;
+  topRoutes: { route: string; requests: number }[];
+  topReferrers: { domain: string; requests: number }[];
+  /** Unique humans yesterday (UTC) against the same weekday over the last 4 weeks. */
+  uniques: { day: string; weekday: string; value: number | null; usual: number | null };
+  /** Open Usage findings (all info, fact-style). */
+  noticed: Finding[];
+}
+
+const utcDate = (t: number) => new Date(t).toISOString().slice(0, 10);
+
+/**
+ * Usage over the last 24 closed hours, from the rollup only, as the Usage
+ * agent reads it (DECISIONS #52). Hours with no events are "no data", never
+ * zero traffic.
+ */
+export function usageNumbers(store: StoreReader, appId: string, now: number): UsageNumbers {
+  const to = Math.floor(windowEnd(now) / HOUR_MS) * HOUR_MS;
+  const from = to - 24 * HOUR_MS;
+  const hours = Array.from({ length: 24 }, (_, k) => from + k * HOUR_MS);
+  const rolled = store.rolledHours(appId, hours);
+  const withData = [...rolled.values()].filter((n) => n > 0).length;
+
+  const sum = (rows: readonly StatRow[]) => {
+    const by = new Map<string, number>();
+    for (const r of rows) by.set(r.key, (by.get(r.key) ?? 0) + r.weighted_n);
+    return [...by].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  };
+  const routes = sum(store.hourlyRange(appId, "route", from, to));
+  const referrers = sum(store.hourlyRange(appId, "referrer", from, to));
+
+  const DAY = 24 * HOUR_MS;
+  const yesterday = Math.floor(windowEnd(now) / DAY) * DAY - DAY;
+  const before = [1, 2, 3, 4].map((k) => utcDate(yesterday - k * 7 * DAY));
+  const counts = store.dailyUniques(appId, [utcDate(yesterday), ...before]);
+  const past = before.map((d) => counts.get(d) ?? 0).filter((n) => n > 0);
+
+  return {
+    from,
+    to,
+    hoursRolled: rolled.size,
+    hoursWithData: withData,
+    requests: withData ? routes.reduce((t, [, n]) => t + n, 0) : null,
+    topRoutes: routes.slice(0, V.usageTop).map(([route, n]) => ({ route, requests: n })),
+    topReferrers: referrers.slice(0, V.usageTop).map(([domain, n]) => ({ domain, requests: n })),
+    uniques: {
+      day: utcDate(yesterday),
+      weekday: new Date(yesterday).toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" }),
+      value: counts.get(utcDate(yesterday)) ?? null,
+      usual: past.length >= BASELINE.minWeeks ? (median(past) ?? null) : null,
+    },
+    noticed: store.openFindings(appId).filter((f) => f.agent === "usage"),
+  };
+}
+
+// ---- agents --------------------------------------------------------------------------------
+
+export interface AgentView {
+  name: string;
+  /** From SCHEDULE; undefined for a name that only appears in the run log. */
+  schedule: { everyMs: number; timeoutMs?: number } | undefined;
+  /**
+   * What the Watchdog says about it: red for stalled or failing, amber for
+   * slowing, grey when it never ran or the Watchdog itself is not running,
+   * else green. The page never judges agents on its own.
+   */
+  status: AppStatus;
+  /** The Watchdog finding behind a non-green status, if any. */
+  finding: Finding | undefined;
+  lastOkAt: number | undefined;
+  /** Newest first, at most VIEWS.agentRuns. */
+  runs: AgentRun[];
+  medianMs: number | null;
+  maxMs: number | null;
+  /** Runs in the last 24 h per outcome. */
+  day: Record<RunOutcome, number>;
+  /** Open findings this agent holds, across apps (counted per app) and about Abigaail. */
+  open: number;
+}
+
+/** One row per scheduled agent (and the rollup), plus any other name in the run log. */
+export function agentsView(store: StoreReader, apps: readonly App[], now: number): AgentView[] {
+  const system = store.systemFindings();
+  const watchdogFresh = (() => {
+    const t = store.lastOkRun("watchdog");
+    return t !== undefined && now - t <= STATUS_FRESH_MS;
+  })();
+  // Per app, so no query reads across apps.
+  const openByAgent = new Map<string, number>();
+  for (const f of [...apps.flatMap((a) => store.openFindings(a.id)), ...system]) openByAgent.set(f.agent, (openByAgent.get(f.agent) ?? 0) + 1);
+
+  const names = [...new Set([...Object.keys(SCHEDULE), ...store.agentNames()])];
+  return names.map((name) => {
+    const runs = store.recentRuns(name, V.agentRuns);
+    const ok = runs.filter((r) => r.outcome === "ok").map((r) => r.duration_ms);
+    const about = (signal: string) => system.find((f) => f.agent === "watchdog" && f.fingerprint === `watchdog:${signal}:${name}`);
+    const finding = about("agent_stalled") ?? about("agent_failing") ?? about("agent_slowing");
+    const status: AppStatus = finding
+      ? finding.severity === "critical" ? "red" : "amber"
+      : !runs.length || !watchdogFresh ? "grey" : "green";
+    return {
+      name,
+      schedule: (SCHEDULE as Record<string, { everyMs: number; timeoutMs?: number }>)[name],
+      status,
+      finding,
+      lastOkAt: store.lastOkRun(name),
+      runs,
+      medianMs: median(ok) ?? null,
+      maxMs: ok.length ? Math.max(...ok) : null,
+      day: store.runOutcomes(name, now - 24 * HOUR_MS),
+      open: openByAgent.get(name) ?? 0,
+    };
+  });
 }

@@ -6,7 +6,7 @@ import type { AbigaailEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
 import { APP_COLUMNS, HOUR_MS, StoreReader, type App, type RunOutcome, type Severity, type StatKind } from "./reader.js";
-import { toRow, type Derived } from "./rows.js";
+import { toRow, type Derived, type EventRow } from "./rows.js";
 
 export interface AuditEntry {
   id: number;
@@ -61,6 +61,12 @@ export interface RecordRunOptions {
   cooldownMs?: number;
   /** Consecutive evaluated runs without the finding before it resolves. Default 3. */
   resolveAfter?: number;
+  /**
+   * Only findings resolved at or after this time may be reopened by the
+   * cooldown. The runner sets it to its start after a gap longer than the
+   * agent's resolve window, so the cooldown never reaches across unobserved downtime.
+   */
+  reopenFrom?: number;
 }
 
 const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric", "app"];
@@ -198,8 +204,10 @@ export class Store extends StoreReader {
    * Append a validated batch in one transaction. Duplicate event_ids (retries)
    * are ignored and counted. Also records the deploy and the app's last-seen
    * time, and each boot sets the app's region (NULL if it sent none).
+   * `rows` holds only the rows actually inserted, so a retried batch is never
+   * reported twice (the Live view relies on this).
    */
-  insertBatch(appId: string, batch: IngestBatch): { inserted: number; duplicates: number } {
+  insertBatch(appId: string, batch: IngestBatch): { inserted: number; duplicates: number; rows: EventRow[] } {
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO events (
         app_id, event_id, ts, received_at, client_ts, type, release, environment,
@@ -208,6 +216,7 @@ export class Store extends StoreReader {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     return this.tx(() => {
       let inserted = 0;
+      const rows: EventRow[] = [];
       let latestBoot: { ts: number; region: string | null } | undefined;
       for (const { event, derived } of batch.events) {
         const r = toRow(event, derived);
@@ -217,6 +226,7 @@ export class Store extends StoreReader {
           r.visitor_hash, r.browser, r.bot_class, r.attrs, r.parent_id,
         );
         inserted += Number(changes);
+        if (changes) rows.push(r);
         if (changes && event.type === "lifecycle" && event.kind === "boot") latestBoot = { ts: r.ts, region: event.region ?? null };
       }
       // The latest boot wins, also over boots stored by earlier batches.
@@ -235,7 +245,7 @@ export class Store extends StoreReader {
       this.db
         .prepare("UPDATE apps SET last_event_at = max(coalesce(last_event_at, 0), ?) WHERE id = ?")
         .run(batch.receivedAt, appId);
-      return { inserted, duplicates: batch.events.length - inserted };
+      return { inserted, duplicates: batch.events.length - inserted, rows };
     });
   }
 
@@ -272,9 +282,9 @@ export class Store extends StoreReader {
         "SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'open'");
       const findRecent = this.db.prepare(`
         SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'resolved'
-          AND resolved_at >= ? ORDER BY resolved_at DESC, id DESC LIMIT 1`);
+          AND resolved_at >= ? AND resolved_reason IS NULL ORDER BY resolved_at DESC, id DESC LIMIT 1`);
       const refresh = this.db.prepare(`
-        UPDATE findings SET state = 'open', resolved_at = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
+        UPDATE findings SET state = 'open', resolved_at = NULL, resolved_reason = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
           misses = 0, signal = ?, severity = ?, summary = ?, cause = ?, action = ?, evidence = ?, resolves = ?,
           last_seen = ?
         WHERE id = ?`);
@@ -287,7 +297,8 @@ export class Store extends StoreReader {
         const scope = f.app_id ?? "";
         const evidence = JSON.stringify(f.evidence);
         const resolves = f.fact ? "fact" : "misses";
-        const existing = (findOpen.get(scope, f.fingerprint) ?? findRecent.get(scope, f.fingerprint, now - cooldownMs)) as
+        const reopenSince = Math.max(now - cooldownMs, opts.reopenFrom ?? -Infinity);
+        const existing = (findOpen.get(scope, f.fingerprint) ?? findRecent.get(scope, f.fingerprint, reopenSince)) as
           | { id: number }
           | undefined;
         if (existing) {
@@ -312,6 +323,24 @@ export class Store extends StoreReader {
           if (!emitted.has(`${scope}\n${row.fingerprint}`)) miss.run(resolveAfter, resolveAfter, now, row.id);
         }
       }
+    });
+  }
+
+  /**
+   * Close an agent's open findings, one scope at a time (each app, then
+   * Abigaail itself), as not observed: Abigaail was down longer than the
+   * agent's resolve window, so nothing says they stayed true. They are never
+   * reopened by the cooldown; one that is still true starts fresh with its own
+   * first_seen and hits. Returns how many were closed.
+   */
+  resolveUnobserved(agent: string, at: number): number {
+    return this.tx(() => {
+      const close = this.db.prepare(`
+        UPDATE findings SET state = 'resolved', resolved_at = ?, resolved_reason = 'not_observed'
+        WHERE coalesce(app_id, '') = ? AND agent = ? AND state = 'open'`);
+      let n = 0;
+      for (const scope of [...this.listApps().map((a) => a.id), ""]) n += Number(close.run(at, scope, agent).changes);
+      return n;
     });
   }
 

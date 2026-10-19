@@ -31,6 +31,10 @@ export default async function DashLayout({ children }: { children: React.ReactNo
             </ul>
           </details>
         ) : null}
+        <nav className="topnav" aria-label="Views">
+          <a href="/findings">Findings</a>
+          <a href="/agents">Agents</a>
+        </nav>
         <span className="spacer" />
         <span className="muted small">{user}</span>
         <form method="post" action="/api/logout">

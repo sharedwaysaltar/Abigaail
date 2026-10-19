@@ -3,14 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AGENTS } from "@abigaail/server";
 import {
+  agentsView,
   appSummary,
   EVAL_LAG_MS,
+  findingsFor,
   fourNumbers,
   headline,
   responseSeries,
   routesThatChanged,
+  SCHEDULE,
   servers,
+  systemFindingsView,
+  usageNumbers,
   type AppSummary,
 } from "@abigaail/insights";
 import { HOUR_MS, openStore, type App, type AppStatus, type Store } from "@abigaail/store";
@@ -217,5 +223,70 @@ describe("servers and headline", () => {
     expect(headline([summary("a", "green", null)]).text).toBe("Everything is fine");
     expect(headline([summary("a", "green", null), summary("b", "grey", null)])).toEqual({ status: "grey", text: "Nothing needs you; 1 app has too little data" });
     expect(headline([summary("a", "amber", null), summary("b", "red", null)])).toEqual({ status: "red", text: "2 apps need you" });
+  });
+});
+
+describe("findings, usage and agents views stay scoped by app", () => {
+  const finding = (appId: string | null, signal: string, severity: "critical" | "warning" | "info" = "warning", agent = "health") => ({
+    app_id: appId, agent, fingerprint: `${agent}:${signal}:`, signal, severity, summary: `${signal} for ${appId}`, action: "x", evidence: {},
+  });
+  const run = (agent: string, findings: ReturnType<typeof finding>[], evaluated: (string | null)[], at = NOW - 30_000, outcome: "ok" | "error" = "ok") =>
+    store.recordRun({ agent, started_at: at - 1000, finished_at: at, outcome, apps_ok: 1, apps_failed: 0 }, findings, evaluated);
+
+  it("findingsFor returns one app's findings only, open worst first, resolved newest first", () => {
+    const other = store.createApp("other", "test").app;
+    run("health", [finding(app.id, "latency"), finding(app.id, "server_errors", "critical"), finding(other.id, "memory", "critical"), finding(null, "disk")], [app.id, other.id, null]);
+    expect(findingsFor(store, app.id, { state: "open", now: NOW }).map((f) => f.signal)).toEqual(["server_errors", "latency"]);
+    expect(findingsFor(store, other.id, { state: "open", now: NOW }).map((f) => f.signal)).toEqual(["memory"]);
+    expect(systemFindingsView(store).map((f) => f.signal)).toEqual(["disk"]);
+    // Three quiet runs resolve the app's findings, not the other app's.
+    for (let k = 1; k <= 3; k++) run("health", [finding(other.id, "memory", "critical")], [app.id, other.id], NOW - 30_000 + k * 1000);
+    expect(findingsFor(store, app.id, { state: "open", now: NOW })).toEqual([]);
+    expect(findingsFor(store, app.id, { state: "resolved", now: NOW }).map((f) => f.signal).sort()).toEqual(["latency", "server_errors"]);
+    expect(findingsFor(store, other.id, { state: "resolved", now: NOW })).toEqual([]);
+  });
+
+  it("usageNumbers reads one app's rollup only, and no data is not zero", () => {
+    const other = store.createApp("other", "test").app;
+    const hour = Math.floor(end / HOUR_MS) * HOUR_MS - 2 * HOUR_MS;
+    expect(usageNumbers(store, app.id, NOW).requests).toBeNull();
+
+    requests(hour, HOUR_MS, 30, { route: "/mine" });
+    const saved = app;
+    app = other;
+    requests(hour, HOUR_MS, 50, { route: "/theirs" });
+    app = saved;
+    store.rollupHour(app.id, hour);
+    store.rollupHour(other.id, hour);
+    const u = usageNumbers(store, app.id, NOW);
+    expect(u.requests).toBe(30);
+    expect(u.hoursWithData).toBe(1);
+    expect(u.topRoutes).toEqual([{ route: "/mine", requests: 30 }]);
+    expect(usageNumbers(store, other.id, NOW).topRoutes).toEqual([{ route: "/theirs", requests: 50 }]);
+    expect(u.uniques.value).toBeNull();
+    expect(u.uniques.usual).toBeNull();
+  });
+
+  it("agentsView takes each agent's status from the Watchdog's findings, never its own rules", () => {
+    run("watchdog", [], [null]);
+    run("health", [], [app.id], NOW - 40_000, "error");
+    let rows = agentsView(store, [app], NOW);
+    expect(rows.map((r) => r.name)).toEqual(expect.arrayContaining(["health", "watchdog", "usage", "rollup"]));
+    // Health failed its last run, but the Watchdog has not said so: not red.
+    expect(rows.find((r) => r.name === "health")!.status).toBe("green");
+    expect(rows.find((r) => r.name === "usage")!.status).toBe("grey");
+    expect(rows.find((r) => r.name === "health")!.day).toMatchObject({ error: 1, ok: 0 });
+
+    run("watchdog", [{ ...finding(null, "agent_failing", "critical", "watchdog"), fingerprint: "watchdog:agent_failing:health" }], [null], NOW - 20_000);
+    rows = agentsView(store, [app], NOW);
+    const h = rows.find((r) => r.name === "health")!;
+    expect(h.status).toBe("red");
+    expect(h.finding?.signal).toBe("agent_failing");
+    // Without a fresh Watchdog run nothing is judged: grey, not green.
+    expect(agentsView(store, [app], NOW + 10 * 60_000).find((r) => r.name === "watchdog")!.status).toBe("grey");
+  });
+
+  it("SCHEDULE covers every registered agent with the same timings", () => {
+    for (const a of AGENTS) expect(SCHEDULE[a.name as keyof typeof SCHEDULE]).toEqual({ everyMs: a.everyMs, timeoutMs: a.timeoutMs });
   });
 });

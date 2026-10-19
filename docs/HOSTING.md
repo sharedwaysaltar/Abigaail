@@ -27,5 +27,9 @@ decided later (see DECISIONS #2); this list grows as chunks land.
       user's authenticator (`user:reset-mfa`).
 - [ ] `data/auth.db` (users, sessions, sign-in audit) is in `data/`, mode 0600, and backed up
       with the database.
-- [ ] Only `/ingest` and `/healthz` are proxied publicly. The Live feed listener (chunk 5b,
-      127.0.0.1:4320) stays on loopback.
+- [ ] Only `/ingest` and `/healthz` are proxied publicly. The Live feed listener
+      (127.0.0.1:4320) stays on loopback and is never proxied; its host cannot be changed
+      (DECISIONS #72).
+- [ ] `ABIGAAIL_LIVE_TOKEN` (`openssl rand -base64 32`) is set to the same value for the server
+      and the dashboard, from the environment. Without it the Live view is off; nothing else changes.
+- [ ] No `NEXT_PUBLIC_ABIGAAIL_*` variable exists in the dashboard's environment (it refuses to start).

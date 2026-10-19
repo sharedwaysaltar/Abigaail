@@ -7,15 +7,8 @@ const DAY = 24 * HOUR;
 // Shared with the dashboard, re-exported so every tunable is findable here.
 import { STATUS_FRESH_MS } from "@abigaail/insights";
 
-export { BASELINE, EVAL_LAG_MS, STATUS_FRESH_MS, windowEnd } from "@abigaail/insights";
-
-export const SCHEDULE = {
-  health: { everyMs: MINUTE, timeoutMs: 20_000 },
-  watchdog: { everyMs: MINUTE, timeoutMs: 20_000 },
-  usage: { everyMs: 15 * MINUTE, timeoutMs: 60_000 },
-  /** Not an agent: the hourly rollup runs in the main thread. */
-  rollup: { everyMs: HOUR },
-} as const;
+// SCHEDULE lives in insights so the dashboard's Agents view shows the same schedules.
+export { BASELINE, EVAL_LAG_MS, SCHEDULE, STATUS_FRESH_MS, windowEnd } from "@abigaail/insights";
 
 export const FINDINGS = {
   /** A finding resolved this recently is reopened instead of duplicated. */

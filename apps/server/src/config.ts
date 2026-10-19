@@ -9,11 +9,17 @@ export interface Config {
   agents: boolean;
   /** Dashboard users and sessions, apart from monitoring data. */
   authDbPath: string;
+  /** Live feed port. Its host is always 127.0.0.1 (live.ts); no setting changes that. */
+  livePort: number;
+  /** Bearer token the dashboard sends to the live feed. Empty: the Live view is off. */
+  liveToken: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const port = Number(env.ABIGAAIL_PORT ?? 4318);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("ABIGAAIL_PORT must be a port number");
+  const livePort = Number(env.ABIGAAIL_LIVE_PORT ?? 4320);
+  if (!Number.isInteger(livePort) || livePort < 0 || livePort > 65535) throw new Error("ABIGAAIL_LIVE_PORT must be a port number");
   return {
     dbPath: env.ABIGAAIL_DB_PATH || "./data/abigaail.db",
     saltPath: env.ABIGAAIL_SALT_PATH || "./data/salt.bin",
@@ -21,5 +27,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port,
     agents: (env.ABIGAAIL_AGENTS ?? "on").toLowerCase() !== "off",
     authDbPath: env.ABIGAAIL_AUTH_DB_PATH || "./data/auth.db",
+    livePort,
+    liveToken: env.ABIGAAIL_LIVE_TOKEN ?? "",
   };
 }
