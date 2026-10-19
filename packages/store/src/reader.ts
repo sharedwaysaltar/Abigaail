@@ -486,10 +486,10 @@ export class StoreReader {
     return row.t ?? undefined;
   }
 
-  /** Finish time of the agent's last run of any outcome that finished before `ts`. */
+  /** Finish time of the agent's last run of any outcome that finished at or before `ts`. */
   lastAgentRunBefore(agent: string, ts: number): number | undefined {
     const row = this.db
-      .prepare("SELECT max(finished_at) AS t FROM agent_runs WHERE agent = ? AND finished_at < ?")
+      .prepare("SELECT max(finished_at) AS t FROM agent_runs WHERE agent = ? AND finished_at <= ?")
       .get(agent, ts) as { t: number | null };
     return row.t ?? undefined;
   }

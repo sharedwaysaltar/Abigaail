@@ -154,6 +154,23 @@ describe("dependencies name the cause", () => {
     expect(found[0]!.summary).toBe("localhost is failing: 15 of 15 calls in 5 min ended in an error, timeout or 5xx, so /dependency-down fails.");
   });
 
+  it("calls outside the 5-min window: the folded dependency keeps its numbers and the route finding's window", () => {
+    // 6-14 min ago: inside the 15-min window only.
+    const ids = fx.requests(E() - 14 * MIN, E() - 6 * MIN, 12, { route: "/dependency-down", status: 502 });
+    ids.forEach((parent, i) => fx.outbound(E() - 14 * MIN + i * 30_000, "localhost", { status: 503, parent }));
+    const found = fx.run(health).filter((f) => f.signal !== "too_little_traffic");
+    expect(signals(found)).toEqual(["dependency:localhost:critical"]);
+    const [f] = found;
+    expect(f!.summary).toBe("localhost is failing: 12 of 12 calls in 15 min ended in an error, timeout or 5xx, so /dependency-down fails.");
+    expect(f!.evidence).toMatchObject({
+      window_ms: 15 * MIN,
+      calls: 12,
+      failed_calls: 12,
+      explains_routes: [{ route: "/dependency-down", failing_requests: 12, failures: 12, window_ms: 15 * MIN }],
+      called_from: [{ route: "/dependency-down", calls: 12, failed: 12 }],
+    });
+  });
+
   it("a route failing for its own reasons is not blamed on a healthy dependency", () => {
     const ids = recent(30, (i) => ({ route: "/api/checkout", status: i < 12 ? 500 : 200 }));
     ids.forEach((parent, i) => fx.outbound(E() - 3 * MIN + i * 1000, "api.stripe.com", { parent }));

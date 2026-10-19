@@ -61,6 +61,12 @@ export interface RecordRunOptions {
   cooldownMs?: number;
   /** Consecutive evaluated runs without the finding before it resolves. Default 3. */
   resolveAfter?: number;
+  /**
+   * Only findings resolved at or after this time may be reopened by the
+   * cooldown. The runner sets it to its start after a gap longer than the
+   * agent's resolve window, so the cooldown never reaches across unobserved downtime.
+   */
+  reopenFrom?: number;
 }
 
 const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric", "app"];
@@ -291,7 +297,8 @@ export class Store extends StoreReader {
         const scope = f.app_id ?? "";
         const evidence = JSON.stringify(f.evidence);
         const resolves = f.fact ? "fact" : "misses";
-        const existing = (findOpen.get(scope, f.fingerprint) ?? findRecent.get(scope, f.fingerprint, now - cooldownMs)) as
+        const reopenSince = Math.max(now - cooldownMs, opts.reopenFrom ?? -Infinity);
+        const existing = (findOpen.get(scope, f.fingerprint) ?? findRecent.get(scope, f.fingerprint, reopenSince)) as
           | { id: number }
           | undefined;
         if (existing) {
