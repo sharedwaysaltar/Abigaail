@@ -82,6 +82,36 @@ describe("runner isolation", () => {
   });
 });
 
+describe("restart after a gap", () => {
+  it("continues findings after a short restart, but closes them as not observed after a long one", async () => {
+    let clock = Date.UTC(2026, 9, 20, 9, 0, 0);
+    const now = () => clock;
+    let r = makeRunner({ good: "finding" }, { now });
+    await r.runAgent("good");
+    clock += 60_000;
+    await r.runAgent("good");
+    const first = store.systemFindings()[0]!;
+    expect(first.hits).toBe(2);
+
+    // Down for 2 min: within the resolve window (3 runs of 1 min), so the same finding goes on.
+    clock += 2 * 60_000;
+    r = makeRunner({ good: "finding" }, { now });
+    expect(store.systemFindings().map((f) => f.id)).toEqual([first.id]);
+    await r.runAgent("good");
+    expect(store.systemFindings()[0]).toMatchObject({ id: first.id, hits: 3 });
+
+    // Down for 10 min: nobody saw it, so it is closed as not observed and found again fresh.
+    clock += 10 * 60_000;
+    r = makeRunner({ good: "finding" }, { now });
+    expect(store.systemFindings()).toEqual([]);
+    expect(logs).toContain("good: 1 open finding closed as not observed while Abigaail was down");
+    await r.runAgent("good");
+    const [fresh] = store.systemFindings();
+    expect(fresh!.id).not.toBe(first.id);
+    expect(fresh).toMatchObject({ hits: 1, first_seen: clock });
+  });
+});
+
 describe("healthz liveness", () => {
   it("is fresh at start, stale after 3 minutes without a Watchdog run, fresh again after one", async () => {
     let now = Date.now();

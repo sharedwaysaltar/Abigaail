@@ -194,6 +194,13 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE apps ADD COLUMN region TEXT;
   ALTER TABLE rollup_hours ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
   `,
+  // 6: why a finding resolved, when it was not the usual misses or fact rule.
+  // 'not_observed': Abigaail was down longer than the agent's resolve window,
+  // so nobody saw whether it was still true. Such a finding is never reopened
+  // by the cooldown; if it is still true it starts fresh.
+  `
+  ALTER TABLE findings ADD COLUMN resolved_reason TEXT;
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

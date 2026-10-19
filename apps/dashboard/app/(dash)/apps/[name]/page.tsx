@@ -39,6 +39,7 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
   const region = app.region ? regionInfo(app.region) : undefined;
   const top = s.top && s.top.severity !== "unknown" ? s.top : undefined;
   const hasPoints = series.some((p) => p.p95 !== null);
+  const more = s.open.filter((f) => f.severity !== "info").length - 1;
 
   return (
     <main>
@@ -67,8 +68,10 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
             <div>
               <h3>What to do</h3>
               <p>{top.action}</p>
-              {s.open.filter((f) => f.severity !== "info").length > 1 ? (
-                <p className="since">{s.open.filter((f) => f.severity !== "info").length - 1} more open finding(s) for this app.</p>
+              {more > 0 ? (
+                <p className="since">
+                  <a href={`/findings?app=${encodeURIComponent(app.name)}`}>{more} more open finding{more === 1 ? "" : "s"}</a> for this app.
+                </p>
               ) : null}
             </div>
           </div>
@@ -235,7 +238,9 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
                   ) : (
                     <div>
                       {e.finding.summary}{" "}
-                      <span className="muted small">{e.finding.state === "resolved" ? "resolved" : "noted"}</span>
+                      <span className="muted small">
+                        {e.finding.resolved_reason === "not_observed" ? "not observed while Abigaail was down" : e.finding.state === "resolved" ? "resolved" : "noted"}
+                      </span>
                     </div>
                   )}
                 </li>

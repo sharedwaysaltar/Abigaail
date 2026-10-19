@@ -105,6 +105,26 @@ export class Runner {
       runnerStartedAt: this.startedAt,
       lastRunBeforeStart: this.store.lastRunBefore(this.startedAt) ?? null,
     };
+    this.closeUnobserved();
+  }
+
+  /**
+   * After a gap longer than an agent's resolve window (FINDINGS.resolveAfter
+   * runs), its open findings were not observed while Abigaail was down. They
+   * are resolved as such rather than continued with their old first_seen and
+   * hits; whatever is still true is found again, fresh, by the next run.
+   */
+  private closeUnobserved(): void {
+    for (const a of this.agents) {
+      const last = this.store.lastAgentRunBefore(a.name, this.startedAt);
+      if (last !== undefined && this.startedAt - last <= FINDINGS.resolveAfter * a.everyMs) continue;
+      try {
+        const n = this.store.resolveUnobserved(a.name, this.startedAt);
+        if (n) this.log(`${a.name}: ${n} open finding${n === 1 ? "" : "s"} closed as not observed while Abigaail was down`);
+      } catch (err) {
+        this.log(`${a.name}: could not close unobserved findings (${errorClass(err)})`);
+      }
+    }
   }
 
   /** Tick at every minute boundary until stop(). Never keeps the process alive. */

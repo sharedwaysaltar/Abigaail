@@ -276,9 +276,9 @@ export class Store extends StoreReader {
         "SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'open'");
       const findRecent = this.db.prepare(`
         SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'resolved'
-          AND resolved_at >= ? ORDER BY resolved_at DESC, id DESC LIMIT 1`);
+          AND resolved_at >= ? AND resolved_reason IS NULL ORDER BY resolved_at DESC, id DESC LIMIT 1`);
       const refresh = this.db.prepare(`
-        UPDATE findings SET state = 'open', resolved_at = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
+        UPDATE findings SET state = 'open', resolved_at = NULL, resolved_reason = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
           misses = 0, signal = ?, severity = ?, summary = ?, cause = ?, action = ?, evidence = ?, resolves = ?,
           last_seen = ?
         WHERE id = ?`);
@@ -316,6 +316,24 @@ export class Store extends StoreReader {
           if (!emitted.has(`${scope}\n${row.fingerprint}`)) miss.run(resolveAfter, resolveAfter, now, row.id);
         }
       }
+    });
+  }
+
+  /**
+   * Close an agent's open findings, one scope at a time (each app, then
+   * Abigaail itself), as not observed: Abigaail was down longer than the
+   * agent's resolve window, so nothing says they stayed true. They are never
+   * reopened by the cooldown; one that is still true starts fresh with its own
+   * first_seen and hits. Returns how many were closed.
+   */
+  resolveUnobserved(agent: string, at: number): number {
+    return this.tx(() => {
+      const close = this.db.prepare(`
+        UPDATE findings SET state = 'resolved', resolved_at = ?, resolved_reason = 'not_observed'
+        WHERE coalesce(app_id, '') = ? AND agent = ? AND state = 'open'`);
+      let n = 0;
+      for (const scope of [...this.listApps().map((a) => a.id), ""]) n += Number(close.run(at, scope, agent).changes);
+      return n;
     });
   }
 

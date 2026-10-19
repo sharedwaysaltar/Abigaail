@@ -5,6 +5,8 @@ import http from "node:http";
 import { DEFAULT_IGNORE, init } from "@abigaail/node";
 
 const abigaail = init({
+  // Demo only: send every second so the Live view feels live. The SDK default stays 5 s.
+  flushIntervalMs: 1000,
   // Patterns this app serves; anything else falls back to the ID heuristic.
   routes: ["/", "/user/[id]", "/slow", "/boom", "/outbound", "/dependency-down"],
   // The fake "down" dependency below runs in this process; its requests are not app traffic.

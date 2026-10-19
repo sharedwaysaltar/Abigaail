@@ -476,3 +476,39 @@ describe("ingest rejections, size samples, parent_id, read-only access", () => {
     }
   });
 });
+
+describe("findings not observed while Abigaail was down", () => {
+  it("resolveUnobserved closes one agent's open findings in every scope, as not observed", () => {
+    store.recordRun(run("health"), [finding(appA), finding(appB), finding(null)], [appA, appB, null]);
+    store.recordRun(run("watchdog"), [{ ...finding(appA, "silent"), agent: "watchdog", fingerprint: "watchdog:silent:" }], [appA]);
+    expect(store.resolveUnobserved("health", runAt + 1)).toBe(3);
+    expect(store.openFindings(appA).map((f) => f.agent)).toEqual(["watchdog"]);
+    expect(store.openFindings(appB)).toEqual([]);
+    expect(store.systemFindings()).toEqual([]);
+    const closed = store.findingHistory(appA).find((f) => f.agent === "health")!;
+    expect(closed).toMatchObject({ state: "resolved", resolved_at: runAt + 1, resolved_reason: "not_observed" });
+  });
+
+  it("a finding closed as not observed is never continued by the cooldown: it starts fresh", () => {
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    const old = store.openFindings(appA)[0]!;
+    expect(old.hits).toBe(2);
+    store.resolveUnobserved("health", runAt + 1);
+    // Back within the 30 min cooldown, still true: a new row, not the old one reopened.
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    const [fresh] = store.openFindings(appA);
+    expect(fresh!.id).not.toBe(old.id);
+    expect(fresh).toMatchObject({ hits: 1, first_seen: runAt, resolved_reason: null });
+    expect(store.findingHistory(appA).find((f) => f.id === old.id)).toMatchObject({ state: "resolved", resolved_reason: "not_observed" });
+  });
+
+  it("an ordinary resolution is still reopened within the cooldown", () => {
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    const old = store.openFindings(appA)[0]!;
+    for (let k = 0; k < 3; k++) store.recordRun(run("health"), [], [appA]);
+    expect(store.openFindings(appA)).toEqual([]);
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    expect(store.openFindings(appA)[0]!.id).toBe(old.id);
+  });
+});

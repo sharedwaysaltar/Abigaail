@@ -269,6 +269,19 @@ describe("fail-open when ingest is down or slow", () => {
 });
 
 describe("timer and shutdown", () => {
+  it("the default flush interval stays 5 s (only the demo apps send every second)", async () => {
+    vi.useFakeTimers();
+    const { batches, transport } = recording();
+    const { flushIntervalMs: _none, ...defaults } = base;
+    const c = createClient({ ...defaults, transport });
+    c.capture(err());
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(batches).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(batches).toHaveLength(1);
+    await c.shutdown();
+  });
+
   it("flushes on the background interval", async () => {
     vi.useFakeTimers();
     const { batches, transport } = recording();

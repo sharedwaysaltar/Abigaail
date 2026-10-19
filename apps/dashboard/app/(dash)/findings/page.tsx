@@ -28,7 +28,11 @@ function FindingItem({ f, now }: { f: Finding; now: number }) {
       <div className="small muted fmeta">
         <span className="mono">{f.agent}</span>
         {f.state === "resolved" && f.resolved_at !== null ? (
-          <span>resolved {when(f.resolved_at)} ({ago(f.resolved_at, now)})</span>
+          f.resolved_reason === "not_observed" ? (
+            <span>not observed while Abigaail was down; closed {when(f.resolved_at)}, last seen {when(f.last_seen)}</span>
+          ) : (
+            <span>resolved {when(f.resolved_at)} ({ago(f.resolved_at, now)})</span>
+          )
         ) : (
           <span>since {when(f.first_seen)} ({ago(f.first_seen, now)})</span>
         )}
