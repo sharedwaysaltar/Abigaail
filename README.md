@@ -93,7 +93,8 @@ A wrong key gives 401, and adding a field such as `"email":"x"` to the event giv
 Data lives in `./data/` (git-ignored): the database `abigaail.db` and the daily
 visitor-hash salt `salt.bin`, which is kept out of the database on purpose. Configure with
 `ABIGAAIL_DB_PATH`, `ABIGAAIL_SALT_PATH`, `ABIGAAIL_HOST` (default `127.0.0.1`) and
-`ABIGAAIL_PORT` (default `4318`). Before hosting anywhere, go through
+`ABIGAAIL_PORT` (default `4318`). The Live view's feed listens on `127.0.0.1` only, port
+`ABIGAAIL_LIVE_PORT` (default `4320`), and only when `ABIGAAIL_LIVE_TOKEN` is set. Before hosting anywhere, go through
 [docs/HOSTING.md](docs/HOSTING.md).
 
 The client IP and user agent may be sent once per request event in `transient`. Ingest
@@ -105,9 +106,10 @@ then discards them; they are never stored (see `apps/server/test/privacy.test.ts
 ```bash
 cp apps/dashboard/.env.example apps/dashboard/.env
 # set ABIGAAIL_DASHBOARD_SECRET in it: openssl rand -base64 32
+# for the Live view, set ABIGAAIL_LIVE_TOKEN too (openssl rand -base64 32); the server needs the same value
 set -a; . apps/dashboard/.env; set +a        # the user CLI needs the same secret
 npm run user:create -- owner                 # prompts for a password, shows a TOTP secret once
-npm run dev:server                           # in another terminal (creates the database)
+ABIGAAIL_LIVE_TOKEN=... npm run dev:server   # in another terminal (creates the database)
 npm run dashboard                            # http://localhost:4319
 ```
 
@@ -116,6 +118,11 @@ code. To place an app on the map, set `ABIGAAIL_REGION` (e.g. `LON1`) in its env
 apps without one are listed as "not on the map". The dashboard opens the monitoring
 database read-only and keeps users and sessions in `data/auth.db`. It is meant for your
 machine or a VPN, never the public internet (see [docs/HOSTING.md](docs/HOSTING.md)).
+
+Each app has Overview, Live and Findings tabs; the header links to Findings (all apps) and
+Agents. The Live view shows events as they are stored, without visitor data, relayed from the
+server's loopback feed after your session is checked; it stops and says "Signed out" when the
+session ends.
 
 ## What the SDK guarantees (fail-open)
 

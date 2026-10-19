@@ -5,6 +5,8 @@ export type { Config } from "./config.js";
 export { classifyUserAgent, eventTime, normaliseIp, utcDay, visitorHash, MAX_EVENT_AGE_MS } from "./derive.js";
 export type { BotClass, BrowserFamily } from "./derive.js";
 export { TokenBucket } from "./ratelimit.js";
+export { createLiveServer, isLoopback, LIVE, LiveHub, startLive } from "./live.js";
+export type { LiveLimits, LiveServerOptions } from "./live.js";
 export { openSaltFile, SaltFile, SALT_FILE_BYTES } from "./salt.js";
 export type { SaltSource } from "./salt.js";
 export { findingInputs, Runner } from "./agents/runner.js";

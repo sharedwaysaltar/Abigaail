@@ -197,6 +197,10 @@ export class StoreReader {
     return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps WHERE name = ?`).get(name) as App | undefined;
   }
 
+  appById(id: string): App | undefined {
+    return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps WHERE id = ?`).get(id) as App | undefined;
+  }
+
   listApps(): App[] {
     return this.db.prepare(`SELECT ${APP_COLUMNS} FROM apps ORDER BY name`).all() as unknown as App[];
   }
@@ -462,6 +466,16 @@ export class StoreReader {
       .prepare(`SELECT id, agent, started_at, finished_at, outcome, duration_ms, findings, error_class, apps_ok, apps_failed
                 FROM agent_runs WHERE agent = ? ORDER BY started_at DESC, id DESC LIMIT ?`)
       .all(agent, limit) as unknown as AgentRun[];
+  }
+
+  /** Runs of an agent started at or after `since`, counted per outcome. */
+  runOutcomes(agent: string, since: number): Record<RunOutcome, number> {
+    const out: Record<RunOutcome, number> = { ok: 0, error: 0, timeout: 0, skipped: 0 };
+    const rows = this.db
+      .prepare("SELECT outcome, count(*) AS n FROM agent_runs WHERE agent = ? AND started_at >= ? GROUP BY outcome")
+      .all(agent, since) as { outcome: RunOutcome; n: number }[];
+    for (const r of rows) out[r.outcome] = Number(r.n);
+    return out;
   }
 
   /** Finish time of the last run of any agent that finished before `ts`. */

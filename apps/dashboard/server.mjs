@@ -31,6 +31,9 @@ try {
 } catch (err) {
   fail(err instanceof Error ? err.message : "ABIGAAIL_DASHBOARD_SECRET is invalid");
 }
+// Next inlines NEXT_PUBLIC_* into browser bundles: a live token or secret there would be public.
+const exposed = Object.keys(process.env).filter((k) => k.startsWith("NEXT_PUBLIC_ABIGAAIL_"));
+if (exposed.length) fail(`${exposed.join(", ")} would be sent to browsers; rename without NEXT_PUBLIC_`);
 if (!existsSync(dbPath)) fail(`no database at ${dbPath} (start the server once with npm run dev:server, or set ABIGAAIL_DB_PATH)`);
 
 // Route handlers refuse sign-in unless this wrapper set the peer header.

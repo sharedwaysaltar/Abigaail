@@ -32,17 +32,24 @@ describe("every page and route handler requires a session", () => {
     expect(entries).toContain("app/(dash)/page.tsx");
     expect(entries).toContain("app/(dash)/apps/[name]/page.tsx");
     expect(entries).toContain("app/api/logout/route.ts");
+    expect(entries).toContain("app/api/live/[name]/route.ts");
+    expect(entries).toContain("app/(dash)/apps/[name]/live/page.tsx");
+    expect(entries).toContain("app/(dash)/findings/page.tsx");
+    expect(entries).toContain("app/(dash)/agents/page.tsx");
   });
 
   it.each(entries.filter((p) => !PUBLIC.has(p)))("%s calls requireSession() itself", (p) => {
     const src = readFileSync(join(ROOT, p), "utf8");
-    expect(src).toMatch(/import \{[^}]*\brequireSession\b[^}]*\} from "@\/lib\/session"/);
+    expect(src).toMatch(/import \{[^}]*\brequire(?:Api)?Session\b[^}]*\} from "@\/lib\/session"/);
     // Called in every exported page/handler, before anything else reads data.
     const exported = src.split(/export (?:default )?async function /).slice(1);
     expect(exported.length).toBeGreaterThan(0);
     // The body opens with `) {` or `): Type {` at the end of the signature line.
     for (const body of exported) {
-      expect(body).toMatch(/^[^\n]*\)(?::[^\n{]+)?\s*\{\n\s*(?:if \(!sameOrigin\(req\)\)[^\n]*\n\s*)?(?:const \{ user \} = )?await requireSession\(\);/);
+      // API routes a script calls use the 401 variant, in exactly this form.
+      expect(body).toMatch(
+        /^[^\n]*\)(?::[^\n{]+)?\s*\{\n\s*(?:if \(!sameOrigin\(req\)\)[^\n]*\n\s*)?(?:(?:const \{ user \} = )?await requireSession\(\);|const auth = await requireApiSession\(\);\n\s*if \(auth instanceof Response\) return auth;)/,
+      );
     }
   });
 
@@ -55,6 +62,40 @@ describe("every page and route handler requires a session", () => {
       const src = readFileSync(join(ROOT, p), "utf8");
       if (src.includes("export async function POST")) expect(src).toContain("if (!sameOrigin(req))");
     }
+  });
+});
+
+describe("the live view", () => {
+  const read = (p: string) => readFileSync(join(ROOT, p), "utf8");
+
+  it("the stream route is dynamic and never cached upstream", () => {
+    const src = read("app/api/live/[name]/route.ts");
+    expect(src).toContain('export const dynamic = "force-dynamic";');
+    expect(src).toContain('cache: "no-store"');
+    expect(src).toContain("http://127.0.0.1:");
+  });
+
+  it("sign-out closes that session's live streams", () => {
+    expect(read("app/api/logout/route.ts")).toMatch(/closeLiveStreams\(hashToken\(token\)\)/);
+  });
+
+  it("the live token stays on the server: no client file can reach it", () => {
+    const sources = [...files(join(ROOT, "app")), ...files(join(ROOT, "lib")), ...files(join(ROOT, "components"))].filter((p) => /\.(ts|tsx)$/.test(p));
+    const client = sources.filter((p) => /^["']use client["']/.test(readFileSync(p, "utf8")));
+    expect(client.map((p) => relative(ROOT, p))).toContain("components/LiveFeed.tsx");
+    for (const p of client) {
+      const src = readFileSync(p, "utf8");
+      // Naming the variable in help text is fine; reading any env, or the config, is not.
+      expect(src, relative(ROOT, p)).not.toMatch(/@\/lib\/(config|live|session|data)|process\.env|liveToken/);
+      // Type-only imports of the store are erased; anything else would bundle server code.
+      expect(src, relative(ROOT, p)).not.toMatch(/^import (?!type )[^\n]*"@abigaail\/(store|auth|insights)"/m);
+    }
+  });
+
+  it("the wrapper refuses to start with NEXT_PUBLIC_ABIGAAIL_* set", () => {
+    const server = read("server.mjs");
+    expect(server).toMatch(/startsWith\("NEXT_PUBLIC_ABIGAAIL_"\)/);
+    expect(server).toMatch(/if \(exposed\.length\) fail\(/);
   });
 });
 

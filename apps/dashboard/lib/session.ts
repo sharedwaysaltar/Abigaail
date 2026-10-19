@@ -1,4 +1,4 @@
-import { Authenticator, SecretKey } from "@abigaail/auth";
+import { Authenticator, hashToken, SecretKey } from "@abigaail/auth";
 import { openAuthStore } from "@abigaail/store";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -25,4 +25,19 @@ export async function requireSession(): Promise<{ user: string }> {
   const s = authenticator().session(token);
   if (!s) redirect("/login");
   return { user: s.user };
+}
+
+/**
+ * For API routes a script calls (the Live stream): the signed-in user, or a
+ * 401 Response, never a redirect, so the client can stop and say "Signed out".
+ * Read-only (peekSession): an open stream and its reconnects never refresh
+ * last_seen, so they cannot keep an idle session alive. Use it as
+ * `const auth = await requireApiSession(); if (auth instanceof Response) return auth;`
+ * (the static test accepts exactly that form).
+ */
+export async function requireApiSession(): Promise<{ user: string; token: string; tokenHash: string } | Response> {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  const s = authenticator().peekSession(token);
+  if (!s || !token) return new Response("Signed out", { status: 401, headers: { "cache-control": "no-store", "content-type": "text/plain; charset=utf-8" } });
+  return { user: s.user, token, tokenHash: hashToken(token) };
 }

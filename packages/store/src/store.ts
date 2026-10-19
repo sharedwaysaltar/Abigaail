@@ -6,7 +6,7 @@ import type { AbigaailEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
 import { APP_COLUMNS, HOUR_MS, StoreReader, type App, type RunOutcome, type Severity, type StatKind } from "./reader.js";
-import { toRow, type Derived } from "./rows.js";
+import { toRow, type Derived, type EventRow } from "./rows.js";
 
 export interface AuditEntry {
   id: number;
@@ -198,8 +198,10 @@ export class Store extends StoreReader {
    * Append a validated batch in one transaction. Duplicate event_ids (retries)
    * are ignored and counted. Also records the deploy and the app's last-seen
    * time, and each boot sets the app's region (NULL if it sent none).
+   * `rows` holds only the rows actually inserted, so a retried batch is never
+   * reported twice (the Live view relies on this).
    */
-  insertBatch(appId: string, batch: IngestBatch): { inserted: number; duplicates: number } {
+  insertBatch(appId: string, batch: IngestBatch): { inserted: number; duplicates: number; rows: EventRow[] } {
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO events (
         app_id, event_id, ts, received_at, client_ts, type, release, environment,
@@ -208,6 +210,7 @@ export class Store extends StoreReader {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     return this.tx(() => {
       let inserted = 0;
+      const rows: EventRow[] = [];
       let latestBoot: { ts: number; region: string | null } | undefined;
       for (const { event, derived } of batch.events) {
         const r = toRow(event, derived);
@@ -217,6 +220,7 @@ export class Store extends StoreReader {
           r.visitor_hash, r.browser, r.bot_class, r.attrs, r.parent_id,
         );
         inserted += Number(changes);
+        if (changes) rows.push(r);
         if (changes && event.type === "lifecycle" && event.kind === "boot") latestBoot = { ts: r.ts, region: event.region ?? null };
       }
       // The latest boot wins, also over boots stored by earlier batches.
@@ -235,7 +239,7 @@ export class Store extends StoreReader {
       this.db
         .prepare("UPDATE apps SET last_event_at = max(coalesce(last_event_at, 0), ?) WHERE id = ?")
         .run(batch.receivedAt, appId);
-      return { inserted, duplicates: batch.events.length - inserted };
+      return { inserted, duplicates: batch.events.length - inserted, rows };
     });
   }
 

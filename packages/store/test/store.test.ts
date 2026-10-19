@@ -88,11 +88,19 @@ describe("events", () => {
   it("is idempotent on event_id and counts duplicates", () => {
     const { app } = store.createApp("a", "test");
     const events = [request(), request()];
-    expect(store.insertBatch(app.id, batch(events))).toEqual({ inserted: 2, duplicates: 0 });
-    expect(store.insertBatch(app.id, batch(events))).toEqual({ inserted: 0, duplicates: 2 });
+    expect(store.insertBatch(app.id, batch(events))).toMatchObject({ inserted: 2, duplicates: 0 });
+    expect(store.insertBatch(app.id, batch(events))).toMatchObject({ inserted: 0, duplicates: 2 });
     const same = request();
-    expect(store.insertBatch(app.id, batch([same, same]))).toEqual({ inserted: 1, duplicates: 1 });
+    expect(store.insertBatch(app.id, batch([same, same]))).toMatchObject({ inserted: 1, duplicates: 1 });
     expect(store.countEvents(app.id)).toBe(3);
+  });
+
+  it("returns only the rows it inserted, so a retry is never reported twice", () => {
+    const { app } = store.createApp("a", "test");
+    const events = [request(), request()];
+    expect(store.insertBatch(app.id, batch(events)).rows.map((r) => r.event_id)).toEqual(events.map((e) => e.event_id));
+    const fresh = request();
+    expect(store.insertBatch(app.id, batch([events[0]!, fresh, events[1]!])).rows.map((r) => r.event_id)).toEqual([fresh.event_id]);
   });
 
   it("scopes every read by app_id", () => {
@@ -113,7 +121,7 @@ describe("events", () => {
     const b = store.createApp("b", "test").app;
     const e = request();
     store.insertBatch(a.id, batch([e]));
-    expect(store.insertBatch(b.id, batch([e]))).toEqual({ inserted: 1, duplicates: 0 });
+    expect(store.insertBatch(b.id, batch([e]))).toMatchObject({ inserted: 1, duplicates: 0 });
   });
 
   it("maps each type to named columns and never stores transient", () => {
