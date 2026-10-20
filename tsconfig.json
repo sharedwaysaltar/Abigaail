@@ -15,7 +15,8 @@
       "@abigaail/store": ["./packages/store/src/index.ts"],
       "@abigaail/insights": ["./packages/insights/src/index.ts"],
       "@abigaail/auth": ["./packages/auth/src/index.ts"],
-      "@abigaail/server": ["./apps/server/src/index.ts"]
+      "@abigaail/server": ["./apps/server/src/index.ts"],
+      "@abigaail/sim": ["./apps/sim/src/index.ts"]
     }
   },
   "include": ["packages/*/test", "apps/*/test", "vitest.config.ts"],

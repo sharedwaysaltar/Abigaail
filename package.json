@@ -10,8 +10,8 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -b packages/schema packages/core packages/node packages/next packages/store packages/insights packages/auth apps/server",
-    "typecheck": "tsc -b packages/schema packages/core packages/node packages/next packages/store packages/insights packages/auth apps/server && tsc -p tsconfig.json && tsc -p apps/dashboard/tsconfig.json",
+    "build": "tsc -b packages/schema packages/core packages/node packages/next packages/store packages/insights packages/auth apps/server apps/sim",
+    "typecheck": "tsc -b packages/schema packages/core packages/node packages/next packages/store packages/insights packages/auth apps/server apps/sim && tsc -p tsconfig.json && tsc -p apps/dashboard/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm test",
@@ -29,6 +29,7 @@
     "events:tail": "npm run build --silent && node apps/server/dist/cli.js events",
     "findings": "npm run build --silent && node apps/server/dist/cli.js findings",
     "agents:once": "npm run build --silent && node apps/server/dist/cli.js agents-once",
+    "sim": "npm run build --silent && node apps/sim/dist/main.js",
     "demo:node": "npm run build --silent && node --env-file=apps/demo-node/.env apps/demo-node/server.mjs",
     "demo:next": "npm run build --silent && npm run build -w @abigaail/demo-next && npm run start -w @abigaail/demo-next"
   },

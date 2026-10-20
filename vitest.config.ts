@@ -16,6 +16,7 @@ export default defineConfig({
       { find: /^@abigaail\/insights$/, replacement: `${src("packages/insights")}/index.ts` },
       { find: /^@abigaail\/auth$/, replacement: `${src("packages/auth")}/index.ts` },
       { find: /^@abigaail\/server$/, replacement: `${src("apps/server")}/index.ts` },
+      { find: /^@abigaail\/sim$/, replacement: `${src("apps/sim")}/index.ts` },
     ],
   },
   test: {

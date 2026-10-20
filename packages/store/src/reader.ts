@@ -380,6 +380,15 @@ export class StoreReader {
     return Number((row as { n: number }).n);
   }
 
+  /** Requests with ts in [from, to): traffic that matters vs bots and flagged probes (DECISIONS #37). */
+  requestMix(appId: string, from: number, to: number): { matters: number; other: number } {
+    const row = this.db
+      .prepare(`SELECT count(*) AS n, coalesce(sum(CASE WHEN ${MATTERS_SQL} THEN 1 ELSE 0 END), 0) AS matters FROM events
+                WHERE app_id = ? AND type = 'request' AND ts >= ? AND ts < ?`)
+      .get(appId, from, to) as { n: number; matters: number };
+    return { matters: Number(row.matters), other: Number(row.n) - Number(row.matters) };
+  }
+
   /** Rollup rows of one kind for the given hours (optionally one key). */
   hourly(appId: string, kind: StatKind, hours: readonly number[], key?: string): HourlyStat[] {
     if (!hours.length) return [];
