@@ -232,6 +232,26 @@ describe("other signals", () => {
     expect(only("traffic_collapse")[0]).toMatchObject({ severity: "critical", evidence: { expected: 100, observed: 3 } });
   });
 
+  it("traffic collapse counts only since the latest boot: a process that just started is not a collapse", () => {
+    fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
+    // Started 2 min ago after being down: its first requests are not a collapse.
+    fx.lifecycle(fx.now - 2 * MIN, "boot");
+    fx.heartbeats(fx.now - MIN, fx.now);
+    fx.requests(fx.now - 2 * MIN, E(), 3, { route: "/" });
+    expect(only("traffic_collapse")).toEqual([]);
+  });
+
+  it("after 10 min up, a collapse is judged over the time since the boot", () => {
+    fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
+    fx.lifecycle(fx.now - 12 * MIN, "boot");
+    fx.heartbeats(fx.now - 11 * MIN, fx.now);
+    fx.requests(fx.now - 12 * MIN, E(), 3, { route: "/" });
+    // 11 min 15 s since the boot: 400 an hour makes 75 expected.
+    const [f] = only("traffic_collapse");
+    expect(f).toMatchObject({ severity: "critical", evidence: { window_ms: 12 * MIN - 45_000, expected: 75, observed: 3 } });
+    expect(f!.summary).toContain("3 requests in 11 min against 75 usually");
+  });
+
   it("a new error type is a warning; a known one at its usual rate is not", () => {
     recent(40);
     // History: TypeError /a seen two days ago.
