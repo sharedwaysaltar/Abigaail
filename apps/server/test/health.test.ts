@@ -232,6 +232,40 @@ describe("other signals", () => {
     expect(only("traffic_collapse")[0]).toMatchObject({ severity: "critical", evidence: { expected: 100, observed: 3 } });
   });
 
+  it("traffic collapse counts only since the latest boot: a process that just started is not a collapse", () => {
+    fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
+    // Started 2 min ago after being down: its first requests are not a collapse.
+    fx.lifecycle(fx.now - 2 * MIN, "boot");
+    fx.heartbeats(fx.now - MIN, fx.now);
+    fx.requests(fx.now - 2 * MIN, E(), 3, { route: "/" });
+    expect(only("traffic_collapse")).toEqual([]);
+  });
+
+  it("a collapse is judged from 5 min after the boot, not before", () => {
+    fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
+    // Booted 5 min 30 s ago: 4 min 45 s since the boot at the window's end, too soon.
+    fx.lifecycle(fx.now - 5.5 * MIN, "boot");
+    fx.heartbeats(fx.now - 5 * MIN, fx.now);
+    expect(only("traffic_collapse")).toEqual([]);
+    // A minute later: 5 min 45 s since the boot, 400 an hour makes 38 expected, none arrived.
+    fx.now += MIN;
+    fx.lifecycle(fx.now - 30_000, "heartbeat");
+    const [f] = only("traffic_collapse");
+    expect(f).toMatchObject({ severity: "critical", evidence: { window_ms: 5.5 * MIN + MIN - 45_000, observed: 0 } });
+    expect(f!.summary).toContain("0 requests in 6 min against 38 usually");
+  });
+
+  it("after 12 min up, a collapse is judged over the time since the boot", () => {
+    fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
+    fx.lifecycle(fx.now - 12 * MIN, "boot");
+    fx.heartbeats(fx.now - 11 * MIN, fx.now);
+    fx.requests(fx.now - 12 * MIN, E(), 3, { route: "/" });
+    // 11 min 15 s since the boot: 400 an hour makes 75 expected.
+    const [f] = only("traffic_collapse");
+    expect(f).toMatchObject({ severity: "critical", evidence: { window_ms: 12 * MIN - 45_000, expected: 75, observed: 3 } });
+    expect(f!.summary).toContain("3 requests in 11 min against 75 usually");
+  });
+
   it("a new error type is a warning; a known one at its usual rate is not", () => {
     recent(40);
     // History: TypeError /a seen two days ago.
@@ -243,6 +277,18 @@ describe("other signals", () => {
     fx.error(E() - 2 * MIN, "TypeError", "/a");
     expect(signals(fx.run(health))).toEqual(["new_error:RangeError /b:warning"]);
     expect(only("new_error")[0]!.summary).toBe("New error: RangeError on /b, 4 times in 15 min, not seen in the last 7 days.");
+  });
+
+  it("a new error stays new after the hour it started in is rolled up", () => {
+    // 14:05: the 15-min window reaches back into 13:00-14:00, which the rollup has closed.
+    fx.now = Date.UTC(2026, 9, 21, 14, 5);
+    const h = Math.floor(E() / HOUR_MS) * HOUR_MS - 2 * 24 * HOUR_MS;
+    fx.requests(h, h + HOUR_MS, 10);
+    fx.store.rollupHour(fx.appId, h);
+    fx.requests(E() - 14 * MIN, E() - 1_000, 40);
+    for (let i = 0; i < 6; i++) fx.error(E() - 12 * MIN + i * MIN, "RangeError", "/b");
+    fx.store.rollupHour(fx.appId, Math.floor(fx.now / HOUR_MS) * HOUR_MS - HOUR_MS);
+    expect(signals(fx.run(health))).toEqual(["new_error:RangeError /b:warning"]);
   });
 
   it("a crash restart is a warning; a clean restart is not", () => {

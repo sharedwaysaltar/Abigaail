@@ -1,0 +1,13 @@
+{
+  "name": "@abigaail/sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bad-traffic simulator: drives the demo apps on this machine so every agent signal can be seen firing and resolving.",
+  "dependencies": {
+    "@abigaail/node": "0.1.0",
+    "@abigaail/schema": "0.1.0",
+    "@abigaail/server": "0.1.0",
+    "@abigaail/store": "0.1.0"
+  }
+}

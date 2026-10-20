@@ -369,8 +369,16 @@ function saturation(ctx: AgentContext, app: App, w: Windows, slots: Slots): Agen
 
 function trafficCollapse(ctx: AgentContext, app: App, w: Windows, slots: Slots): AgentFinding[] {
   if (slots.source === "none") return [];
-  const observed = [...w.routes15.values()].reduce((s, r) => s + r.weighted_n, 0);
-  const expected = (median(totals(ctx.store, app.id, "route", slots).map((t) => t.weighted_n)) ?? 0) / 4;
+  // Count only since the process last started: before that it was down or not
+  // yet running (the Watchdog's finding), which is not "up but nobody gets through".
+  const windowStart = w.end - 15 * MIN;
+  const boot = ctx.store.lastBoot(app.id);
+  const from = boot && boot.ts > windowStart ? boot.ts : windowStart;
+  const spanMs = w.end - from;
+  if (spanMs < H.collapseMinSpanMs) return [];
+  const routes = from === windowStart ? [...w.routes15.values()] : ctx.store.statsFor(app.id, "route", from, w.end);
+  const observed = routes.reduce((s, r) => s + r.weighted_n, 0);
+  const expected = ((median(totals(ctx.store, app.id, "route", slots).map((t) => t.weighted_n)) ?? 0) * spanMs) / HOUR_MS;
   if (expected < H.collapseMinExpected || observed > H.collapseShare * expected) return [];
   if (poissonCdf(Math.floor(observed), expected) >= H.collapseP) return [];
   // Only "up but nobody gets through": a dead process is the Watchdog's finding.
@@ -380,10 +388,10 @@ function trafficCollapse(ctx: AgentContext, app: App, w: Windows, slots: Slots):
     signal: "traffic_collapse",
     subject: "",
     severity: "critical",
-    summary: `${app.name} is up but traffic collapsed: ${Math.round(observed)} requests in 15 min against ${Math.round(expected)} usually${normalFor(slots, w.end)}.`,
+    summary: `${app.name} is up but traffic collapsed: ${Math.round(observed)} requests in ${humanDuration(spanMs)} against ${Math.round(expected)} usually${normalFor(slots, w.end)}.`,
     cause: "Heartbeats still arrive, so the process runs but requests do not reach it: a proxy, DNS, TLS or routing problem in front of the app.",
     action: "Open the app from outside; check the reverse proxy, DNS records and certificate.",
-    evidence: { window_ms: 15 * MIN, observed, expected, baseline: slots.source },
+    evidence: { window_ms: spanMs, observed, expected, baseline: slots.source },
   }];
 }
 
@@ -397,7 +405,9 @@ function errorBursts(ctx: AgentContext, app: App, w: Windows, slots: Slots): Age
   const histHours: number[] = [];
   for (let h = Math.ceil(histFrom / HOUR_MS) * HOUR_MS; h < thisHour; h += HOUR_MS) histHours.push(h);
   const hasHistory = [...ctx.store.rolledHours(app.id, histHours).values()].some((n) => n > 0);
-  const seen = ctx.store.hourlyKeys(app.id, "error", histFrom, thisHour);
+  // "Seen before" ends at the last hour wholly before the window: once the hour
+  // holding the start of this burst is rolled up, the burst is not its own history.
+  const seen = ctx.store.hourlyKeys(app.id, "error", histFrom, Math.floor((w.end - 15 * MIN) / HOUR_MS) * HOUR_MS);
   const base = rowsByKey(ctx.store, app.id, "error", slots);
   const out: AgentFinding[] = [];
   for (const e of errors) {

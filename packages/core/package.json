@@ -10,6 +10,9 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "dependencies": {
     "@abigaail/schema": "0.1.0"
   }
