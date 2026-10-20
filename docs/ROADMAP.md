@@ -22,7 +22,7 @@ from spec phases 4 and 3, then the scrubber, then agents 4-7, each planned again
 
 | Chunk | Contents | How you test it |
 |---|---|---|
-| 7 | **Retention**: per-table periods (env, safe minimums), hourly batched deletion in the server for every app with rows (5-min catch-up runs while behind), physical erasure (secure_delete, one-time incremental auto_vacuum conversion when disk allows, WAL truncate), "Data kept" on the dashboard, README periods, Watchdog `retention_behind` and `vacuum_pending` | `npm run check`; sim database with `ABIGAAIL_RETAIN_EVENTS_DAYS=7`, dashboard Agents → "Data kept", `npm run findings` |
+| 7 ✅ | **Retention**: per-table periods (env, safe minimums), hourly batched deletion in the server for every app with rows (5-min catch-up runs while behind), physical erasure (secure_delete, one-time incremental auto_vacuum conversion when disk allows, WAL truncate), "Data kept" on the dashboard, README periods, Watchdog `retention_behind` and `vacuum_pending` | `npm run check`; sim database with `ABIGAAIL_RETAIN_EVENTS_DAYS=7`, dashboard Agents → "Data kept", `npm run findings` |
 | 7b | `app:purge`: delete one app's data on request (GDPR deletion path), audited | Planned after chunk 7 |
 | 8 | **Alerts**: webhook + email for critical findings only, from the server process (works with the dashboard down), dedup and cooldown by fingerprint, recovery notice; Watchdog `alert_delivery_failed` | Planned in chunk 8 |
 | 9 | **Allowlist scrubber + privacy tests**: the SDK-side scrubber for the first free-text-like fields (lifts #12 only where it is proven safe), property and fuzz tests that forbidden values never leave the app or reach the store | Planned in chunk 9 |

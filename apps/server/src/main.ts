@@ -1,13 +1,23 @@
 // Starts the ingest server: `npm run dev:server`.
 
-import { openStore } from "@abigaail/store";
+import { existsSync } from "node:fs";
+import { openAuthStore, openStore } from "@abigaail/store";
 import { Runner } from "./agents/runner.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, type Config } from "./config.js";
 import { LIVE, LiveHub, startLive } from "./live.js";
+import { convertForShrinking, Retention } from "./retention.js";
 import { openSaltFile, type SaltFile } from "./salt.js";
 import { createServer } from "./server.js";
 
-const config = loadConfig();
+const log = (msg: string) => console.error(`[abigaail] ${msg}`);
+let config: Config;
+try {
+  config = loadConfig();
+} catch (err) {
+  // A bad setting (say, a retention period below its minimum) stops the server.
+  log(`${err instanceof Error ? err.message : String(err)}; not starting`);
+  process.exit(1);
+}
 let salt: SaltFile;
 try {
   // Rotates a salt left over from an earlier day before the first request.
@@ -18,7 +28,18 @@ try {
   process.exit(1);
 }
 const store = openStore(config.dbPath);
-const runner = config.agents ? new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath }) : undefined;
+// One-time switch to incremental vacuum, before ingest listens and before any agent worker starts.
+convertForShrinking(store, "database", log);
+if (existsSync(config.authDbPath)) {
+  const auth = openAuthStore(config.authDbPath);
+  convertForShrinking(auth, "auth database", log);
+  auth.close();
+}
+// Runs whether or not the agents are on: data must age out either way.
+const retention = new Retention({ store, days: config.retention, authDbPath: config.authDbPath });
+const runner = config.agents
+  ? new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, retention: config.retention })
+  : undefined;
 const hub = new LiveHub();
 
 const server = createServer({
@@ -36,6 +57,7 @@ const live = await startLive({ hub, store, token: config.liveToken, port: config
 if (live) console.log(`[abigaail] live feed on http://${LIVE.host}:${config.livePort}/live (loopback only)`);
 server.listen(config.port, config.host, () => {
   console.log(`[abigaail] ingest listening on http://${config.host}:${config.port}/ingest (db: ${config.dbPath})`);
+  retention.start();
   if (runner) {
     runner.start();
     console.log("[abigaail] agents running");
@@ -46,6 +68,7 @@ server.listen(config.port, config.host, () => {
 
 function shutdown(): void {
   void runner?.stop();
+  void retention.stop();
   live?.close();
   live?.closeAllConnections();
   server.close(() => {

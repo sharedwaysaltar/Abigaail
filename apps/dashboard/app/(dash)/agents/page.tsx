@@ -1,4 +1,4 @@
-import { agentsView, systemFindingsView } from "@abigaail/insights";
+import { agentsView, retentionView, systemFindingsView } from "@abigaail/insights";
 import { RunStrip } from "@/components/RunStrip";
 import { Severity } from "@/components/Severity";
 import { Status } from "@/components/Status";
@@ -15,6 +15,7 @@ export default async function AgentsPage() {
   const now = Date.now();
   const rows = agentsView(r, r.listApps(), now);
   const own = systemFindingsView(r);
+  const kept = retentionView(r);
 
   return (
     <main>
@@ -86,6 +87,33 @@ export default async function AgentsPage() {
             </tbody>
           </table>
         </details>
+      </section>
+
+      <section>
+        <h2>Data kept</h2>
+        {kept.length ? (
+          <>
+            <table>
+              <thead><tr><th>What</th><th>Kept</th><th className="r">Deleted in the last run</th></tr></thead>
+              <tbody>
+                {kept.map((k) => (
+                  <tr key={k.name}>
+                    <td>{k.label}</td>
+                    <td>{k.keepDays ? `${k.keepDays} days, then deleted` : "until they expire (2 h idle, 12 h at most)"}</td>
+                    <td className="r">{k.lastDeleted ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="small muted">
+              {kept[0]!.lastRunAt !== null ? `Last run ${ago(kept[0]!.lastRunAt, now)}. ` : "Not run yet. "}
+              Deleted rows are overwritten and removed from the database file, not just hidden. Open findings,
+              apps and their releases are kept. The periods are set on the server (ABIGAAIL_RETAIN_*_DAYS).
+            </p>
+          </>
+        ) : (
+          <p className="empty">The server has not recorded its retention periods yet.</p>
+        )}
       </section>
 
       <section>

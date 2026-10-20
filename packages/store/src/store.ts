@@ -5,8 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import type { AbigaailEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
-import { APP_COLUMNS, HOUR_MS, StoreReader, type App, type RunOutcome, type Severity, type StatKind } from "./reader.js";
+import { APP_COLUMNS, HOUR_MS, StoreReader, type App, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
 import { toRow, type Derived, type EventRow } from "./rows.js";
+import { checkpointTruncate, convertToIncremental, incrementalVacuum, type VacuumConversion } from "./vacuum.js";
 
 export interface AuditEntry {
   id: number;
@@ -72,6 +73,50 @@ export interface RecordRunOptions {
 const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric", "app"];
 const DAY_MS = 86_400_000;
 
+/** Tables with an app_id whose old rows retention deletes one app_id at a time. */
+export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log";
+const SCOPED_TABLES: readonly ScopedTable[] = ["events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log"];
+
+/** What deleteExpired removes; events and rollups have their own methods (roll before delete, tables kept in step). */
+export type ExpiringTable = "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples";
+
+/**
+ * One bounded batch per statement. App tables take (scope, cutoff, limit) or,
+ * for app_id NULL rows, (cutoff, limit); system tables take (cutoff, limit).
+ * Only resolved findings expire, and each agent's newest ok run is kept.
+ */
+const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
+  daily_uniques: {
+    app: `DELETE FROM daily_uniques WHERE app_id = ? AND day IN (
+            SELECT day FROM daily_uniques WHERE app_id = ? AND day < ? ORDER BY day LIMIT ?)`,
+  },
+  findings: {
+    app: `DELETE FROM findings WHERE app_id = ? AND id IN (
+            SELECT id FROM findings WHERE app_id = ? AND state = 'resolved' AND resolved_at < ? LIMIT ?)`,
+    none: `DELETE FROM findings WHERE app_id IS NULL AND id IN (
+             SELECT id FROM findings WHERE app_id IS NULL AND state = 'resolved' AND resolved_at < ? LIMIT ?)`,
+  },
+  ingest_rejections: {
+    app: `DELETE FROM ingest_rejections WHERE app_id = ? AND minute IN (
+            SELECT DISTINCT minute FROM ingest_rejections WHERE app_id = ? AND minute < ? ORDER BY minute LIMIT ?)`,
+  },
+  audit_log: {
+    app: `DELETE FROM audit_log WHERE app_id = ? AND id IN (
+            SELECT id FROM audit_log WHERE app_id = ? AND ts < ? ORDER BY id LIMIT ?)`,
+    none: `DELETE FROM audit_log WHERE app_id IS NULL AND id IN (
+             SELECT id FROM audit_log WHERE app_id IS NULL AND ts < ? ORDER BY id LIMIT ?)`,
+  },
+  agent_runs: {
+    none: `DELETE FROM agent_runs WHERE id IN (
+             SELECT id FROM agent_runs WHERE finished_at < ?
+               AND id NOT IN (SELECT max(id) FROM agent_runs WHERE outcome = 'ok' GROUP BY agent)
+             ORDER BY finished_at LIMIT ?)`,
+  },
+  db_size_samples: {
+    none: "DELETE FROM db_size_samples WHERE ts IN (SELECT ts FROM db_size_samples WHERE ts < ? ORDER BY ts LIMIT ?)",
+  },
+};
+
 export function openStore(path: string, opts: StoreOptions = {}): Store {
   return new Store(path, opts);
 }
@@ -90,6 +135,10 @@ export function openWritable(path: string): DatabaseSync {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec(`
+    -- Must come first: a new file is incremental only if this is set before its
+    -- first page is written. On an existing file it changes nothing until a
+    -- VACUUM (the one-time conversion in vacuum.ts).
+    PRAGMA auto_vacuum = INCREMENTAL;
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     PRAGMA foreign_keys = ON;
@@ -107,7 +156,7 @@ export function openWritable(path: string): DatabaseSync {
 export class Store extends StoreReader {
   private readonly now: () => number;
 
-  constructor(path: string, opts: StoreOptions = {}) {
+  constructor(readonly path: string, opts: StoreOptions = {}) {
     super(openWritable(path));
     this.now = opts.now ?? Date.now;
     this.migrate();
@@ -348,11 +397,21 @@ export class Store extends StoreReader {
    * Roll one UTC hour of an app's raw events into hourly_route_stats, and
    * refresh that day's unique humans. Idempotent: re-running replaces the hour,
    * so late events are picked up by rolling it again.
+   *
+   * Never rolls an hour down: events are append-only, so fewer events than the
+   * hour was rolled with means retention deleted them. The rolled hour is then
+   * kept as it is (returns false), so baselines never lose it. For the same
+   * reason a day's unique humans only ever grow.
    */
-  rollupHour(appId: string, hour: number): void {
+  rollupHour(appId: string, hour: number): boolean {
     if (hour % HOUR_MS !== 0) throw new Error("hour must be the start of a UTC hour");
     const end = hour + HOUR_MS;
-    this.tx(() => {
+    return this.tx(() => {
+      const events = this.countEventsBetween(appId, hour, end);
+      const prev = this.db.prepare("SELECT events FROM rollup_hours WHERE app_id = ? AND hour = ?").get(appId, hour) as
+        | { events: number }
+        | undefined;
+      if (prev && events < Number(prev.events)) return false;
       this.db.prepare("DELETE FROM hourly_route_stats WHERE app_id = ? AND hour = ?").run(appId, hour);
       const insert = this.db.prepare(`
         INSERT INTO hourly_route_stats (app_id, hour, kind, key, n, weighted_n, status_5xx, status_4xx,
@@ -368,12 +427,13 @@ export class Store extends StoreReader {
         .prepare(`INSERT INTO rollup_hours (app_id, hour, events, rolled_at, version) VALUES (?, ?, ?, ?, ?)
                   ON CONFLICT (app_id, hour)
                   DO UPDATE SET events = excluded.events, rolled_at = excluded.rolled_at, version = excluded.version`)
-        .run(appId, hour, this.countEventsBetween(appId, hour, end), this.now(), ROLLUP_VERSION);
+        .run(appId, hour, events, this.now(), ROLLUP_VERSION);
       const dayStart = Math.floor(hour / DAY_MS) * DAY_MS;
       this.db
         .prepare(`INSERT INTO daily_uniques (app_id, day, humans) VALUES (?, ?, ?)
-                  ON CONFLICT (app_id, day) DO UPDATE SET humans = excluded.humans`)
+                  ON CONFLICT (app_id, day) DO UPDATE SET humans = max(humans, excluded.humans)`)
         .run(appId, new Date(dayStart).toISOString().slice(0, 10), this.uniqueHumans(appId, dayStart, dayStart + DAY_MS));
+      return true;
     });
   }
 
@@ -409,10 +469,125 @@ export class Store extends StoreReader {
     this.db.prepare("INSERT OR REPLACE INTO db_size_samples (ts, bytes) VALUES (?, ?)").run(this.now(), this.dbBytes());
   }
 
+  // ---- retention (DECISIONS #88) ---------------------------------------------
+
+  /**
+   * Every app_id that has rows in `table`, found by stepping through its
+   * app_id index (each step a single lookup), so disabled apps and app_ids with
+   * no apps row are included. NULL app_ids are not returned.
+   */
+  retentionScopes(table: ScopedTable): string[] {
+    if (!SCOPED_TABLES.includes(table)) throw new RangeError("not a scoped table");
+    const first = this.db.prepare(`SELECT min(app_id) AS id FROM ${table}`);
+    const next = this.db.prepare(`SELECT min(app_id) AS id FROM ${table} WHERE app_id > ?`);
+    const out: string[] = [];
+    let row = first.get() as { id: string | null };
+    while (row.id !== null) {
+      out.push(row.id);
+      row = next.get(row.id) as { id: string | null };
+    }
+    return out;
+  }
+
+  /**
+   * Delete up to `limit` raw events of one app from its oldest stored hour, if
+   * that hour starts before `before` (an hour start). Roll before delete: the
+   * hour is rolled up first unless it already is at the current rollup
+   * version, so baselines keep it. `more`: older events are still left.
+   */
+  deleteOldEvents(appId: string, before: number, limit: number): { deleted: number; rolled: boolean; more: boolean } {
+    if (before % HOUR_MS !== 0) throw new Error("before must be the start of a UTC hour");
+    const oldest = this.oldestEventTs(appId);
+    if (oldest === undefined || oldest >= before) return { deleted: 0, rolled: false, more: false };
+    const hour = Math.floor(oldest / HOUR_MS) * HOUR_MS;
+    const rolledAt = this.db.prepare("SELECT version FROM rollup_hours WHERE app_id = ? AND hour = ?").get(appId, hour) as
+      | { version: number }
+      | undefined;
+    let rolled = false;
+    if (!rolledAt || Number(rolledAt.version) < ROLLUP_VERSION) {
+      this.rollupHour(appId, hour);
+      rolled = true;
+    }
+    const deleted = this.tx(() =>
+      Number(
+        this.db
+          .prepare(`DELETE FROM events WHERE app_id = ? AND event_id IN (
+                      SELECT event_id FROM events WHERE app_id = ? AND ts < ? LIMIT ?)`)
+          .run(appId, appId, Math.min(hour + HOUR_MS, before), limit).changes,
+      ),
+    );
+    const left = this.oldestEventTs(appId);
+    return { deleted, rolled, more: left !== undefined && left < before };
+  }
+
+  /**
+   * Delete one app's rolled-up hours before `before`, at most `hours` hours at
+   * a time. hourly_route_stats and rollup_hours go together in one
+   * transaction: a rolled hour without its stats would read as zero traffic.
+   */
+  deleteOldRollups(appId: string, before: number, hours: number): number {
+    return this.tx(() => {
+      const oldest = Math.min(
+        ...[
+          this.db.prepare("SELECT min(hour) AS h FROM rollup_hours WHERE app_id = ?").get(appId),
+          this.db.prepare("SELECT min(hour) AS h FROM hourly_route_stats WHERE app_id = ?").get(appId),
+        ].map((r) => (r as { h: number | null }).h ?? Infinity),
+      );
+      if (oldest >= before) return 0;
+      const end = Math.min(oldest + hours * HOUR_MS, before);
+      const stats = this.db.prepare("DELETE FROM hourly_route_stats WHERE app_id = ? AND hour < ?").run(appId, end).changes;
+      const marks = this.db.prepare("DELETE FROM rollup_hours WHERE app_id = ? AND hour < ?").run(appId, end).changes;
+      return Number(stats) + Number(marks);
+    });
+  }
+
+  /**
+   * Delete up to `limit` expired rows of one table and scope: an app_id, or
+   * null for rows that have none (Abigaail's own findings and audit entries,
+   * and the system tables). `before` is a time, or a UTC day for daily_uniques.
+   */
+  deleteExpired(table: ExpiringTable, scope: string | null, before: number | string, limit: number): number {
+    const sql = scope === null ? EXPIRE_SQL[table].none : EXPIRE_SQL[table].app;
+    if (!sql) throw new RangeError(`${table} has no ${scope === null ? "unscoped" : "app"} rows`);
+    const params = scope === null ? [before, limit] : [scope, scope, before, limit];
+    return this.tx(() => Number(this.db.prepare(sql).run(...params).changes));
+  }
+
+  /** Record the periods being enforced (the dashboard reads them back). Last-run fields are kept. */
+  writeRetentionPolicy(rows: readonly { name: RetentionName; keep_days: number; min_days: number }[]): void {
+    const upsert = this.db.prepare(`
+      INSERT INTO retention_policy (name, keep_days, min_days, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT (name) DO UPDATE SET keep_days = excluded.keep_days, min_days = excluded.min_days, updated_at = excluded.updated_at`);
+    this.tx(() => {
+      for (const r of rows) upsert.run(r.name, r.keep_days, r.min_days, this.now());
+    });
+  }
+
+  /** Rows deleted per policy name by one retention run. */
+  recordRetention(at: number, deleted: Partial<Record<RetentionName, number>>): void {
+    const update = this.db.prepare("UPDATE retention_policy SET last_run_at = ?, last_deleted = ? WHERE name = ?");
+    this.tx(() => {
+      for (const [name, n] of Object.entries(deleted)) update.run(at, n, name);
+    });
+  }
+
   // ---- maintenance --------------------------------------------------------
 
-  /** Move WAL contents into the main file and truncate the WAL. */
-  checkpoint(): void {
-    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  /**
+   * Move WAL contents into the main file and truncate the WAL. busy: a reader
+   * stopped it; try again. noWait: do not wait for readers (retention retries later).
+   */
+  checkpoint(opts: { noWait?: boolean } = {}): { busy: boolean } {
+    return checkpointTruncate(this.db, opts);
+  }
+
+  /** One-time switch to incremental auto_vacuum when disk allows (see vacuum.ts). */
+  convertToIncremental(opts: { freeBytes?: (dir: string) => number } = {}): VacuumConversion {
+    return convertToIncremental(this.db, this.path, opts);
+  }
+
+  /** Return up to `pages` free pages to the filesystem; returns the free pages left. */
+  incrementalVacuum(pages: number): number {
+    return incrementalVacuum(this.db, pages);
   }
 }

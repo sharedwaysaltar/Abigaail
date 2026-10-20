@@ -8,10 +8,11 @@ import { Worker, type ResourceLimits } from "node:worker_threads";
 import { HOUR_MS, type FindingInput, type RunInput, type Severity, type Store } from "@abigaail/store";
 import { errorClass } from "./evaluate.js";
 import { AGENTS } from "./registry.js";
-import { EVAL_LAG_MS, FINDINGS, ROLLUP, SCHEDULE, WATCHDOG, windowEnd } from "./thresholds.js";
+import { EVAL_LAG_MS, FINDINGS, ROLLUP, SCHEDULE, WATCHDOG, windowEnd, type RetentionDays } from "./thresholds.js";
 import type { AgentConfig, AgentSchedule, WorkerInput, WorkerResult } from "./types.js";
 
 const MINUTE_MS = 60_000;
+const DAY_MS = 86_400_000;
 const SEVERITIES: readonly Severity[] = ["critical", "warning", "unknown", "info"];
 
 export interface RunnerOptions {
@@ -26,6 +27,8 @@ export interface RunnerOptions {
   /** Fixed messages only: agent names, outcomes and error class names. */
   log?: (msg: string) => void;
   resourceLimits?: ResourceLimits;
+  /** Retention periods (the server's Retention job deletes; the Watchdog checks it kept up). */
+  retention?: RetentionDays;
 }
 
 export interface RunReport {
@@ -103,9 +106,11 @@ export class Runner {
       schedules: [
         ...this.agents.map(({ name, everyMs, timeoutMs }) => ({ name, everyMs, timeoutMs })),
         { name: "rollup", everyMs: SCHEDULE.rollup.everyMs },
+        ...(opts.retention ? [{ name: "retention", everyMs: SCHEDULE.retention.everyMs }] : []),
       ],
       runnerStartedAt: this.startedAt,
       lastRunBeforeStart: this.store.lastRunBefore(this.startedAt) ?? null,
+      ...(opts.retention ? { retention: opts.retention } : {}),
     };
     this.closeUnobserved();
   }
@@ -293,10 +298,13 @@ export class Runner {
       }
 
       const oldest = closedEnd - ROLLUP.rerollHours * HOUR_MS;
+      // Never backfill hours whose raw events retention has deleted (rollupHour would keep them anyway).
+      const rawFrom = this.opts.retention ? Math.ceil((now - this.opts.retention.events * DAY_MS) / HOUR_MS) * HOUR_MS : -Infinity;
       for (const app of apps) {
-        const from = Math.max(Math.floor(app.created_at / HOUR_MS) * HOUR_MS, now - ROLLUP.backfillMs);
+        const from = Math.max(Math.floor(app.created_at / HOUR_MS) * HOUR_MS, now - ROLLUP.backfillMs, rawFrom);
         let missing = this.store.missingHours(app.id, from, oldest);
         while (missing.length && !this.stopped) {
+          const before = missing.join();
           for (const hour of missing.slice(0, ROLLUP.backfillPerTick)) {
             try {
               this.store.rollupHour(app.id, hour);
@@ -308,6 +316,8 @@ export class Runner {
           }
           if (!full) break;
           missing = this.store.missingHours(app.id, from, oldest);
+          // An hour rollupHour kept as it was (its raw events are gone) stays "missing": stop, not loop.
+          if (missing.join() === before) break;
         }
       }
     } catch (err) {

@@ -201,6 +201,21 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE findings ADD COLUMN resolved_reason TEXT;
   `,
+  // 7: retention. The policy the server enforces, written by the server and
+  // only read by the dashboard, so the dashboard never shows a second copy of
+  // the environment. keep_days 0 = deleted when expired (sessions). Agent
+  // runs are deleted by finish time.
+  `
+  CREATE TABLE retention_policy (
+    name         TEXT PRIMARY KEY,
+    keep_days    INTEGER NOT NULL,
+    min_days     INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    last_run_at  INTEGER,
+    last_deleted INTEGER
+  );
+  CREATE INDEX agent_runs_finished ON agent_runs (finished_at);
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

@@ -8,6 +8,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import { openWritable } from "./store.js";
+import { checkpointTruncate, convertToIncremental, incrementalVacuum, type VacuumConversion } from "./vacuum.js";
 
 const AUTH_MIGRATIONS: readonly string[] = [
   `
@@ -95,7 +96,7 @@ export class AuthStore {
   private readonly now: () => number;
   private closed = false;
 
-  constructor(path: string, opts: { now?: () => number } = {}) {
+  constructor(readonly path: string, opts: { now?: () => number } = {}) {
     this.db = openWritable(path);
     this.now = opts.now ?? Date.now;
     const { user_version } = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
@@ -260,6 +261,38 @@ export class AuthStore {
     return Number(
       this.db.prepare("DELETE FROM sessions WHERE last_seen < ? OR created_at < ?").run(idleBefore, createdBefore).changes,
     );
+  }
+
+  /**
+   * Retention (run by the server, DECISIONS #88): expired sessions, sign-in
+   * failures past the lockout's 24 h, and audit entries older than
+   * `auditBefore`. Returns the rows deleted per kind.
+   */
+  prune(opts: { idleBefore: number; createdBefore: number; failuresBefore: number; auditBefore: number }): { sessions: number; audit: number } {
+    return this.tx(() => {
+      const sessions = this.purgeSessions(opts.idleBefore, opts.createdBefore);
+      this.db.prepare("DELETE FROM login_failures WHERE ts < ?").run(opts.failuresBefore);
+      const audit = Number(this.db.prepare("DELETE FROM audit_log WHERE ts < ?").run(opts.auditBefore).changes);
+      return { sessions, audit };
+    });
+  }
+
+  /**
+   * Move WAL contents into the main file and truncate the WAL. busy: a reader
+   * stopped it; try again. noWait: do not wait for readers (retention retries later).
+   */
+  checkpoint(opts: { noWait?: boolean } = {}): { busy: boolean } {
+    return checkpointTruncate(this.db, opts);
+  }
+
+  /** One-time switch to incremental auto_vacuum when disk allows (see vacuum.ts). */
+  convertToIncremental(opts: { freeBytes?: (dir: string) => number } = {}): VacuumConversion {
+    return convertToIncremental(this.db, this.path, opts);
+  }
+
+  /** Return up to `pages` free pages to the filesystem; returns the free pages left. */
+  incrementalVacuum(pages: number): number {
+    return incrementalVacuum(this.db, pages);
   }
 
   /** For tests and audits: every stored session hash. */

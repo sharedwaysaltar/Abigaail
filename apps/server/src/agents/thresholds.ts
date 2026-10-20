@@ -5,7 +5,7 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 // Shared with the dashboard, re-exported so every tunable is findable here.
-import { STATUS_FRESH_MS } from "@abigaail/insights";
+import { BASELINE, STATUS_FRESH_MS } from "@abigaail/insights";
 
 // SCHEDULE lives in insights so the dashboard's Agents view shows the same schedules.
 export { BASELINE, EVAL_LAG_MS, SCHEDULE, STATUS_FRESH_MS, windowEnd } from "@abigaail/insights";
@@ -149,3 +149,51 @@ export const USAGE = {
   peakFactor: 2,
   peakMin: 50,
 };
+
+/**
+ * Retention (DECISIONS #87, #88). Days kept per table, the minimum allowed and
+ * the variable that changes it: ABIGAAIL_RETAIN_<env>_DAYS. A value that is
+ * not a whole number, below the minimum or above maxDays stops the server.
+ */
+export const RETENTION = {
+  periods: {
+    /** Raw events: the only monitoring data with a pseudonymous ID (visitor_hash). */
+    events: { env: "EVENTS", days: 30, minDays: 7 },
+    /** Hourly rollups: baselines need the same hour-of-week over BASELINE.weeks, plus the week being judged. */
+    rollups: { env: "ROLLUPS", days: 400, minDays: (BASELINE.weeks + 1) * 7 },
+    /** Unique humans per day: Usage compares the same weekday over BASELINE.weeks. */
+    daily_uniques: { env: "DAILY", days: 400, minDays: (BASELINE.weeks + 1) * 7 },
+    /** Resolved findings only; open findings are never deleted. */
+    findings: { env: "FINDINGS", days: 180, minDays: 30 },
+    /** The newest ok run of each agent is always kept. */
+    agent_runs: { env: "AGENT_RUNS", days: 30, minDays: 7 },
+    ingest_rejections: { env: "REJECTIONS", days: 30, minDays: 1 },
+    db_size_samples: { env: "DB_SIZE", days: 90, minDays: 2 },
+    /** Admin audit logs of both databases. */
+    audit_log: { env: "AUDIT", days: 400, minDays: 90 },
+  },
+  maxDays: 3650,
+  /** Rows per delete transaction: ingest waits at most one batch. */
+  batchRows: 1000,
+  /** Rolled-up hours per delete transaction (each hour has one row per route, host, ...). */
+  rollupHoursPerBatch: 6,
+  /** Work per run; what is left carries over to a catch-up run. */
+  budgetMs: 10_000,
+  /** Runs hourly at this minute, away from the rollup just after the hour. */
+  runAtMinute: 30,
+  /** While behind (work left), the next run comes this soon instead of next hour. */
+  catchUpMs: 5 * MINUTE,
+  /** Free pages returned to the filesystem per incremental_vacuum step (4 KiB each). */
+  vacuumPages: 2000,
+  /** Attempts to truncate the WAL before the run counts as failed, this far apart (never blocking). */
+  checkpointTries: 3,
+  checkpointRetryMs: 1_000,
+  /** Watchdog: data this long past its period is "retention behind" (warning)... */
+  behindWarnMs: 6 * HOUR,
+  /** ...and critical after this long. */
+  behindCriticalMs: 2 * DAY,
+} as const;
+
+export type RetentionPeriod = keyof typeof RETENTION.periods;
+/** Days kept per table, as loaded from the environment. */
+export type RetentionDays = Record<RetentionPeriod, number>;

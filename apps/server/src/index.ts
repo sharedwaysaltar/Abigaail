@@ -1,6 +1,8 @@
 export { createServer } from "./server.js";
 export type { ServerOptions } from "./server.js";
-export { loadConfig } from "./config.js";
+export { loadConfig, loadRetention } from "./config.js";
+export { convertForShrinking, hourCutoff, nextRunAt, Retention, retentionPolicyRows } from "./retention.js";
+export type { RetentionOptions, RetentionReport } from "./retention.js";
 export type { Config } from "./config.js";
 export { classifyUserAgent, eventTime, normaliseIp, utcDay, visitorHash, MAX_EVENT_AGE_MS } from "./derive.js";
 export type { BotClass, BrowserFamily } from "./derive.js";
