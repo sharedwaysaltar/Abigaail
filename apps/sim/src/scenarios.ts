@@ -11,7 +11,8 @@ import type { Severity } from "@abigaail/store";
 
 export type Action =
   | { faults: Partial<Faults> }
-  | { humans: boolean }
+  /** true/false, or a share of the usual human rate (0-1). */
+  | { humans: boolean | number }
   | { bots: number }
   | { extra: { path: string; perMin: number }[] }
   /** SIGKILL: no shutdown event, queued events are lost. */

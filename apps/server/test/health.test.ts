@@ -241,7 +241,21 @@ describe("other signals", () => {
     expect(only("traffic_collapse")).toEqual([]);
   });
 
-  it("after 10 min up, a collapse is judged over the time since the boot", () => {
+  it("a collapse is judged from 5 min after the boot, not before", () => {
+    fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
+    // Booted 5 min 30 s ago: 4 min 45 s since the boot at the window's end, too soon.
+    fx.lifecycle(fx.now - 5.5 * MIN, "boot");
+    fx.heartbeats(fx.now - 5 * MIN, fx.now);
+    expect(only("traffic_collapse")).toEqual([]);
+    // A minute later: 5 min 45 s since the boot, 400 an hour makes 38 expected, none arrived.
+    fx.now += MIN;
+    fx.lifecycle(fx.now - 30_000, "heartbeat");
+    const [f] = only("traffic_collapse");
+    expect(f).toMatchObject({ severity: "critical", evidence: { window_ms: 5.5 * MIN + MIN - 45_000, observed: 0 } });
+    expect(f!.summary).toContain("0 requests in 6 min against 38 usually");
+  });
+
+  it("after 12 min up, a collapse is judged over the time since the boot", () => {
     fx.baselineWeeks(E(), 4, (h) => fx.requests(h, h + HOUR_MS, 400, { route: "/" }));
     fx.lifecycle(fx.now - 12 * MIN, "boot");
     fx.heartbeats(fx.now - 11 * MIN, fx.now);

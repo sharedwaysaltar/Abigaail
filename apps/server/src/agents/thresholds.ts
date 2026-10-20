@@ -119,7 +119,7 @@ export const HEALTH = {
   collapseShare: 0.1,
   collapseP: 0.001,
   /** Judged only over at least this much time since the latest boot. */
-  collapseMinSpanMs: 10 * MINUTE,
+  collapseMinSpanMs: 5 * MINUTE,
 
   // New error bursts (15-minute window).
   minNewErrors: 3,

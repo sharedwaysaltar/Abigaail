@@ -67,8 +67,8 @@ export const BOTS_BURST = 5;
 const BOT_MIX: readonly [Kind, number][] = [["crawler", 0.35], ["ai_crawler", 0.2], ["automation", 0.2], ["probe", 0.25]];
 
 export interface Mode {
-  /** Human traffic on (off for a traffic collapse). */
-  humans: boolean;
+  /** Human traffic: on, off (a traffic collapse), or a share of the usual rate (0-1, e.g. ramping up after a boot). */
+  humans: boolean | number;
   /** Bots and probes as a multiple of the human rate (they continue when humans stop). */
   bots: number;
   /** Extra human requests per minute to fixed paths (e.g. a broken route). */
@@ -105,8 +105,9 @@ export function generate(r: Rng, app: AppKind, from: number, to: number, mode: M
     const span = Math.min(SEC, to - s);
     const perSec = humanRate(s) / 60;
     const at = () => s + Math.floor(r() * span);
-    if (mode.humans) {
-      for (let i = poisson(r, (perSec * span) / SEC); i > 0; i--) out.push(human(r, at(), weighted(r, routes).path(r)));
+    const share = mode.humans === true ? 1 : mode.humans === false ? 0 : Math.min(1, Math.max(0, mode.humans));
+    if (share > 0) {
+      for (let i = poisson(r, (share * perSec * span) / SEC); i > 0; i--) out.push(human(r, at(), weighted(r, routes).path(r)));
       for (const e of mode.extra) for (let i = poisson(r, (e.perMin / 60) * (span / SEC)); i > 0; i--) out.push(human(r, at(), e.path));
     }
     for (let i = poisson(r, (mode.bots * perSec * span) / SEC); i > 0; i--) {

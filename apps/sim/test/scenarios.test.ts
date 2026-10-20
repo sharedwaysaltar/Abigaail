@@ -12,9 +12,13 @@ const MIN = 60_000;
 afterAll(cleanup);
 
 function run(app: AppKind, names: string[], start: number) {
+  return runPlan(app, plan(app, names), start);
+}
+
+function runPlan(app: AppKind, planned: ReturnType<typeof plan>, start: number) {
   const s = seededStore(app, start);
   try {
-    const r = replay({ store: s.store, appId: s.appId, app, plan: plan(app, names), start });
+    const r = replay({ store: s.store, appId: s.appId, app, plan: planned, start });
     const results = r.tracker.results(r.endedAt);
     const log = (line: string) => (process.env.SIM_TIMINGS ? appendFileSync(process.env.SIM_TIMINGS, `${line}\n`) : undefined);
     for (const x of results) log(`${app} ${start === QUIET ? "quiet" : "busy"} ${x.scenario} ${x.fingerprint} ${x.status} show=${x.showMs === undefined ? "-" : mins(x.showMs)} resolve=${x.resolveMs === undefined ? "-" : mins(x.resolveMs)} ${x.detail}`);
@@ -66,6 +70,52 @@ for (const app of ["node", "next"] as const) {
         } finally {
           s.close();
         }
+      }, 120_000);
+
+      it("a deploy after which no visitor gets through is a traffic collapse within about 7 min of the boot", () => {
+        const proxyBroken: Scenario = {
+          name: "deploy-breaks-proxy",
+          apps: ["node"],
+          description: "Clean restart on sim-r2; the proxy in front is broken, so no human request arrives for 12 min.",
+          steps: [
+            { at: 0, action: { stop: true } },
+            { at: 2_000, action: { humans: false } },
+            { at: 2_000, action: { start: { release: "sim-r2" } } },
+            { at: 12 * MIN, action: { humans: true } },
+          ],
+          faultMs: 12 * MIN,
+          expect: [
+            { fingerprint: "health:traffic_collapse:", severity: "critical", summary: ["is up but traffic collapsed"], showWithinMs: 2_000 + 7 * MIN, resolveWithinMs: 7 * MIN },
+            { fingerprint: "health:deploy:sim-r2", severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },
+          ],
+          allowed: ["health:too_little_traffic:"],
+        };
+        const { results, problems } = runPlan(app, [{ scenario: proxyBroken, at: WARMUP_MS }], QUIET);
+        expect(problems).toEqual([]);
+        expect(results.filter((x) => x.status !== "pass")).toEqual([]);
+        // Not before the 5 minutes since the boot (plus Health's 45 s lag).
+        expect(results.find((x) => x.fingerprint === "health:traffic_collapse:")!.showMs).toBeGreaterThan(5 * MIN + 45_000);
+      }, 120_000);
+
+      it("a normal restart with traffic ramping up over 5 min is not a traffic collapse", () => {
+        const ramp: Scenario = {
+          name: "restart-ramp",
+          apps: ["node"],
+          description: "Clean stop, 2 min down, start on the same release; visitors return over 5 min.",
+          steps: [
+            { at: 0, action: { stop: true } },
+            { at: 0, action: { humans: 0 } },
+            { at: 2 * MIN, action: { start: {} } },
+            ...[0.2, 0.4, 0.6, 0.8, 1].map((share, i) => ({ at: 2 * MIN + i * MIN, action: { humans: share } })),
+          ],
+          faultMs: 15 * MIN,
+          expect: [],
+          forbid: ["health:traffic_collapse:"],
+          forbidMs: 20 * MIN,
+        };
+        const { results, problems } = runPlan(app, [{ scenario: ramp, at: WARMUP_MS }], QUIET);
+        expect(problems).toEqual([]);
+        expect(results).toEqual([]);
       }, 120_000);
 
       it("error-burst across an hour boundary: the rollup of its own hour does not make it old news", () => {
