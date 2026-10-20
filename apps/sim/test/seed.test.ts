@@ -35,7 +35,7 @@ describe("seeding", () => {
     seedHistory(store, appId, "node", seedHours(NOW, [0]));
     expect(baselineSlots(store, appId, NOW - 45_000).source).toBe("hour-of-week");
     expect(store.countEvents(appId, { type: "outbound" })).toBeGreaterThan(0);
-  });
+  }, 60_000); // seeds ~10 hours of history: seconds, more on a busy runner
 
   it("refuses a batch the server would refuse, and stores nothing of it", () => {
     const bad = lifecycleItem(rng(1), NOW - DAY, "heartbeat");
