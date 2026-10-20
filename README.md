@@ -309,6 +309,9 @@ npm run sim -- run all --app next   # demo-next (build it first: npm run build -
 npm run sim -- reset                # delete the simulator's data
 ```
 
+Keep the machine awake while it runs (on Linux, prefix the command with `systemd-inhibit`):
+if it sleeps, the simulator notices the gap and stops instead of judging.
+
 The simulator runs its own server and demo app on a separate database in `data/sim/`,
 seeds four weeks of normal history there so the agents have a baseline, then sends
 realistic traffic: visitors on an hour-of-week curve, crawlers and scanner probes, a

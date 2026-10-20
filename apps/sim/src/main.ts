@@ -22,6 +22,8 @@ import { MIN, type AppKind } from "./traffic.js";
 import { mins, storeChecks, timeline, Tracker, type Problem, type Result, type Timeline } from "./verify.js";
 
 const POLL_MS = 5000;
+/** A poll this late means the machine slept or the process was stopped. */
+const PAUSE_MS = 60_000;
 
 function args(argv: string[]) {
   const out = { command: argv[0] ?? "", names: [] as string[], app: "node" as AppKind, seed: 1 };
@@ -124,6 +126,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
   };
 
   let interrupted = false;
+  let paused = 0;
   const onSignal = () => {
     if (interrupted) {
       killAllNow();
@@ -183,10 +186,18 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
     }
 
     const shown = new Map<string, string>();
+    let lastPoll = Date.now();
     for (;;) {
       await new Promise((r) => setTimeout(r, POLL_MS));
       if (interrupted) break;
       const now = Date.now();
+      // Timings mean nothing once the machine slept or the process was paused.
+      if (now - lastPoll > PAUSE_MS) {
+        paused = now - lastPoll;
+        console.log(`\nThe run was paused for ${mins(paused)} (the machine slept, or the process was stopped); stopping, its timings are not meaningful.`);
+        break;
+      }
+      lastPoll = now;
       tracker.observe(reader.findingsSince(created.id, runStart, 1000));
       for (const r of tracker.results(now)) {
         const k = `${r.scenario} ${r.fingerprint}`;
@@ -199,6 +210,10 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
       if ((now > lastFaultEnd + 2 * MIN && countsDone && tracker.settled(now)) || now > deadline) break;
     }
     await shutdown();
+    if (paused) {
+      console.log("Not judged. Keep the machine awake and run it again, e.g. systemd-inhibit npm run sim -- run all");
+      return false;
+    }
     return finish() && !interrupted;
   } finally {
     if (!stopping) await shutdown();
