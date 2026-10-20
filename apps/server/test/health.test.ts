@@ -265,6 +265,18 @@ describe("other signals", () => {
     expect(only("new_error")[0]!.summary).toBe("New error: RangeError on /b, 4 times in 15 min, not seen in the last 7 days.");
   });
 
+  it("a new error stays new after the hour it started in is rolled up", () => {
+    // 14:05: the 15-min window reaches back into 13:00-14:00, which the rollup has closed.
+    fx.now = Date.UTC(2026, 9, 21, 14, 5);
+    const h = Math.floor(E() / HOUR_MS) * HOUR_MS - 2 * 24 * HOUR_MS;
+    fx.requests(h, h + HOUR_MS, 10);
+    fx.store.rollupHour(fx.appId, h);
+    fx.requests(E() - 14 * MIN, E() - 1_000, 40);
+    for (let i = 0; i < 6; i++) fx.error(E() - 12 * MIN + i * MIN, "RangeError", "/b");
+    fx.store.rollupHour(fx.appId, Math.floor(fx.now / HOUR_MS) * HOUR_MS - HOUR_MS);
+    expect(signals(fx.run(health))).toEqual(["new_error:RangeError /b:warning"]);
+  });
+
   it("a crash restart is a warning; a clean restart is not", () => {
     recent(40);
     fx.lifecycle(fx.now - 30 * MIN, "boot");

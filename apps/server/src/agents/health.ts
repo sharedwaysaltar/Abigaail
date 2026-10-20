@@ -405,7 +405,9 @@ function errorBursts(ctx: AgentContext, app: App, w: Windows, slots: Slots): Age
   const histHours: number[] = [];
   for (let h = Math.ceil(histFrom / HOUR_MS) * HOUR_MS; h < thisHour; h += HOUR_MS) histHours.push(h);
   const hasHistory = [...ctx.store.rolledHours(app.id, histHours).values()].some((n) => n > 0);
-  const seen = ctx.store.hourlyKeys(app.id, "error", histFrom, thisHour);
+  // "Seen before" ends at the last hour wholly before the window: once the hour
+  // holding the start of this burst is rolled up, the burst is not its own history.
+  const seen = ctx.store.hourlyKeys(app.id, "error", histFrom, Math.floor((w.end - 15 * MIN) / HOUR_MS) * HOUR_MS);
   const base = rowsByKey(ctx.store, app.id, "error", slots);
   const out: AgentFinding[] = [];
   for (const e of errors) {

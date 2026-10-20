@@ -108,10 +108,12 @@ export class Tracker {
       }
       const showMs = hit.at - item.startAt;
       if (hit.at > showBy) return { ...base, status: "fail", showMs, detail: `${exp.severity} only after ${mins(showMs)} (limit ${mins(exp.showWithinMs)})` };
-      if (!exp.summary.every((w) => emitted.some((e) => e.summary.includes(w)))) {
-        return { ...base, status: "fail", showMs, detail: `summary lacks "${exp.summary.join('", "')}": ${hit.summary}` };
-      }
       const last = this.rows(exp.fingerprint).at(-1)!.finding;
+      if (!exp.summary.every((w) => emitted.some((e) => e.summary.includes(w)))) {
+        // The summary can still change while the finding is open (e.g. "restarted once", then "3 times").
+        const detail = `summary lacks "${exp.summary.join('", "')}": ${emitted.at(-1)!.summary}`;
+        return last.state === "open" && now <= resolveBy ? { ...base, status: "shown", showMs, detail } : { ...base, status: "fail", showMs, detail };
+      }
       if (last.state === "open") {
         return now > resolveBy ? { ...base, status: "fail", showMs, detail: `still open ${mins(now - item.faultEndAt)} after the fault ended` } : { ...base, status: "shown", showMs, detail: "shown; waiting to resolve" };
       }

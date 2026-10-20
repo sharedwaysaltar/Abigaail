@@ -34,6 +34,15 @@ for (const app of ["node", "next"] as const) {
       }, 120_000);
     }
 
+    if (app === "node") {
+      it("error-burst across an hour boundary: the rollup of its own hour does not make it old news", () => {
+        // Starts at 03:45, so the fault (03:51-03:56) is rolled up at 04:00 while still in the window.
+        const { results, problems } = run(app, ["error-burst"], QUIET + 15 * 60_000);
+        expect(problems).toEqual([]);
+        expect(results.filter((x) => x.status !== "pass")).toEqual([]);
+      }, 120_000);
+    }
+
     for (const [label, start] of [["quiet", QUIET], ["busy", BUSY]] as const) {
       it(`all scenarios in one run, overlapping as \`run all\` schedules them (${label} hour)`, () => {
         const { results, problems } = run(app, ["all"], start);
