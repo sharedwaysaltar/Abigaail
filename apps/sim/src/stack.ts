@@ -4,6 +4,7 @@
 // redacted and written to data/sim/sim.log, and they are stopped on exit.
 
 import { fork, spawn, type ChildProcess } from "node:child_process";
+import { defaultLinkOutbound } from "@abigaail/node";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -152,6 +153,8 @@ export class Server {
 export interface Demo {
   readonly app: AppKind;
   readonly url: URL;
+  /** Whether the demo's SDK links outbound calls to requests, and why. */
+  readonly linking: string;
   start(release: string): Promise<void>;
   /** SIGKILL: no shutdown event; queued events are lost. */
   kill(): Promise<void>;
@@ -164,6 +167,8 @@ export interface Demo {
 export class NodeDemo implements Demo {
   readonly app = "node" as const;
   readonly url = assertLocalTarget(`http://127.0.0.1:${PORTS.node}/`);
+  /** demo-node forces it on when ABIGAAIL_DEMO_SIM=1 (apps/demo-node/server.mjs). */
+  readonly linking = "on (forced by the simulator)";
   readonly #key: string;
   private child: ChildProcess | undefined;
   private faults: Faults = NORMAL_FAULTS;
@@ -224,6 +229,7 @@ export class NodeDemo implements Demo {
 export class NextDemo implements Demo {
   readonly app = "next" as const;
   readonly url = assertLocalTarget(`http://127.0.0.1:${PORTS.next}/`);
+  readonly linking = `${defaultLinkOutbound(process.versions.node) ? "on" : "off"} (the SDK's default on Node ${process.versions.node})`;
   readonly #key: string;
   private child: ChildProcess | undefined;
 

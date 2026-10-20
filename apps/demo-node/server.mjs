@@ -13,6 +13,9 @@ const abigaail = init({
   routes: ["/", "/user/[id]", "/slow", "/boom", "/outbound", "/dependency-down", "/docs", "/search", "/checkout"],
   // The local dependency below runs in this process; its requests are not app traffic.
   ignore: [...DEFAULT_IGNORE, "/__down", "/__dep"],
+  // Under the simulator, link outbound calls to requests on every Node version (Node 22
+  // defaults to off), so Health's dependency findings have one shape run after run.
+  ...(process.env.ABIGAAIL_DEMO_SIM === "1" ? { linkOutbound: true } : {}),
 });
 const faults = faultControl();
 

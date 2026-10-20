@@ -121,7 +121,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
     const results = tracker.results(now);
     const problems = [...tracker.problems(), ...storeChecks(reader, created.id, t, now, (from, to) => driver!.answered(from, to))];
     const ok = printReport(results, problems, tracker.notes());
-    writeFileSync(paths.report, JSON.stringify({ app, appName: created.name, seed, timeline: t, results, problems, stats: driver?.stats }, null, 2));
+    writeFileSync(paths.report, JSON.stringify({ app, appName: created.name, seed, node: process.versions.node, linking: demo.linking, timeline: t, results, problems, stats: driver?.stats }, null, 2));
     return ok;
   };
 
@@ -156,6 +156,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
     driver.start();
     const lastFaultEnd = Math.max(...planned.map((p) => runStart + p.at + p.scenario.faultMs));
     const deadline = Math.max(lastFaultEnd, ...t.items.map((i) => i.faultEndAt + i.exp.resolveWithinMs)) + 2 * MIN;
+    console.log(`Node ${process.versions.node}; outbound linking ${demo.linking}.`);
     console.log(`Started at ${new Date(runStart).toISOString().slice(11, 19)} UTC. Expected end by ${new Date(deadline).toISOString().slice(11, 19)} UTC at the latest.`);
 
     // Steps run one at a time, in order (a start never overlaps a kill).

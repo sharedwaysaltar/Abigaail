@@ -4,8 +4,10 @@
 
 import { appendFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
-import { mins, plan, replay, scenariosFor, type AppKind } from "@abigaail/sim";
+import { mins, plan, replay, scenario, scenariosFor, WARMUP_MS, type AppKind, type Scenario } from "@abigaail/sim";
 import { BUSY, cleanup, QUIET, seededStore } from "./simfx.js";
+
+const MIN = 60_000;
 
 afterAll(cleanup);
 
@@ -35,6 +37,37 @@ for (const app of ["node", "next"] as const) {
     }
 
     if (app === "node") {
+      it("dependency with linking off (Node 22's default): two findings, the route naming localhost as likely cause", () => {
+        const base = scenario(app, "dependency")!;
+        // Unlinked, Health cannot prove the route's failures came from localhost, so it does not fold.
+        const unlinked: Scenario = {
+          ...base,
+          expect: [
+            { ...base.expect[0]!, summary: ["localhost is failing"] },
+            { fingerprint: "health:server_errors:/checkout", severity: "critical", summary: ["/checkout returns 5xx"], showWithinMs: 6 * MIN, resolveWithinMs: 21 * MIN },
+          ],
+        };
+        const s = seededStore(app, QUIET);
+        try {
+          const r = replay({ store: s.store, appId: s.appId, app, plan: [{ scenario: unlinked, at: WARMUP_MS }], start: QUIET, linkOutbound: false });
+          expect(r.problems).toEqual([]);
+          expect(r.tracker.results(r.endedAt).filter((x) => x.status !== "pass")).toEqual([]);
+          // From confirmation until localhost's failures leave Health's 5-min window, the route
+          // finding names it as the likely cause. Later the route is still judged on its 15-min
+          // window, with no failing dependency left to name.
+          const faultEnd = QUIET + WARMUP_MS + base.faultMs;
+          const emissions = r.tracker.emissionsOf("health:server_errors:/checkout");
+          const confirmed = emissions.find((e) => e.severity === "critical")!;
+          const whileFailing = emissions.filter((e) => e.at >= confirmed.at && e.at <= faultEnd + 5 * MIN);
+          expect(whileFailing.length).toBeGreaterThan(3);
+          for (const e of whileFailing) {
+            expect(e.cause).toMatch(/^At the same time localhost failed \d+ of \d+ calls; likely related \(calls are not linked on this Node version\)\.$/);
+          }
+        } finally {
+          s.close();
+        }
+      }, 120_000);
+
       it("error-burst across an hour boundary: the rollup of its own hour does not make it old news", () => {
         // Starts at 03:45, so the fault (03:51-03:56) is rolled up at 04:00 while still in the window.
         const { results, problems } = run(app, ["error-burst"], QUIET + 15 * 60_000);

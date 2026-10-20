@@ -42,10 +42,16 @@ export function timeline(runStart: number, planned: readonly { scenario: Scenari
   return t;
 }
 
+export interface Emission {
+  severity: Severity;
+  summary: string;
+  cause: string | null;
+}
+
 interface Seen {
   finding: Finding;
-  /** Each distinct emission observed (by last_seen): its severity and summary. */
-  emissions: Map<number, { severity: Severity; summary: string }>;
+  /** Each distinct emission observed (by last_seen): its severity, summary and cause. */
+  emissions: Map<number, Emission>;
 }
 
 const MAX_EMISSIONS = 500;
@@ -77,12 +83,19 @@ export class Tracker {
       let s = this.seen.get(f.id);
       if (!s) this.seen.set(f.id, (s = { finding: f, emissions: new Map() }));
       s.finding = f;
-      if (s.emissions.size < MAX_EMISSIONS) s.emissions.set(f.last_seen, { severity: f.severity, summary: f.summary });
+      if (s.emissions.size < MAX_EMISSIONS) s.emissions.set(f.last_seen, { severity: f.severity, summary: f.summary, cause: f.cause });
     }
   }
 
   private rows(fingerprint: string): Seen[] {
     return [...this.seen.values()].filter((s) => s.finding.fingerprint === fingerprint).sort((a, b) => a.finding.first_seen - b.finding.first_seen);
+  }
+
+  /** Everything a fingerprint was seen saying, oldest first. */
+  emissionsOf(fingerprint: string): (Emission & { at: number })[] {
+    return this.rows(fingerprint)
+      .flatMap((s) => [...s.emissions].map(([at, e]) => ({ at, ...e })))
+      .sort((a, b) => a.at - b.at);
   }
 
   /** The latest fault end among scenarios expecting this fingerprint: it may resolve only after all of them. */
@@ -109,9 +122,12 @@ export class Tracker {
       const showMs = hit.at - item.startAt;
       if (hit.at > showBy) return { ...base, status: "fail", showMs, detail: `${exp.severity} only after ${mins(showMs)} (limit ${mins(exp.showWithinMs)})` };
       const last = this.rows(exp.fingerprint).at(-1)!.finding;
-      if (!exp.summary.every((w) => emitted.some((e) => e.summary.includes(w)))) {
-        // The summary can still change while the finding is open (e.g. "restarted once", then "3 times").
-        const detail = `summary lacks "${exp.summary.join('", "')}": ${emitted.at(-1)!.summary}`;
+      // Words are checked against the summary when it was first confirmed at its severity, or any
+      // summary seen while open after that: it may still grow ("restarted once", then "3 times"),
+      // and during recovery it may lose them ("13 of 48 calls …"), which is no failure.
+      const confirmed = emitted.filter((e) => e.at >= hit.at);
+      if (!exp.summary.every((w) => confirmed.some((e) => e.summary.includes(w)))) {
+        const detail = `summary lacks "${exp.summary.join('", "')}"; when confirmed it read: ${hit.summary}`;
         return last.state === "open" && now <= resolveBy ? { ...base, status: "shown", showMs, detail } : { ...base, status: "fail", showMs, detail };
       }
       if (last.state === "open") {

@@ -26,6 +26,8 @@ export interface ReplayOptions {
   seed?: number;
   /** Stop after this long even if something is still waiting. */
   maxMs?: number;
+  /** Outbound calls and errors carry the request's parent_id (default true; Node 22's SDK default is false). */
+  linkOutbound?: boolean;
 }
 
 export interface ReplayResult {
@@ -90,6 +92,7 @@ export function replay(o: ReplayOptions): ReplayResult {
     if (up) {
       for (const req of generate(r, o.app, now, now + SEC, mode)) {
         const items = requestItems(r, req, outcome(r, o.app, req.path, faults));
+        if (o.linkOutbound === false) for (const i of items) if ("parent_id" in i.event) delete i.event.parent_id;
         buffer.push(...items);
         answered.push({ at: items.at(-1)!.derived.ts, kind: req.kind });
       }
