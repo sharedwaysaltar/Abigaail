@@ -298,6 +298,7 @@ export class Retention {
           ...(report.error_class ? { error_class: report.error_class } : {}),
           apps_ok: 0,
           apps_failed: 0,
+          behind: report.behind,
         },
         [],
         [],

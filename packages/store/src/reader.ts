@@ -524,6 +524,22 @@ export class StoreReader {
     return row.t ?? undefined;
   }
 
+  /**
+   * For a maintenance job (retention): when its first run that started at or
+   * after `since` finished, and whether its latest run ended with work left.
+   * Undefined until such a run has finished.
+   */
+  runsSince(agent: string, since: number): { firstFinishedAt: number; latestBehind: boolean } | undefined {
+    const first = this.db
+      .prepare("SELECT finished_at FROM agent_runs WHERE agent = ? AND started_at >= ? ORDER BY started_at, id LIMIT 1")
+      .get(agent, since) as { finished_at: number } | undefined;
+    if (!first) return undefined;
+    const latest = this.db
+      .prepare("SELECT behind FROM agent_runs WHERE agent = ? AND outcome <> 'skipped' ORDER BY started_at DESC, id DESC LIMIT 1")
+      .get(agent) as { behind: number } | undefined;
+    return { firstFinishedAt: first.finished_at, latestBehind: Number(latest?.behind ?? 0) !== 0 };
+  }
+
   /** Finish time of the agent's last successful run. */
   lastOkRun(agent: string): number | undefined {
     const row = this.db

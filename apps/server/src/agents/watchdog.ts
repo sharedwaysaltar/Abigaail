@@ -258,10 +258,19 @@ function salt(ctx: AgentContext): AgentFinding[] {
  * no resolved findings outlive their period by more than RETENTION.behindWarnMs.
  * Catches a job that runs "ok" but deletes nothing; a job that stops or fails
  * shows up as agent_stalled / agent_failing for "retention".
+ *
+ * Judged only once a retention run that started since the runner started has
+ * finished: at startup after a lowered period or downtime, old data is
+ * expected until the job's first run. While its latest run reports work left
+ * (catching up), it is a warning at most, until behindCriticalMs after that
+ * first run finished.
  */
 function retention(ctx: AgentContext): AgentFinding[] {
   const days = ctx.config.retention;
   if (!days) return [];
+  const runs = ctx.store.runsSince("retention", ctx.config.runnerStartedAt);
+  if (!runs) return [];
+  const catchingUp = runs.latestBehind && ctx.now - runs.firstFinishedAt <= RETENTION.behindCriticalMs;
   const out: AgentFinding[] = [];
   const check = (subject: string, what: string, oldest: number | undefined, keepDays: number, setting: string) => {
     if (oldest === undefined) return;
@@ -270,11 +279,11 @@ function retention(ctx: AgentContext): AgentFinding[] {
     out.push({
       signal: "retention_behind",
       subject,
-      severity: over > RETENTION.behindCriticalMs ? "critical" : "warning",
+      severity: over > RETENTION.behindCriticalMs && !catchingUp ? "critical" : "warning",
       summary: `${what} older than ${keepDays} days are still stored: the oldest is ${((ctx.now - oldest) / DAY_MS).toFixed(1)} days old, so the retention period is not being kept.`,
       cause: "The retention job is failing, falling behind or not deleting.",
       action: `Check the server log for "retention" lines and the retention job on the Agents page; the period is ${setting}.`,
-      evidence: { oldest_at: oldest, keep_days: keepDays, over_ms: over },
+      evidence: { oldest_at: oldest, keep_days: keepDays, over_ms: over, catching_up: catchingUp },
       fact: true,
     });
   };

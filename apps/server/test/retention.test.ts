@@ -269,6 +269,8 @@ describe("never blocking ingest", () => {
     const r = job({ batchRows: 50, budgetMs: 10, clock: () => tick++ });
     const first = await r.runOnce();
     expect(first).toMatchObject({ outcome: "ok", behind: true });
+    // Recorded with the run, for the Watchdog (catching up vs deleting nothing).
+    expect(store.runsSince("retention", 0)?.latestBehind).toBe(true);
     expect(first.deleted.events).toBeGreaterThan(0);
     expect(first.deleted.events).toBeLessThan(600);
     let total = first.deleted.events!;
@@ -278,6 +280,7 @@ describe("never blocking ingest", () => {
       total += last.deleted.events!;
     }
     expect(last.behind).toBe(false);
+    expect(store.runsSince("retention", 0)?.latestBehind).toBe(false);
     expect(total).toBe(600);
   });
 });

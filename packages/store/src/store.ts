@@ -55,6 +55,8 @@ export interface RunInput {
   error_class?: string | null;
   apps_ok: number;
   apps_failed: number;
+  /** A maintenance run (retention) that ended with work left. */
+  behind?: boolean;
 }
 
 export interface RecordRunOptions {
@@ -317,10 +319,10 @@ export class Store extends StoreReader {
     const now = run.finished_at;
     this.tx(() => {
       this.db
-        .prepare(`INSERT INTO agent_runs (agent, started_at, finished_at, outcome, duration_ms, findings, error_class, apps_ok, apps_failed)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .prepare(`INSERT INTO agent_runs (agent, started_at, finished_at, outcome, duration_ms, findings, error_class, apps_ok, apps_failed, behind)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(run.agent, run.started_at, run.finished_at, run.outcome, run.finished_at - run.started_at,
-          run.outcome === "ok" ? findings.length : 0, run.error_class ?? null, run.apps_ok, run.apps_failed);
+          run.outcome === "ok" ? findings.length : 0, run.error_class ?? null, run.apps_ok, run.apps_failed, run.behind ? 1 : 0);
       if (run.outcome !== "ok") return;
 
       // One finding per (scope, fingerprint) per run: the last one wins.

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { evaluate, findingInputs, loadRetention, watchdog, type AgentContext } from "@abigaail/server";
+import { evaluate, findingInputs, loadRetention, Retention, watchdog, type AgentContext } from "@abigaail/server";
 import { openStore, type App, type RunInput, type Store } from "@abigaail/store";
 
 const MIN = 60_000;
@@ -371,8 +371,12 @@ describe("retention", () => {
   const retention = loadRetention({});
   const about = (c: AgentContext) =>
     run(c).findings.filter((f) => /retention|vacuum/.test(f.signal)).map((f) => `${f.signal}:${f.subject}:${f.severity}`);
+  /** A finished retention run (since the runner started, by default an hour ago) that deleted what it could. */
+  const retentionRan = (at = now - MIN, behind = false) =>
+    store.recordRun({ agent: "retention", started_at: at - 1000, finished_at: at, outcome: "ok", apps_ok: 0, apps_failed: 0, behind }, [], []);
 
   it("raw events past their period: nothing within 6 h, then warning, then critical after 2 days", () => {
+    retentionRan();
     appWith("ok", [{ ts: now - 30 * DAY - 5 * 60 * MIN }]);
     appWith("late", [{ ts: now - 30 * DAY - 7 * 60 * MIN }]);
     appWith("stuck", [{ ts: now - 33 * DAY }]);
@@ -389,6 +393,7 @@ describe("retention", () => {
   });
 
   it("resolved findings past their period, for apps and for Abigaail itself", () => {
+    retentionRan();
     const a = appWith("a", every(MIN, now - MIN));
     const old = now - 180 * DAY - 12 * 60 * MIN;
     const emit = (t: number, app_id: string | null, emitted: boolean) =>
@@ -402,6 +407,40 @@ describe("retention", () => {
       for (let i = 1; i <= 3; i++) emit(old + i, scope, false);
     }
     expect(about(ctx({ retention })).sort()).toEqual(["retention_behind:findings::warning", "retention_behind:findings:a:warning"]);
+  });
+
+  it("at startup with old data and a lowered period: nothing before retention's first run finishes, nothing after it caught up", async () => {
+    const startedAt = now - 50;
+    // Runs from before this start say nothing about this process.
+    retentionRan(startedAt - 10 * MIN);
+    const a = appWith("a", [{ ts: now - 20 * DAY }, ...every(MIN, now - MIN)]);
+    const lowered = { ...retention, events: 7 };
+    const c = () => ctx({ retention: lowered, runnerStartedAt: startedAt });
+    expect(about(c())).toEqual([]);
+    // Retention's first run since the start deletes everything past 7 days.
+    const report = await new Retention({ store, days: lowered, now: () => now, log: () => {} }).runOnce();
+    expect(report.behind).toBe(false);
+    expect(about(c())).toEqual([]);
+    expect(store.oldestEventTs(a.id)).toBeGreaterThan(now - 7 * DAY);
+  });
+
+  it("while the job reports work left it is a warning, critical only behindCriticalMs after its first run finished", () => {
+    const startedAt = now - 60 * MIN;
+    appWith("a", [{ ts: now - 40 * DAY }]);
+    const c = () => ctx({ retention, runnerStartedAt: startedAt });
+    retentionRan(startedAt + MIN, true);
+    expect(about(c())).toEqual(["retention_behind:events:a:warning"]);
+    // Still behind 2 days after its first run finished: critical.
+    now = startedAt + MIN + 2 * DAY + MIN;
+    retentionRan(now - MIN, true);
+    expect(about(c())).toEqual(["retention_behind:events:a:critical"]);
+  });
+
+  it("a job that reports nothing left while old data stays (deletes nothing) is critical at once", () => {
+    const startedAt = now - 60 * MIN;
+    appWith("a", [{ ts: now - 40 * DAY }]);
+    retentionRan(startedAt + MIN, false);
+    expect(about(ctx({ retention, runnerStartedAt: startedAt }))).toEqual(["retention_behind:events:a:critical"]);
   });
 
   it("a database that could not be converted to incremental vacuum is an info finding", () => {

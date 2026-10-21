@@ -216,6 +216,11 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX agent_runs_finished ON agent_runs (finished_at);
   `,
+  // 8: whether a maintenance run (retention) ended with work left, so the
+  // Watchdog can tell a job that is catching up from one that deletes nothing.
+  `
+  ALTER TABLE agent_runs ADD COLUMN behind INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */
