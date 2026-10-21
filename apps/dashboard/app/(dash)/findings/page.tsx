@@ -1,5 +1,5 @@
-import { findingsFor, STATUS_FRESH_MS, systemFindingsView } from "@abigaail/insights";
-import type { App, AppStatus, Finding } from "@abigaail/store";
+import { alertsByFinding, findingsFor, STATUS_FRESH_MS, systemFindingsView } from "@abigaail/insights";
+import type { AlertItemRow, App, AppStatus, Finding } from "@abigaail/store";
 import { Severity } from "@/components/Severity";
 import { StatusMark } from "@/components/Status";
 import { reader } from "@/lib/data";
@@ -17,10 +17,32 @@ function value(v: unknown): string {
   return JSON.stringify(v);
 }
 
-function FindingItem({ f, now }: { f: Finding; now: number }) {
+const MARK: Record<AlertItemRow["status"], string> = { delivered: "✓", pending: "…", gave_up: "✗", suppressed: "–" };
+
+/** "Alerted 14:05 · webhook ✓ · email ✗" per message about this finding. */
+function AlertLine({ items }: { items: AlertItemRow[] | undefined }) {
+  if (!items?.length) return null;
+  const byMessage = new Map<string, AlertItemRow[]>();
+  for (const i of items) {
+    const key = `${i.change} ${i.created_at}`;
+    byMessage.set(key, [...(byMessage.get(key) ?? []), i]);
+  }
+  return (
+    <>
+      {[...byMessage.values()].map((rows) => (
+        <span key={`${rows[0]!.change}${rows[0]!.created_at}`}>
+          <a href="/alerts">{rows[0]!.change === "firing" ? "Alerted" : "Recovery sent"}</a> {when(rows[0]!.created_at)}
+          {rows.map((r) => ` · ${r.channel} ${MARK[r.status]}`).join("")}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function FindingItem({ f, now, alerts }: { f: Finding; now: number; alerts?: AlertItemRow[] | undefined }) {
   const evidence = Object.entries(f.evidence);
   return (
-    <li className="finding">
+    <li className="finding" id={`finding-${f.id}`}>
       <div className="fhead">
         <Severity severity={f.severity} />
         <span className="fsum">{f.summary}</span>
@@ -38,6 +60,7 @@ function FindingItem({ f, now }: { f: Finding; now: number }) {
         )}
         <span>last seen {ago(f.last_seen, now)}</span>
         <span>seen in {f.hits} run{f.hits === 1 ? "" : "s"}</span>
+        <AlertLine items={alerts} />
       </div>
       <details className="fdetail">
         <summary>Details</summary>
@@ -78,11 +101,13 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
     app,
     status: r.appStatus(app.id, { now, freshMs: STATUS_FRESH_MS }).status,
     findings: findingsFor(r, app.id, { state, now }),
+    alerts: alertsByFinding(r, app.id, now),
   }));
   groups.sort((a, b) => RANK[a.status] - RANK[b.status] || a.app.name.localeCompare(b.app.name));
   const withFindings = groups.filter((g) => g.findings.length);
   const quiet = groups.filter((g) => !g.findings.length);
   const own = state === "open" && !chosen ? systemFindingsView(r) : [];
+  const ownAlerts = own.length ? alertsByFinding(r, null, now) : new Map<number, AlertItemRow[]>();
   const link = (over: { app?: string | null; state?: string }) => {
     const p = new URLSearchParams();
     const a = over.app === undefined ? chosen?.name : over.app;
@@ -110,7 +135,7 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
 
       {q.app && !chosen ? <p className="empty">No app called {q.app}.</p> : null}
 
-      {withFindings.map(({ app, status, findings }, i) => (
+      {withFindings.map(({ app, status, findings, alerts }, i) => (
         <section key={app.id} className={i === 0 ? "first" : undefined}>
           <h2 className="grouph">
             <StatusMark status={status} />
@@ -118,7 +143,7 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
             <span className="faint">{findings.length}</span>
           </h2>
           <ul className="plain findings">
-            {findings.map((f) => <FindingItem key={f.id} f={f} now={now} />)}
+            {findings.map((f) => <FindingItem key={f.id} f={f} now={now} alerts={alerts.get(f.id)} />)}
           </ul>
         </section>
       ))}
@@ -127,7 +152,7 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
         <section className={withFindings.length ? undefined : "first"}>
           <h2 className="grouph">Abigaail itself <span className="faint">{own.length}</span></h2>
           <ul className="plain findings">
-            {own.map((f) => <FindingItem key={f.id} f={f} now={now} />)}
+            {own.map((f) => <FindingItem key={f.id} f={f} now={now} alerts={ownAlerts.get(f.id)} />)}
           </ul>
         </section>
       ) : null}

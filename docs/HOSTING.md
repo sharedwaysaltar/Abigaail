@@ -41,3 +41,10 @@ decided later (see DECISIONS #2); this list grows as chunks land.
 - [ ] `ABIGAAIL_LIVE_TOKEN` (`openssl rand -base64 32`) is set to the same value for the server
       and the dashboard, from the environment. Without it the Live view is off; nothing else changes.
 - [ ] No `NEXT_PUBLIC_ABIGAAIL_*` variable exists in the dashboard's environment (it refuses to start).
+- [ ] **Alerts:** the server may connect out to the webhook (443), the SMTP server (465 or 587) and the
+      heartbeat URL, and nothing else needs to be opened. Their settings and secrets are in the
+      server's environment only (`ABIGAAIL_ALERT_*`, `ABIGAAIL_SMTP_*`, `ABIGAAIL_HEARTBEAT_URL`).
+      `ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1` only for a receiver on your own network (DECISIONS #96).
+- [ ] **Two independent ways to hear about trouble:** configure both alert channels, or one channel
+      plus `ABIGAAIL_HEARTBEAT_URL` / an uptime check on `/healthz`. A single channel cannot report its
+      own failure (DECISIONS #98), and nothing inside Abigaail can report the server being down.

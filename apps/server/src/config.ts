@@ -1,4 +1,5 @@
 import { RETENTION, type RetentionDays, type RetentionPeriod } from "./agents/thresholds.js";
+import { loadAlertConfig, type AlertConfig } from "./alerts/config.js";
 
 /** Server configuration from the environment. Keys and secrets never live in the repo. */
 export interface Config {
@@ -17,6 +18,8 @@ export interface Config {
   liveToken: string;
   /** Days kept per table (ABIGAAIL_RETAIN_*_DAYS). */
   retention: RetentionDays;
+  /** Alert channels, links and the heartbeat URL (none set: alerts are off). */
+  alerts: AlertConfig;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -34,6 +37,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     livePort,
     liveToken: env.ABIGAAIL_LIVE_TOKEN ?? "",
     retention: loadRetention(env),
+    alerts: loadAlertConfig(env),
   };
 }
 

@@ -34,6 +34,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
         <nav className="topnav" aria-label="Views">
           <a href="/findings">Findings</a>
           <a href="/agents">Agents</a>
+          <a href="/alerts">Alerts</a>
         </nav>
         <span className="spacer" />
         <span className="muted small">{user}</span>

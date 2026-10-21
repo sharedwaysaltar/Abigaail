@@ -38,6 +38,8 @@ export const SCHEDULE = {
   rollup: { everyMs: 3_600_000 },
   /** Not an agent: retention runs hourly in the main thread (every 5 min while catching up). */
   retention: { everyMs: 3_600_000 },
+  /** Not an agent: the alerter's sweep runs in the main thread, only when a channel is configured. */
+  alerts: { everyMs: 60_000 },
 } as const;
 
 /** Status turns grey when Health has not completed a run for this long. */

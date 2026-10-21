@@ -8,10 +8,10 @@ import { scenario, timeline, Tracker } from "@abigaail/sim";
 const MIN = 60_000;
 const START = Date.UTC(2026, 9, 21, 14, 0);
 
-function finding(at: number, severity: Severity, summary: string, state: "open" | "resolved" = "open"): Finding {
+function finding(at: number, severity: Severity, summary: string, state: "open" | "resolved" = "open", critical_streak = severity === "critical" ? 2 : 0): Finding {
   return {
     id: 1, app_id: "app", agent: "health", fingerprint: "health:dependency:localhost", signal: "dependency", severity, state,
-    summary, cause: null, action: "", evidence: {}, hits: 1, misses: 0, resolves: "misses",
+    summary, cause: null, action: "", evidence: {}, hits: 1, misses: 0, critical_streak, resolves: "misses",
     first_seen: START + 8 * MIN, last_seen: at, resolved_at: state === "resolved" ? at : null, resolved_reason: null,
   };
 }
@@ -45,5 +45,13 @@ describe("summary words", () => {
     tr.observe([finding(START + 8 * MIN, "critical", "localhost is failing: 12 of 12 calls in 5 min.")]);
     tr.observe([finding(START + 20 * MIN, "critical", "localhost is failing: 12 of 12 calls in 5 min.", "resolved")]);
     expect(tr.results(START + 21 * MIN)[0]!.status).toBe("fail");
+  });
+
+  it("a critical counts only once confirmed red (2 runs in a row at critical)", () => {
+    const tr = new Tracker(t());
+    tr.observe([finding(START + 7 * MIN, "critical", "localhost is failing: 12 of 12 calls in 5 min, so /checkout fails.", "open", 1)]);
+    expect(tr.results(START + 7 * MIN)[0]!.status).toBe("waiting");
+    tr.observe([finding(START + 8 * MIN, "critical", "localhost is failing: 12 of 12 calls in 5 min, so /checkout fails.", "open", 2)]);
+    expect(tr.results(START + 8 * MIN)[0]).toMatchObject({ status: "shown", showMs: 2 * MIN });
   });
 });

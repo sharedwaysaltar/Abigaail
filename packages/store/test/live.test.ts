@@ -52,7 +52,7 @@ describe("toLiveEvent", () => {
 
 describe("every read of app data is scoped by app_id", () => {
   // Tables holding monitored-app data. Reading any of them needs `app_id = ?`.
-  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections"];
+  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "alert_state", "alert_items"];
   const src = readFileSync(fileURLToPath(new URL("../src/reader.ts", import.meta.url)), "utf8");
   const sql = [...src.matchAll(/`([^`]*)`|"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1] ?? m[2] ?? "").filter((q) => /\b(FROM|JOIN)\s+\w+/i.test(q));
 
@@ -63,8 +63,8 @@ describe("every read of app data is scoped by app_id", () => {
   it.each(sql.map((q) => [q.replace(/\s+/g, " ").trim().slice(0, 90), q]))("%s", (_label, q) => {
     const tables = [...q.matchAll(/\b(?:FROM|JOIN)\s+(\w+)/gi)].map((m) => m[1]!);
     if (!tables.some((t) => APP_TABLES.includes(t))) return;
-    // Findings about Abigaail itself are the one exception (DECISIONS #44).
-    if (/FROM findings WHERE app_id IS NULL/.test(q)) return;
+    // Findings about Abigaail itself, and alerts about them, are the one exception (DECISIONS #44).
+    if (/FROM (findings|alert_state) WHERE app_id IS NULL|WHERE i\.app_id IS NULL/.test(q)) return;
     expect(q).toMatch(/\bapp_id = \?/);
   });
 });

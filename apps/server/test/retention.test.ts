@@ -77,7 +77,7 @@ const runs = () => store.recentRuns("retention", 100);
 describe("periods from the environment", () => {
   it("defaults, and the minimums baselines need", () => {
     expect(defaults()).toEqual({
-      events: 30, rollups: 400, daily_uniques: 400, findings: 180, agent_runs: 30, ingest_rejections: 30, db_size_samples: 90, audit_log: 400,
+      events: 30, rollups: 400, daily_uniques: 400, findings: 180, agent_runs: 30, ingest_rejections: 30, db_size_samples: 90, audit_log: 400, alerts: 90,
     });
     // Baselines read the same hour-of-week over BASELINE.weeks; one more week covers the week judged.
     expect(RETENTION.periods.rollups.minDays).toBe((BASELINE.weeks + 1) * 7);

@@ -301,7 +301,7 @@ describe("retention on the dashboard", () => {
     const job = new Retention({ store, days: { ...loadRetention({}), events: 14 }, now: () => NOW, log: () => {} });
     await job.runOnce();
     const rows = retentionView(store);
-    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "sessions"]);
+    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "alerts", "sessions"]);
     expect(rows[0]).toMatchObject({ keepDays: 14, lastRunAt: NOW, lastDeleted: 0 });
     expect(rows.at(-1)).toMatchObject({ name: "sessions", keepDays: 0 });
     expect(appRetention(store, app.id)).toEqual({ eventsDays: 14, rollupsDays: 400, oldestEvent: NOW - HOUR_MS });

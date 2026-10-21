@@ -29,6 +29,8 @@ export interface RunnerOptions {
   resourceLimits?: ResourceLimits;
   /** Retention periods (the server's Retention job deletes; the Watchdog checks it kept up). */
   retention?: RetentionDays;
+  /** The alerter runs (a channel is configured): the Watchdog watches its sweeps too. */
+  alerts?: boolean;
 }
 
 export interface RunReport {
@@ -107,6 +109,7 @@ export class Runner {
         ...this.agents.map(({ name, everyMs, timeoutMs }) => ({ name, everyMs, timeoutMs })),
         { name: "rollup", everyMs: SCHEDULE.rollup.everyMs },
         ...(opts.retention ? [{ name: "retention", everyMs: SCHEDULE.retention.everyMs }] : []),
+        ...(opts.alerts ? [{ name: "alerts", everyMs: SCHEDULE.alerts.everyMs }] : []),
       ],
       runnerStartedAt: this.startedAt,
       lastRunBeforeStart: this.store.lastRunBefore(this.startedAt) ?? null,

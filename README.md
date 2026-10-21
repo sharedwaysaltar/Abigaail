@@ -13,9 +13,9 @@ under GDPR, so the data is *pseudonymous*, not anonymous.
 No third-party service is involved.
 
 > Status: under construction, built in small chunks. Today: Node and Next.js apps,
-> the Usage, Health and Watchdog agents, a dashboard, and automatic deletion of old
-> data (retention). Alert delivery and more agents are planned, not built yet. See
-> [docs/ROADMAP.md](docs/ROADMAP.md).
+> the Usage, Health and Watchdog agents, a dashboard, automatic deletion of old data
+> (retention) and alerts by webhook and email. More agents are planned, not built yet.
+> See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contents
 
@@ -27,7 +27,8 @@ No third-party service is involved.
 6. [Turn it off](#6-turn-it-off)
 7. [A privacy-notice snippet](#7-a-privacy-notice-snippet)
 8. [Try it without your own app: demos and the simulator](#8-try-it-without-your-own-app)
-9. [Reference](#9-reference)
+9. [Alerts](#9-alerts)
+10. [Reference](#10-reference)
 
 ## 1. Run Abigaail on your machine
 
@@ -244,6 +245,7 @@ hidden. The defaults, each changeable on the server within a safe minimum:
 | Refused ingest requests (counts) | 30 days | `ABIGAAIL_RETAIN_REJECTIONS_DAYS` | 1 |
 | Database size samples | 90 days | `ABIGAAIL_RETAIN_DB_SIZE_DAYS` | 2 |
 | Admin and sign-in audit logs | 400 days | `ABIGAAIL_RETAIN_AUDIT_DAYS` | 90 |
+| Alert messages sent and their delivery (messages still being sent are kept) | 90 days | `ABIGAAIL_RETAIN_ALERTS_DAYS` | 7 |
 | Dashboard sessions | until they expire (2 h idle, 12 h at most) | none | |
 
 Apps and their release names are kept. The visitor-ID secret is replaced at midnight UTC
@@ -264,7 +266,7 @@ npm run findings -- my-app        # the app's status and anything the agents fou
 ```
 
 Events arrive within about 5 seconds (the SDK sends in batches). In the dashboard, the
-app's **Live** tab shows them as they arrive (it needs `ABIGAAIL_LIVE_TOKEN`, see section 9).
+app's **Live** tab shows them as they arrive (it needs `ABIGAAIL_LIVE_TOKEN`, see section 10).
 
 Expect the status to be **grey ("too little data")** at first. Health judges an app
 only once it has at least 20 requests from real visitors in 15 minutes. Requests made
@@ -340,7 +342,98 @@ never touches `data/abigaail.db`; stop `npm run dev:server` and the demo first (
 their ports). To watch a run in the dashboard, set `ABIGAAIL_DB_PATH=./data/sim/abigaail.db`
 in `apps/dashboard/.env` (and the same `ABIGAAIL_LIVE_TOKEN` for both, for the Live view).
 
-## 9. Reference
+## 9. Alerts
+
+Abigaail tells you when an app (or Abigaail itself) **needs you**: only findings that are
+confirmed red, meaning critical in 2 agent runs in a row, so a single blip never notifies.
+You get one message when it turns red and one when it resolves. Warnings and info never
+notify; they are on the dashboard. Alerts are sent by the server, so they work while the
+dashboard is down.
+
+**Settings** go in `apps/server/.env` (copy `apps/server/.env.example`; `npm run dev:server`
+reads it) or the server's environment. Nothing set means alerts are off. A setting that is
+set but wrong stops the server, with a message naming the variable.
+
+**Webhook** (one URL): works with ntfy, Slack, Discord, or anything that accepts JSON.
+
+```bash
+ABIGAAIL_ALERT_WEBHOOK_URL=https://ntfy.sh/your-long-random-topic
+ABIGAAIL_ALERT_WEBHOOK_SECRET=        # openssl rand -base64 32 (at least 32 characters)
+ABIGAAIL_ALERT_WEBHOOK_FORMAT=ntfy    # json (default), slack, discord or ntfy
+```
+
+The URL must be `https`, or `http` to this machine only (`localhost`, `127.0.0.1`, `::1`).
+Addresses inside your network are refused, also when a name only resolves to one (each
+connection is checked), and redirects are not followed, so the URL cannot be turned
+against internal services. **A receiver on your own network** (self-hosted ntfy on a LAN or
+over Tailscale) needs `ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1`. It allows private, CGNAT
+(`100.64.0.0/10`) and IPv6 ULA addresses for the webhook only. The risk: anyone who can
+change this setting can make the server send alert messages to any machine on that network.
+Link-local and cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`) are always refused.
+
+Every request carries `X-Abigaail-Delivery` (a random id per message; drop repeats) and
+`X-Abigaail-Signature: t=<unix seconds>,v1=<hex>`, an HMAC-SHA256 of `<t>.<raw body>` with
+your secret. Slack, Discord and ntfy ignore it. A receiver of your own should check it:
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(header, rawBody, secret) {
+  const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(header ?? "");
+  if (!m || Math.abs(Date.now() / 1000 - Number(m[1])) > 300) return false; // 5 min old at most
+  const want = createHmac("sha256", secret).update(`${m[1]}.${rawBody}`).digest();
+  const got = Buffer.from(m[2], "hex");
+  return got.length === want.length && timingSafeEqual(want, got);
+}
+```
+
+**Email** over SMTP, plain text, to up to 5 addresses:
+
+```bash
+ABIGAAIL_SMTP_HOST=smtp.example.com
+ABIGAAIL_SMTP_PORT=587               # 587: STARTTLS (required), 465: TLS
+ABIGAAIL_SMTP_USER=...               # with ABIGAAIL_SMTP_PASSWORD, or neither
+ABIGAAIL_SMTP_PASSWORD=...
+ABIGAAIL_ALERT_EMAIL_FROM=abigaail@example.com
+ABIGAAIL_ALERT_EMAIL_TO=you@example.com,ops@example.com
+```
+
+The connection is always encrypted and the server's certificate is verified: a server that
+does not offer STARTTLS gets no password and no message.
+
+**Links**: set `ABIGAAIL_DASHBOARD_URL` (e.g. `http://localhost:4319`) and each alert links
+to its finding.
+
+**Try it**: `npm run alerts:test` sends one sample alert through every configured channel
+and says whether it was delivered. The dashboard's **Alerts** page lists the channels, every
+message sent and whether it was delivered; each finding shows the alerts sent about it.
+
+**What a message holds**: the app's name, severity, the finding's summary, likely cause,
+what to do, when it started, and the link. Findings are written from route patterns, host
+names and numbers only; their evidence is never sent. Nothing on the never-collect list
+(section 4) can be in one.
+
+**No spam**: a finding that keeps flapping sends at most one "red" message per 30 minutes,
+then one catch-up that says how often it changed. Everything found in the same minute goes
+out as one message (10 findings listed, the rest counted). Past 20 messages an hour a
+channel gets one storm notice; the rest are only on the dashboard. A restart never sends
+a message again.
+
+**When a channel fails**, the server retries with a growing wait (30 s up to 10 min) and
+gives up after about 20 minutes. Ingest and the agents never wait for it. After 3 failed
+attempts in a row the Watchdog reports `alert_delivery_failed`, which is sent through the
+*other* channel. **With only one channel configured, a failing channel is shown on the
+dashboard only** (Alerts page and Findings), since it cannot report itself. Configure both,
+or use the heartbeat below.
+
+**Heartbeat** (dead-man's switch): `ABIGAAIL_HEARTBEAT_URL` is pinged (GET) every 5 minutes
+while Abigaail is healthy (what `/healthz` would answer). A service that alerts when pings
+stop then covers what Abigaail cannot report itself: the server or its host down, or the
+agents stalled. For example healthchecks.io (`https://hc-ping.com/<uuid>`, period 5 min) or
+an Uptime Kuma push monitor (`https://kuma.example.com/api/push/<token>`). The same URL rules
+as the webhook apply, without the private-address opt-in.
+
+## 10. Reference
 
 ### Commands
 
@@ -355,6 +448,7 @@ in `apps/dashboard/.env` (and the same `ABIGAAIL_LIVE_TOKEN` for both, for the L
 | `npm run events:tail -- <name> [n]` | An app's latest events |
 | `npm run findings -- <name>` | An app's status and open findings |
 | `npm run agents:once` | Run retention, the rollup and every agent once now and print the findings |
+| `npm run alerts:test` | Send one sample alert through every configured channel (section 9) |
 | `npm run dashboard` | Build and start the dashboard on http://localhost:4319 |
 | `npm run user:create -- <name>` | Create a dashboard user (also `user:disable`, `user:reset-mfa`, `user:unlock`) |
 | `npm run sim -- <command>` | The bad-traffic simulator (section 8) |
@@ -366,6 +460,7 @@ in `apps/dashboard/.env` (and the same `ABIGAAIL_LIVE_TOKEN` for both, for the L
 `4318`), `ABIGAAIL_AGENTS=off` to run ingest only. The Live view's feed listens on
 `127.0.0.1` only, port `ABIGAAIL_LIVE_PORT` (default `4320`), and only when
 `ABIGAAIL_LIVE_TOKEN` is set (`openssl rand -base64 32`; the dashboard needs the same value).
+Alert channels and the heartbeat are in section 9.
 `GET /healthz` answers 503 when the agents have stalled: point an external uptime check
 at it. Retention periods are the `ABIGAAIL_RETAIN_*_DAYS` settings in section 4; a value
 that is not a whole number, is below its minimum or above 3650 stops the server from

@@ -13,7 +13,7 @@ import { dirname } from "node:path";
 import { AUTO_VACUUM_INCREMENTAL, VACUUM_SPACE_FACTOR, type App } from "@abigaail/store";
 import { errorClass } from "./evaluate.js";
 import { humanDuration, median } from "@abigaail/insights";
-import { RETENTION, SCHEDULE, WATCHDOG as W } from "./thresholds.js";
+import { ALERTS, RETENTION, SCHEDULE, WATCHDOG as W } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 
 const DAY_MS = 86_400_000;
@@ -318,6 +318,30 @@ function vacuum(ctx: AgentContext): AgentFinding[] {
   }];
 }
 
+/**
+ * A channel that keeps failing (ALERTS.failingAttempts attempts in a row).
+ * Critical, so the alerter sends it through the other channel; never through
+ * the failing one. With one channel it is shown on the dashboard only.
+ */
+function alertDelivery(ctx: AgentContext): AgentFinding[] {
+  const channels = ctx.store.alertChannels();
+  return channels
+    .filter((c) => c.fail_streak >= ALERTS.failingAttempts)
+    .map((c) => ({
+      signal: "alert_delivery_failed",
+      subject: c.channel,
+      severity: "critical" as const,
+      summary: `Alerts through the ${c.label} are not getting through: ${c.fail_streak} attempts in a row failed (last: ${c.last_error ?? "error"}); ` +
+        (c.last_ok_at !== null ? `last delivered ${humanDuration(ctx.now - c.last_ok_at)} ago.` : "nothing delivered yet."),
+      cause: channels.length > 1
+        ? "The receiver is down or refusing, or the channel's settings are wrong. This finding is sent through the other channel."
+        : "The receiver is down or refusing, or the channel's settings are wrong. It is the only channel, so this is shown on the dashboard only.",
+      action: `Check the ${c.channel === "email" ? "ABIGAAIL_SMTP_* and ABIGAAIL_ALERT_EMAIL_*" : "ABIGAAIL_ALERT_WEBHOOK_*"} settings and the receiver, then run npm run alerts:test.`,
+      evidence: { channel: c.channel, fail_streak: c.fail_streak, last_error: c.last_error, last_ok_at: c.last_ok_at, last_failed_at: c.last_failed_at },
+      fact: true,
+    }));
+}
+
 function unknownKeys(ctx: AgentContext): AgentFinding[] {
   const n = ctx.store.ingestRejections("", ctx.now - W.rejectionWindowMs).find((r) => r.status === 401)?.n ?? 0;
   if (n < W.unknownKeyMin) return [];
@@ -363,5 +387,6 @@ export const watchdog: Agent = {
     ...guarded(ctx, "ingest keys", unknownKeys),
     ...guarded(ctx, "retention", retention),
     ...guarded(ctx, "vacuum", vacuum),
+    ...guarded(ctx, "alert delivery", alertDelivery),
   ],
 };
