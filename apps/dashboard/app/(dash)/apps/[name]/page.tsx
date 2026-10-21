@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { AppNav } from "@/components/AppNav";
 import { Figures } from "@/components/Figures";
 import { ResponseChart } from "@/components/ResponseChart";
+import { Scrubbed } from "@/components/Scrubbed";
 import { Status } from "@/components/Status";
 import { reader } from "@/lib/data";
 import { ago, hourLabel, ms, pct, when } from "@/lib/format";
@@ -37,6 +38,7 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
   const past = earlier(r, app.id, now);
   const usage = usageNumbers(r, app.id, now);
   const kept = appRetention(r, app.id);
+  const errors = r.topErrors(app.id, now - 24 * 3_600_000, now + 1);
   const region = app.region ? regionInfo(app.region) : undefined;
   const top = s.top && s.top.severity !== "unknown" ? s.top : undefined;
   const hasPoints = series.some((p) => p.p95 !== null);
@@ -183,6 +185,33 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
             ) : <p className="empty small">Nothing unusual in how the app is used.</p>}
           </div>
         </div>
+      </section>
+
+      <section>
+        <h2>Errors, last 24 hours</h2>
+        {errors.length ? (
+          <>
+            <ul className="plain errlist">
+              {errors.map((e, i) => (
+                <li key={i}>
+                  <div>
+                    <span className="mono">{e.error_type}</span>
+                    {e.code ? <span className="mono muted"> {e.code}</span> : null}
+                    {e.route ? <span className="muted small"> on <span className="mono">{e.route}</span></span> : null}
+                  </div>
+                  <div className="small">{e.message ? <Scrubbed text={e.message} /> : <span className="faint">no message</span>}</div>
+                  <div className="small muted num">{count(e.n)} time{e.n === 1 ? "" : "s"} · last {when(e.last)}</div>
+                </li>
+              ))}
+            </ul>
+            <p className="small muted">
+              Messages are cleaned in the app before they are sent: anything personal or unrecognised is replaced
+              (<Scrubbed text="<email> <word>" />, ...), and the original never leaves the app.
+            </p>
+          </>
+        ) : (
+          <p className="empty">No errors in the last 24 hours.</p>
+        )}
       </section>
 
       <div className="cols">

@@ -196,3 +196,28 @@ describe("validateBatch: region", () => {
     expect(validateBatch(batch([{ ...request, region: "LON1" }])).ok).toBe(false);
   });
 });
+
+describe("validateBatch: error messages, codes and causes (DECISIONS #103)", () => {
+  const error = (o: Record<string, unknown>) => ({ type: "error", event_id: ID, client_ts: 1, error_type: "Error", handled: true, ...o });
+
+  it("accepts scrubbed text and pattern codes", () => {
+    const ok = validateBatch(batch([
+      error({ message: "User <email> not found", code: "P2025", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "fetch failed", scrub_version: 1 }),
+      { type: "outbound", event_id: ID, client_ts: 1, host: "a.example", method: "GET", duration_ms: 1, outcome: "error", error_code: "ENOTFOUND" },
+    ]));
+    expect(ok.ok).toBe(true);
+  });
+
+  it.each([
+    ["a code that is not one", { code: "jane@example.com" }],
+    ["a name as a code", { code: "JANE_SMITH" }],
+    ["a message over 200 characters", { message: "x".repeat(201) }],
+    ["an empty message", { message: "" }],
+    ["a cause type that is not a class name", { cause_type: "not a class" }],
+    ["an unknown field next to them", { message: "fetch failed", detail: "Key (email)=(jane@example.com)" }],
+  ])("refuses %s, naming the field but never the value", (_label, extra) => {
+    const r = validateBatch(batch([error(extra)]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(JSON.stringify(r.issues)).not.toContain("jane");
+  });
+});

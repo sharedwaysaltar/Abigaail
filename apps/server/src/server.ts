@@ -7,6 +7,7 @@ import { validateBatch } from "@abigaail/schema/validate";
 import type { App, EventRow, Store } from "@abigaail/store";
 import { classifyUserAgent, eventTime, utcDay, visitorHash } from "./derive.js";
 import { TokenBucket } from "./ratelimit.js";
+import { Rescrubber } from "./rescrub.js";
 import type { SaltSource } from "./salt.js";
 
 export interface ServerOptions {
@@ -128,7 +129,13 @@ export function createServer(opts: ServerOptions): http.Server {
     if (r) r.n++;
     else rejections.set(k, { app_id: appId, minute, status, n: 1 });
   };
+  const rescrubber = new Rescrubber(store, now);
   const flushRejections = () => {
+    try {
+      rescrubber.flush();
+    } catch (err) {
+      log(`ingest: could not record scrub counts (${errorClass(err)})`);
+    }
     if (!rejections.size) return;
     const rows = [...rejections.values()];
     rejections.clear();
@@ -207,6 +214,8 @@ export function createServer(opts: ServerOptions): http.Server {
     // One invalid event rejects the whole batch; nothing is stored.
     if (!result.ok) return send(res, 400, { error: "invalid_batch", issues: result.issues });
     const batch = result.batch;
+    // Free text is scrubbed again with the server's rules before anything is stored.
+    rescrubber.apply(app.id, batch.events);
 
     // The salt day comes from receive time (UTC), never from event time, so a
     // retried batch never needs an already-rotated salt. The buffer is used

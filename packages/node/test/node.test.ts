@@ -305,14 +305,14 @@ describe("linking outbound calls to their inbound request", () => {
     const upstream = await server();
     const app = await server(async (q, s) => {
       const tag = new URL(q.url ?? "/", "http://x").pathname.slice(1);
-      await new Promise((r) => setTimeout(r, tag === "p1" ? 30 : 1));
+      await new Promise((r) => setTimeout(r, tag === "first" ? 30 : 1));
       await (await fetch(`${upstream}/f/${tag}`)).text();
       s.end(tag);
     });
     const { port } = new URL(app);
     await new Promise<void>((resolve, reject) => {
       const sock = net.connect(Number(port), "127.0.0.1", () =>
-        sock.write("GET /p1 HTTP/1.1\r\nHost: x\r\n\r\nGET /p2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        sock.write("GET /first HTTP/1.1\r\nHost: x\r\n\r\nGET /second HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
       );
       sock.on("data", () => {});
       sock.on("end", resolve);
@@ -321,8 +321,8 @@ describe("linking outbound calls to their inbound request", () => {
     const all = (await events()) as Linked[];
     const { requests, outbound } = byType(all);
     const idOf = (route: string) => requests.find((r) => r.route === route)!.event_id;
-    // Outbound events are captured in completion order: p2's call finishes first.
-    expect(outbound.map((o) => o.parent_id)).toEqual([idOf("/p2"), idOf("/p1")]);
+    // Outbound events are captured in completion order: the second request's call finishes first.
+    expect(outbound.map((o) => o.parent_id)).toEqual([idOf("/second"), idOf("/first")]);
   });
 
   it("an outbound call outside any request has no parent_id", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { errorType, parseStack, relativePath } from "@abigaail/node";
+import { errorCodeOf, errorDetail, errorType, parseStack, relativePath } from "@abigaail/node";
 
 describe("relativePath", () => {
   const root = "/home/jane/app";
@@ -36,5 +36,41 @@ describe("parseStack", () => {
   it("errorType never uses the message", () => {
     expect(errorType(new TypeError("jane@example.com"))).toBe("TypeError");
     expect(errorType({ message: "x" })).toBe("NonError");
+  });
+});
+
+describe("errorDetail: reads message, code and cause without running app code (DECISIONS #105)", () => {
+  it("own data properties only; one level of cause", () => {
+    const cause = Object.assign(new TypeError("connect ECONNREFUSED 10.0.0.1:5432"), { code: "ECONNREFUSED" });
+    const err = Object.assign(new Error("fetch failed", { cause }), { code: "UND_ERR_SOCKET", email: "jane@example.com" });
+    expect(errorDetail(err)).toEqual({
+      message: "fetch failed", code: "UND_ERR_SOCKET", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED 10.0.0.1:5432",
+    });
+    expect(errorDetail("thrown string")).toEqual({ message: "thrown string" });
+    expect(errorDetail({ message: "an object" })).toEqual({});
+  });
+
+  it("a throwing or slow getter, a Proxy or a cause cycle never runs and never throws", () => {
+    let ran = false;
+    const getters = new Error("x");
+    Object.defineProperty(getters, "message", { get: () => { ran = true; throw new Error("boom"); } });
+    Object.defineProperty(getters, "code", { get: () => { ran = true; return "ECONNRESET"; } });
+    expect(errorDetail(getters)).toEqual({});
+    expect(ran).toBe(false);
+
+    const proxy = new Proxy(new Error("y"), { getOwnPropertyDescriptor: () => { throw new Error("trap"); }, get: () => { throw new Error("trap"); } });
+    expect(() => errorDetail(proxy)).not.toThrow();
+
+    const a = new Error("a") as Error & { cause?: unknown };
+    const b = new Error("b", { cause: a });
+    a.cause = b;
+    expect(errorDetail(a)).toMatchObject({ message: "a", cause_message: "b" });
+    expect(errorDetail(new Error("z".repeat(10_000))).message!.length).toBe(2048);
+  });
+
+  it("errorCodeOf takes the error's code or its cause's", () => {
+    expect(errorCodeOf(Object.assign(new Error("x"), { code: "ENOTFOUND" }))).toBe("ENOTFOUND");
+    expect(errorCodeOf(new TypeError("fetch failed", { cause: Object.assign(new Error("y"), { code: "ECONNREFUSED" }) }))).toBe("ECONNREFUSED");
+    expect(errorCodeOf("x")).toBeUndefined();
   });
 });

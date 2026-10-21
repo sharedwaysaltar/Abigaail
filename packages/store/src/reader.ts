@@ -718,6 +718,35 @@ export class StoreReader {
       .all(appId, since) as unknown as { status: number; n: number }[];
   }
 
+  /** Text the server had to scrub again since `since` (count only). */
+  scrubMismatches(appId: string, since: number): number {
+    const row = this.db.prepare("SELECT coalesce(sum(n), 0) AS n FROM scrub_mismatches WHERE app_id = ? AND minute >= ?").get(appId, since) as { n: number };
+    return Number(row.n);
+  }
+
+  /**
+   * The app's outbound hosts: rolled-up hosts since `since` plus raw outbound
+   * events of the last `recentMs`. The only hostnames a scrubbed message may keep.
+   */
+  outboundHosts(appId: string, since: number, now: number, recentMs: number): Set<string> {
+    const hosts = this.hourlyKeys(appId, "host", since, now + 1);
+    const raw = this.db
+      .prepare("SELECT DISTINCT host FROM events WHERE app_id = ? AND type = 'outbound' AND ts >= ? AND host IS NOT NULL")
+      .all(appId, now - recentMs) as { host: string }[];
+    for (const r of raw) hosts.add(r.host);
+    return hosts;
+  }
+
+  /** The most frequent errors with ts in [from, to): type, code, scrubbed message and route. */
+  topErrors(appId: string, from: number, to: number, limit = 10): { error_type: string; code: string | null; message: string | null; route: string | null; n: number; last: number }[] {
+    return this.db
+      .prepare(`SELECT name AS error_type, json_extract(attrs, '$.code') AS code, json_extract(attrs, '$.message') AS message,
+                       route, count(*) AS n, max(ts) AS last
+                FROM events WHERE app_id = ? AND type = 'error' AND ts >= ? AND ts < ?
+                GROUP BY name, code, message, route ORDER BY n DESC, last DESC LIMIT ?`)
+      .all(appId, from, to, limit) as unknown as { error_type: string; code: string | null; message: string | null; route: string | null; n: number; last: number }[];
+  }
+
   /** Current database file size (excluding the WAL). */
   dbBytes(): number {
     const { page_count } = this.db.prepare("PRAGMA page_count").get() as { page_count: number };

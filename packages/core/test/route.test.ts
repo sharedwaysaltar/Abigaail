@@ -21,7 +21,14 @@ describe("heuristicRoute", () => {
     ["/u/jane@example.com", "/u/[id]"],
     ["/caf%C3%A9", "/[id]"],
     ["/api/chat", "/api/chat"],
-    ["/blog/hello-world", "/blog/hello-world"],
+    ["/api/v1/users", "/api/v1/users"],
+    // Fails closed (DECISIONS #108): a slug, handle, name or address it does not know is never a route.
+    ["/blog/hello-world", "/blog/[id]"],
+    ["/users/raybrown46", "/users/[id]"],
+    ["/amelia_kim68/settings", "/[id]/settings"],
+    ["/u/Jane/profile", "/u/[id]/profile"],
+    ["/u/grant", "/u/[id]"],
+    ["/203.0.113.9/status", "/[id]/status"],
     ["/", "/"],
   ])("%s -> %s", (input, expected) => {
     expect(heuristicRoute(input)).toBe(expected);

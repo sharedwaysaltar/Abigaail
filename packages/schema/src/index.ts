@@ -6,7 +6,8 @@
 //
 // Rules this schema encodes (see docs/ROADMAP.md and the project spec):
 // - Only named fields exist. Anything not declared here is rejected by the server.
-// - No bodies, headers, cookies, query values, emails, names, user IDs or free text.
+// - No bodies, headers, cookies, query values, emails, names or user IDs. The only
+//   free text is an error's message, and only after the shared scrubber (./scrub.ts).
 // - `transient` fields (client IP, user agent) are used in memory at ingest for
 //   geo, bot class and the rotating visitor hash, then discarded. Never stored.
 // - The server sets the authoritative timestamp; `client_ts` is advisory only.
@@ -26,6 +27,9 @@ export const LIMITS = {
   maxStackFrames: 20,
   maxFramePathLength: 200,
   maxErrorTypeLength: 100,
+  /** Scrubbed error messages (SCRUB_LIMITS.outputMax). */
+  maxMessageLength: 200,
+  maxCodeLength: 40,
 } as const;
 
 /** Route placeholders used when a real pattern is unknown or a cap is hit. */
@@ -114,11 +118,21 @@ export interface StackFrame {
 
 export interface ErrorEvent extends BaseEvent {
   type: "error";
-  /** Error class name only, e.g. "TypeError". Never the message. */
+  /** Error class name, e.g. "TypeError". */
   error_type: string;
   route?: string;
   handled: boolean;
   frames?: StackFrame[];
+  /** The message after the shared scrubber (scrub.ts), never as thrown. */
+  message?: string;
+  /** An error code by pattern only (cleanCode): ECONNREFUSED, P2002, 23505, ERR_INVALID_ARG_TYPE ... */
+  code?: string;
+  /** The cause's class name, code and scrubbed message (one level). */
+  cause_type?: string;
+  cause_code?: string;
+  cause_message?: string;
+  /** SCRUB_VERSION of the scrubber that produced message / cause_message. */
+  scrub_version?: number;
   /** `event_id` of the inbound request this error happened in, if known. */
   parent_id?: string;
 }
@@ -131,6 +145,8 @@ export interface OutboundEvent extends BaseEvent {
   status?: number;
   duration_ms: number;
   outcome: OutboundOutcome;
+  /** For a failed call: the error's code by pattern only (ENOTFOUND, ECONNRESET, UND_ERR_CONNECT_TIMEOUT ...). */
+  error_code?: string;
   /**
    * `event_id` of the inbound request that made this call, if known. Not a new
    * identifier: it repeats an id the request event already carries.
@@ -226,3 +242,7 @@ export const isFramePath = (p: unknown): p is string =>
 export const isRegion = (s: unknown): s is string => typeof s === "string" && REGION_RE.test(s);
 export const isIp = (s: unknown): s is string =>
   typeof s === "string" && s.length <= 45 && (IPV4_RE.test(s) || IPV6_RE.test(s));
+
+// The allowlist scrubber for free text (error messages), shared by SDK and server.
+export { cleanCode, identifierPieces, isRouteWord, isScrubbed, isVocabIdentifier, PLACEHOLDERS, scrub, SCRUB_LIMITS, SCRUB_VERSION, SCRUB_VERSIONS } from "./scrub.js";
+export type { Placeholder, ScrubOptions } from "./scrub.js";

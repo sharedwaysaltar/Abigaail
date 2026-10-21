@@ -12,12 +12,15 @@ import {
   OUTBOUND_OUTCOMES,
   REQUEST_FLAGS,
   ROUTE_OTHER,
+  SCRUB_VERSION,
+  cleanCode,
   isFramePath,
   isHost,
   isIdent,
   isIp,
   isRegion,
   isRoute,
+  scrub,
   type AbigaailEvent,
   type ErrorEvent,
   type OutboundEvent,
@@ -34,6 +37,18 @@ import {
 // batch rejected (DECISIONS #19).
 
 type Raw = Record<string, unknown>;
+
+/** What sanitizing free text needs from the client (DECISIONS #101-#105). */
+export interface SanitizeContext {
+  /** false: no error message is sent at all (errorMessages: false). Default true. */
+  messages?: boolean;
+  /** Takes one scrub from the budget; false when it is spent (the error goes out without its message). */
+  scrubBudget?: () => boolean;
+  /** The app's own outbound hosts: the only hostnames a message may keep. */
+  knownHost?: (host: string) => boolean;
+  /** Each outbound host that is sent, so the client can remember it. */
+  onHost?: (host: string) => void;
+}
 
 const has = <T extends string>(list: readonly T[], v: unknown): v is T => list.includes(v as T);
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -103,7 +118,7 @@ function cleanFlags(flags: unknown): RequestFlag[] | undefined {
  * Returns a clean copy of `input` that ingest will accept, or undefined when the
  * event cannot be repaired (the caller counts it as invalid). Never throws.
  */
-export function sanitizeEvent(input: unknown, eventId: () => string, now: () => number): AbigaailEvent | undefined {
+export function sanitizeEvent(input: unknown, eventId: () => string, now: () => number, ctx: SanitizeContext = {}): AbigaailEvent | undefined {
   if (!input || typeof input !== "object") return undefined;
   const e = input as Raw;
   const event_id = isEventId(e.event_id) ? e.event_id : eventId();
@@ -142,6 +157,21 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
       if (e.route !== undefined) out.route = isRoute(e.route) ? e.route : ROUTE_OTHER;
       const frames = cleanFrames(e.frames);
       if (frames) out.frames = frames;
+      const code = cleanCode(e.code);
+      if (code) out.code = code;
+      if (isIdent(e.cause_type, LIMITS.maxErrorTypeLength)) out.cause_type = e.cause_type;
+      const causeCode = cleanCode(e.cause_code);
+      if (causeCode) out.cause_code = causeCode;
+      // Free text only through the scrubber, and only within the budget.
+      if (ctx.messages !== false) {
+        const opts = ctx.knownHost ? { knownHost: ctx.knownHost } : {};
+        for (const field of ["message", "cause_message"] as const) {
+          if (typeof e[field] !== "string" || !e[field] || (ctx.scrubBudget && !ctx.scrubBudget())) continue;
+          const text = scrub(e[field], opts);
+          if (text) out[field] = text;
+        }
+        if (out.message || out.cause_message) out.scrub_version = SCRUB_VERSION;
+      }
       if (isEventId(e.parent_id)) out.parent_id = e.parent_id;
       return out;
     }
@@ -158,7 +188,10 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
         outcome: e.outcome,
       };
       if (isStatus(e.status)) out.status = e.status;
+      const errorCode = out.outcome === "ok" ? undefined : cleanCode(e.error_code);
+      if (errorCode) out.error_code = errorCode;
       if (isEventId(e.parent_id)) out.parent_id = e.parent_id;
+      if (out.host !== HOST_INVALID && out.host !== HOST_IP_LITERAL) ctx.onHost?.(out.host);
       return out;
     }
     case "metric":

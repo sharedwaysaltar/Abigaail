@@ -189,6 +189,8 @@ export class Retention {
       this.drainScopes([...this.store.retentionScopes("findings"), null], (s) => this.store.deleteExpired("findings", s, cut("findings"), this.batchRows), (n) => add("findings", n)));
     await step("ingest rejections", () =>
       this.drainScopes(this.store.retentionScopes("ingest_rejections"), (s) => this.store.deleteExpired("ingest_rejections", s, Math.floor(cut("ingest_rejections") / MINUTE_MS) * MINUTE_MS, this.batchRows), (n) => add("ingest_rejections", n)));
+    await step("scrub mismatches", () =>
+      this.drainScopes(this.store.retentionScopes("scrub_mismatches"), (s) => this.store.deleteExpired("scrub_mismatches", s, Math.floor(cut("ingest_rejections") / MINUTE_MS) * MINUTE_MS, this.batchRows), (n) => add("ingest_rejections", n)));
     await step("audit log", () =>
       this.drainScopes([...this.store.retentionScopes("audit_log"), null], (s) => this.store.deleteExpired("audit_log", s, cut("audit_log"), this.batchRows), (n) => add("audit_log", n)));
     await step("alerts", async () => {

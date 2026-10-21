@@ -1,9 +1,11 @@
-import { LIMITS, ROUTE_OTHER, ROUTE_UNMATCHED, isRoute } from "@abigaail/schema";
+import { LIMITS, ROUTE_OTHER, ROUTE_UNMATCHED, isRoute, isRouteWord } from "@abigaail/schema";
 
 // Route normalisation keeps cardinality bounded and keeps identifiers out of
 // stored data. Two layers:
 // 1. Known patterns (from the framework's router, e.g. Next.js "/user/[id]").
-// 2. A heuristic fallback that replaces ID-like segments with "[id]".
+// 2. A heuristic fallback that keeps a segment only if it is made of
+//    vocabulary words (the scrubber's, DECISIONS #108) and replaces anything
+//    else with "[id]": ids, names, handles, emails, IPs.
 // A per-process cap then folds anything beyond N distinct routes into "other".
 
 interface CompiledPattern {
@@ -88,10 +90,14 @@ export function pathOnly(url: string): string {
   return path;
 }
 
-/** Heuristic fallback: replace ID-like segments with "[id]". */
+/**
+ * Heuristic fallback: a segment stays only if it is made of vocabulary words
+ * ("/api/v1/users", "/blog/new"); anything else, including words it does not
+ * know, becomes "[id]". Fails closed: a name in a path never becomes a route.
+ */
 export function heuristicRoute(path: string): string {
   const segs = pathOnly(path).split("/").filter(Boolean);
-  const out = segs.map((s) => (isIdLike(s) ? "[id]" : s));
+  const out = segs.map((s) => (isIdLike(s) || !isRouteWord(s) ? "[id]" : s));
   const route = "/" + out.join("/");
   return route.length > LIMITS.maxRouteLength ? ROUTE_OTHER : route;
 }

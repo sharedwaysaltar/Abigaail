@@ -226,10 +226,20 @@ with each request event. The server uses them in memory to compute a visitor ID
 across days or across apps), a browser family (e.g. `chrome`) and whether the request
 came from a bot. The IP address and user agent are never written to disk.
 
+**Error messages, cleaned in your app:** an error's message (and its cause's) is sent only
+after a scrubber removes anything personal. It keeps known words, error codes, small
+numbers and the hosts your app calls; it replaces emails, IP addresses, tokens, keys,
+card numbers, IBANs, phone numbers, ids, URLs' paths and queries, quoted values and any
+word it does not know with placeholders like `<email>` or `<word>`. When too little is
+left, no message is sent. "User jane@example.com not found" arrives as
+"User `<email>` not found". The server cleans it again before storing. Turn messages off
+with `errorMessages: false` in `init`.
+
 **Never collected:** IP addresses (beyond that moment at ingest), emails, names, user
 IDs, cookies, tokens, authorization headers, request or response bodies, form inputs,
-query-string values, error messages, or any other free text. The server checks every
-event against an allowlist and refuses a whole batch if anything else is in it.
+query-string values, or any other free text. The server checks every event against an
+allowlist and refuses a whole batch if anything else is in it. Paths without a known
+route pattern keep only known words: `/users/jane` is reported as `/users/[id]`.
 
 **How long it is kept:** the server deletes old data every hour (every 5 minutes while
 it catches up). Deleted rows are overwritten and removed from the database file, not just
@@ -301,7 +311,8 @@ change the snippet to match (the Agents page shows what is enforced).
 
 > We monitor this service with Abigaail, a monitoring tool we host ourselves. For each
 > request it records technical information: the page or API route, the response status
-> and time, the referring website's domain, and errors in our code. When your request
+> and time, the referring website's domain, and errors in our code (their type and a
+> cleaned message from which personal data is removed). When your request
 > arrives, your IP address and browser's user-agent string are used briefly, without being
 > stored, to derive your browser type, whether the request comes from an automated
 > client, and a pseudonymous visitor identifier. That identifier is a keyed hash that

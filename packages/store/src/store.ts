@@ -99,12 +99,14 @@ const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "
 const DAY_MS = 86_400_000;
 
 /** Tables with an app_id whose old rows retention deletes one app_id at a time. */
-export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "alert_state";
-const SCOPED_TABLES: readonly ScopedTable[] = ["events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log", "alert_state"];
+export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "alert_state" | "scrub_mismatches";
+const SCOPED_TABLES: readonly ScopedTable[] = [
+  "events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log", "alert_state", "scrub_mismatches",
+];
 
 /** What deleteExpired removes; events and rollups have their own methods (roll before delete, tables kept in step). */
 export type ExpiringTable =
-  | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples" | "alert_deliveries" | "alert_state";
+  | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples" | "alert_deliveries" | "alert_state" | "scrub_mismatches";
 
 /**
  * One bounded batch per statement. App tables take (scope, cutoff, limit) or,
@@ -143,6 +145,10 @@ const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
   },
   db_size_samples: {
     none: "DELETE FROM db_size_samples WHERE ts IN (SELECT ts FROM db_size_samples WHERE ts < ? ORDER BY ts LIMIT ?)",
+  },
+  scrub_mismatches: {
+    app: `DELETE FROM scrub_mismatches WHERE app_id = ? AND minute IN (
+            SELECT minute FROM scrub_mismatches WHERE app_id = ? AND minute < ? ORDER BY minute LIMIT ?)`,
   },
   alert_deliveries: {
     none: `DELETE FROM alert_deliveries WHERE id IN (
@@ -504,6 +510,17 @@ export class Store extends StoreReader {
       ON CONFLICT (app_id, minute, status) DO UPDATE SET n = n + excluded.n`);
     this.tx(() => {
       for (const r of rows) upsert.run(r.app_id, r.minute, r.status, r.n);
+    });
+  }
+
+  /** Add counts of text the server had to scrub again (DECISIONS #104). */
+  addScrubMismatches(rows: readonly { app_id: string; minute: number; n: number }[]): void {
+    if (!rows.length) return;
+    const upsert = this.db.prepare(`
+      INSERT INTO scrub_mismatches (app_id, minute, n) VALUES (?, ?, ?)
+      ON CONFLICT (app_id, minute) DO UPDATE SET n = n + excluded.n`);
+    this.tx(() => {
+      for (const r of rows) upsert.run(r.app_id, r.minute, r.n);
     });
   }
 
