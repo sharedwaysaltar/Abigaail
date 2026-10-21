@@ -3,7 +3,10 @@
 // the agents judge with (DECISIONS #42, #49). Where evidence is short they
 // return null with a reason; the dashboard shows that grey, never as healthy.
 
-import { HOUR_MS, type AgentRun, type App, type AppStatus, type Finding, type RetentionName, type RunOutcome, type StatRow, type StoreReader } from "@abigaail/store";
+import {
+  HOUR_MS, type AgentRun, type AlertChannelRow, type AlertDelivery, type AlertItemRow, type App, type AppStatus, type Finding, type RetentionName,
+  type RunOutcome, type StatRow, type StoreReader,
+} from "@abigaail/store";
 import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
 import { median, poissonCdf, poissonUpperTail } from "./stats.js";
 import { BASELINE, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
@@ -433,6 +436,8 @@ export interface AgentView {
   status: AppStatus;
   /** The Watchdog finding behind a non-green status, if any. */
   finding: Finding | undefined;
+  /** Not running by configuration (alerts with no channel configured): shown grey with this reason. */
+  off?: string;
   lastOkAt: number | undefined;
   /** Newest first, at most VIEWS.agentRuns. */
   runs: AgentRun[];
@@ -461,13 +466,18 @@ export function agentsView(store: StoreReader, apps: readonly App[], now: number
     const ok = runs.filter((r) => r.outcome === "ok").map((r) => r.duration_ms);
     const about = (signal: string) => system.find((f) => f.agent === "watchdog" && f.fingerprint === `watchdog:${signal}:${name}`);
     const finding = about("agent_stalled") ?? about("agent_failing") ?? about("agent_slowing");
-    const status: AppStatus = finding
-      ? finding.severity === "critical" ? "red" : "amber"
-      : !runs.length || !watchdogFresh ? "grey" : "green";
+    // The alerter runs only with a channel configured; the server records the channels (none: off).
+    const off = name === "alerts" && !store.alertChannels().length ? "off (no channel configured)" : undefined;
+    const status: AppStatus = off
+      ? "grey"
+      : finding
+        ? finding.severity === "critical" ? "red" : "amber"
+        : !runs.length || !watchdogFresh ? "grey" : "green";
     return {
       name,
       schedule: (SCHEDULE as Record<string, { everyMs: number; timeoutMs?: number }>)[name],
       status,
+      ...(off ? { off } : {}),
       finding,
       lastOkAt: store.lastOkRun(name),
       runs,
@@ -491,6 +501,7 @@ export const RETENTION_LABEL: Record<RetentionName, string> = {
   ingest_rejections: "Refused ingest requests (counts per minute)",
   db_size_samples: "Database size samples",
   audit_log: "Admin and sign-in audit logs",
+  alerts: "Alert messages sent and their delivery",
   sessions: "Dashboard sessions",
 };
 
@@ -520,4 +531,46 @@ export function retentionView(store: StoreReader): RetentionRow[] {
 export function appRetention(store: StoreReader, appId: string): { eventsDays: number | null; rollupsDays: number | null; oldestEvent: number | null } {
   const policy = new Map(store.retentionPolicy().map((p) => [p.name, p.keep_days]));
   return { eventsDays: policy.get("events") ?? null, rollupsDays: policy.get("rollups") ?? null, oldestEvent: store.oldestEventTs(appId) ?? null };
+}
+
+// ---- alerts (DECISIONS #99) -----------------------------------------------------------
+
+export interface DeliveryView extends AlertDelivery {
+  /** The findings it carried, app by app (read with app_id = ?, never across apps). */
+  items: { app: string; fingerprint: string; change: "firing" | "recovered"; finding_id: number | null }[];
+}
+
+export interface AlertsView {
+  channels: AlertChannelRow[];
+  deliveries: DeliveryView[];
+}
+
+/** Configured channels and the latest messages with what each carried. */
+export function alertsView(store: StoreReader, apps: readonly App[], limit = 50): AlertsView {
+  const deliveries = store.recentDeliveries(limit);
+  const since = deliveries.length ? Math.min(...deliveries.map((d) => d.created_at)) : Infinity;
+  const byDelivery = new Map<number, DeliveryView["items"]>();
+  if (deliveries.length) {
+    const scopes: { id: string | null; name: string }[] = [...apps.map((a) => ({ id: a.id, name: a.name })), { id: null, name: "Abigaail" }];
+    for (const scope of scopes) {
+      for (const i of store.alertItems(scope.id, since)) {
+        const list = byDelivery.get(i.delivery) ?? [];
+        list.push({ app: scope.name, fingerprint: i.fingerprint, change: i.change, finding_id: i.finding_id });
+        byDelivery.set(i.delivery, list);
+      }
+    }
+  }
+  return { channels: store.alertChannels(), deliveries: deliveries.map((d) => ({ ...d, items: byDelivery.get(d.id) ?? [] })) };
+}
+
+/** Per finding of one app (null: Abigaail itself): the messages about it in the last `sinceMs`, newest first. */
+export function alertsByFinding(store: StoreReader, appId: string | null, now: number, sinceMs = 7 * 24 * 60 * MIN): Map<number, AlertItemRow[]> {
+  const out = new Map<number, AlertItemRow[]>();
+  for (const i of store.alertItems(appId, now - sinceMs)) {
+    if (i.finding_id === null) continue;
+    const list = out.get(i.finding_id) ?? [];
+    list.push(i);
+    out.set(i.finding_id, list);
+  }
+  return out;
 }

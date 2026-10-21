@@ -1,8 +1,15 @@
 export { openReadOnly, openStore, Store, APP_NAME_RE } from "./store.js";
-export type { AuditEntry, ExpiringTable, FindingInput, IngestBatch, RecordRunOptions, RunInput, ScopedTable, StoreOptions } from "./store.js";
-export { HOUR_MS, MATTERS_SQL, mattersSql, percentile, StoreReader } from "./reader.js";
+export type {
+  AuditEntry, DeliveryInput, ExpiringTable, FindingInput, IngestBatch, PendingDelivery, RecordRunOptions, RunInput, ScopedTable, StoreOptions,
+} from "./store.js";
+export { HOUR_MS, isRed, MATTERS_SQL, mattersSql, percentile, StoreReader } from "./reader.js";
 export type {
   AgentRun,
+  AlertChannelRow,
+  AlertDelivery,
+  AlertItemRow,
+  AlertState,
+  DeliveryStatus,
   App,
   AppStatus,
   Deploy,

@@ -37,7 +37,8 @@ export default async function AgentsPage() {
                 <div className="agent-what">
                   <div>{AGENT_PURPOSE[a.name] ?? "—"}</div>
                   {a.finding ? <div className="small red-text">{a.finding.summary}</div> : null}
-                  <div className="small muted">
+                  {a.off ? <div className="small muted">{a.off}</div> : null}
+                  <div className="small muted" hidden={!!a.off}>
                     {a.schedule ? `Every ${span(a.schedule.everyMs)}${a.schedule.timeoutMs ? `, timeout ${span(a.schedule.timeoutMs)}` : ""}` : "Not scheduled"}
                     {" · "}
                     {a.lastOkAt !== undefined ? `last good run ${ago(a.lastOkAt, now)}` : "no good run yet"}

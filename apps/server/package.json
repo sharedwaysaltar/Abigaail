@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Abigaail server: ingest endpoint (and later SSE, scheduler, alerter).",
+  "description": "Abigaail server: ingest, live feed, agent scheduler, retention and alerts.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -11,9 +11,10 @@
     }
   },
   "dependencies": {
+    "@abigaail/auth": "0.1.0",
+    "@abigaail/insights": "0.1.0",
     "@abigaail/schema": "0.1.0",
     "@abigaail/store": "0.1.0",
-    "@abigaail/insights": "0.1.0",
-    "@abigaail/auth": "0.1.0"
+    "nodemailer": "10.0.16"
   }
 }

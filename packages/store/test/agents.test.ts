@@ -173,6 +173,23 @@ describe("appStatus", () => {
     expect(status()).toBe("red");
   });
 
+  it("red needs 2 runs at critical: a warning that turns critical is amber for one more run", () => {
+    store.recordRun(run("health"), [finding(appA, "5xx", "warning")], [appA]);
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    expect(store.openFindings(appA)[0]).toMatchObject({ hits: 2, critical_streak: 1 });
+    expect(status()).toBe("amber");
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    expect(status()).toBe("red");
+    // Back to warning resets the streak; a miss in between neither counts nor resets it.
+    store.recordRun(run("health"), [finding(appA, "5xx", "warning")], [appA]);
+    expect(store.openFindings(appA)[0]!.critical_streak).toBe(0);
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    store.recordRun(run("health"), [], [appA]);
+    store.recordRun(run("health"), [finding(appA)], [appA]);
+    expect(store.openFindings(appA)[0]!.critical_streak).toBe(2);
+    expect(status()).toBe("red");
+  });
+
   it("stays red until the finding resolves after 3 good runs", () => {
     store.recordRun(run("health"), [finding(appA)], [appA]);
     store.recordRun(run("health"), [finding(appA)], [appA]);

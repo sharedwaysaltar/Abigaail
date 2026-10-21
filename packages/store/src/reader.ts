@@ -65,6 +65,8 @@ export interface Finding {
   evidence: Record<string, unknown>;
   /** Runs that emitted it since it (re)opened. */
   hits: number;
+  /** Consecutive emissions at critical (misses in between neither count nor reset it). Red needs 2. */
+  critical_streak: number;
   /** Consecutive successfully evaluated runs that did not emit it. */
   misses: number;
   /** "misses": resolves after N runs without it; "fact": on the first run without it. */
@@ -124,7 +126,7 @@ export const HOUR_MS = 3_600_000;
 
 /** What retention deletes, by policy name (DECISIONS #87). "rollups" = hourly_route_stats + rollup_hours. */
 export type RetentionName =
-  | "events" | "rollups" | "daily_uniques" | "findings" | "agent_runs" | "ingest_rejections" | "db_size_samples" | "audit_log" | "sessions";
+  | "events" | "rollups" | "daily_uniques" | "findings" | "agent_runs" | "ingest_rejections" | "db_size_samples" | "audit_log" | "alerts" | "sessions";
 
 export interface RetentionPolicyRow {
   name: RetentionName;
@@ -188,12 +190,78 @@ const STAT_SQL: Record<StatKind, string> = {
 
 const STAT_COLUMNS = "key, n, weighted_n, status_5xx, status_4xx, status_401_403, failures, p50, p95, p99, uniques";
 const FINDING_COLUMNS =
-  "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, resolves, first_seen, last_seen, resolved_at, resolved_reason";
+  "id, app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence, hits, misses, critical_streak, resolves, first_seen, last_seen, resolved_at, resolved_reason";
 export const APP_COLUMNS = "id, name, created_at, disabled_at, last_event_at, region";
 
 function toFinding(row: Record<string, unknown>): Finding {
   return { ...(row as unknown as Finding), evidence: JSON.parse(String(row.evidence)) as Record<string, unknown> };
 }
+
+/**
+ * Confirmed red: an open critical finding emitted at critical in 2 runs in a
+ * row (AGENTS.md). The one rule for an app's status and for alerts, so a
+ * single blip neither turns an app red nor notifies anyone.
+ */
+export function isRed(f: Pick<Finding, "state" | "severity" | "critical_streak">): boolean {
+  return f.state === "open" && f.severity === "critical" && f.critical_streak >= 2;
+}
+
+/** Persisted alert dedup per (app, fingerprint). */
+export interface AlertState {
+  app_id: string | null;
+  fingerprint: string;
+  state: "firing" | "ok";
+  sent: "firing" | "recovered" | null;
+  finding_id: number | null;
+  changed_at: number;
+  fired_at: number | null;
+  /** The finding's summary when the last firing message was sent; quoted by the recovery notice. */
+  fired_summary: string | null;
+  flaps: number;
+}
+
+export type DeliveryStatus = "pending" | "delivered" | "gave_up" | "suppressed";
+
+/** One message to one channel, without its payload. */
+export interface AlertDelivery {
+  id: number;
+  delivery_id: string;
+  channel: string;
+  kind: "alert" | "storm" | "test";
+  created_at: number;
+  status: DeliveryStatus;
+  attempts: number;
+  next_attempt_at: number | null;
+  last_attempt_at: number | null;
+  last_error: string | null;
+  last_code: number | null;
+  finished_at: number | null;
+}
+
+/** Which finding a message carried, and how it went. */
+export interface AlertItemRow {
+  delivery: number;
+  finding_id: number | null;
+  fingerprint: string;
+  change: "firing" | "recovered";
+  channel: string;
+  status: DeliveryStatus;
+  created_at: number;
+}
+
+export interface AlertChannelRow {
+  channel: string;
+  label: string;
+  updated_at: number;
+  fail_streak: number;
+  last_ok_at: number | null;
+  last_failed_at: number | null;
+  last_error: string | null;
+}
+
+const DELIVERY_COLUMNS =
+  "id, delivery_id, channel, kind, created_at, status, attempts, next_attempt_at, last_attempt_at, last_error, last_code, finished_at";
+const ALERT_STATE_COLUMNS = "app_id, fingerprint, state, sent, finding_id, changed_at, fired_at, fired_summary, flaps";
 
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
@@ -549,7 +617,7 @@ export class StoreReader {
   }
 
   /**
-   * One status per app: red if an open critical finding has held for 2 runs;
+   * One status per app: red if an open critical finding has held for 2 runs (isRed);
    * amber for any other open critical or warning; grey for an open "unknown"
    * finding, or when the status agent has not completed a run within
    * `freshMs` (its view is stale); otherwise green.
@@ -557,7 +625,7 @@ export class StoreReader {
   appStatus(appId: string, opts: { now: number; statusAgent?: string; freshMs?: number }): { status: AppStatus; findings: Finding[] } {
     const open = this.openFindings(appId);
     const counted = open.filter((f) => f.severity !== "info");
-    if (counted.some((f) => f.severity === "critical" && f.hits >= 2)) return { status: "red", findings: open };
+    if (counted.some(isRed)) return { status: "red", findings: open };
     if (counted.some((f) => f.severity === "critical" || f.severity === "warning")) return { status: "amber", findings: open };
     const last = this.lastOkRun(opts.statusAgent ?? "health");
     const stale = last === undefined || opts.now - last > (opts.freshMs ?? 180_000);
@@ -571,6 +639,56 @@ export class StoreReader {
       ? this.db.prepare("SELECT min(resolved_at) AS t FROM findings WHERE app_id IS NULL AND state = 'resolved'").get()
       : this.db.prepare("SELECT min(resolved_at) AS t FROM findings WHERE app_id = ? AND state = 'resolved'").get(appId)) as { t: number | null };
     return row.t ?? undefined;
+  }
+
+  /** The newest finding with this fingerprint, open or resolved (null: of Abigaail itself). */
+  latestFinding(appId: string | null, fingerprint: string): Finding | undefined {
+    const row = appId === null
+      ? this.db.prepare(`SELECT ${FINDING_COLUMNS} FROM findings WHERE app_id IS NULL AND fingerprint = ? ORDER BY id DESC LIMIT 1`).get(fingerprint)
+      : this.db.prepare(`SELECT ${FINDING_COLUMNS} FROM findings WHERE app_id = ? AND fingerprint = ? ORDER BY id DESC LIMIT 1`).get(appId, fingerprint);
+    return row ? toFinding(row as Record<string, unknown>) : undefined;
+  }
+
+  // ---- alerts ----------------------------------------------------------------
+
+  /** Alert states of one app (null: of Abigaail itself). Ok states that owe nothing expire with retention. */
+  alertStates(appId: string | null): AlertState[] {
+    return (appId === null
+      ? this.db.prepare(`SELECT ${ALERT_STATE_COLUMNS} FROM alert_state WHERE app_id IS NULL`).all()
+      : this.db.prepare(`SELECT ${ALERT_STATE_COLUMNS} FROM alert_state WHERE app_id = ?`).all(appId)) as unknown as AlertState[];
+  }
+
+  /** What the server has configured, as labels. */
+  alertChannels(): AlertChannelRow[] {
+    return this.db
+      .prepare("SELECT channel, label, updated_at, fail_streak, last_ok_at, last_failed_at, last_error FROM alert_channels ORDER BY channel")
+      .all() as unknown as AlertChannelRow[];
+  }
+
+  /** Recent messages, newest first, without their payload. */
+  recentDeliveries(limit = 50): AlertDelivery[] {
+    return this.db
+      .prepare(`SELECT ${DELIVERY_COLUMNS} FROM alert_deliveries ORDER BY created_at DESC, id DESC LIMIT ?`)
+      .all(limit) as unknown as AlertDelivery[];
+  }
+
+  /** Messages of one channel created at or after `since`. */
+  deliveriesSince(channel: string, since: number): number {
+    const row = this.db
+      .prepare("SELECT count(*) AS n FROM alert_deliveries WHERE channel = ? AND created_at >= ? AND kind <> 'test'")
+      .get(channel, since) as { n: number };
+    return Number(row.n);
+  }
+
+  /** What was sent about one app's findings since `since`, newest first (null: about Abigaail itself). */
+  alertItems(appId: string | null, since: number): AlertItemRow[] {
+    return (appId === null
+      ? this.db.prepare(`SELECT i.delivery, i.finding_id, i.fingerprint, i.change, d.channel, d.status, d.created_at
+                         FROM alert_items i JOIN alert_deliveries d ON d.id = i.delivery
+                         WHERE i.app_id IS NULL AND d.created_at >= ? ORDER BY d.created_at DESC, d.id DESC`).all(since)
+      : this.db.prepare(`SELECT i.delivery, i.finding_id, i.fingerprint, i.change, d.channel, d.status, d.created_at
+                         FROM alert_items i JOIN alert_deliveries d ON d.id = i.delivery
+                         WHERE i.app_id = ? AND d.created_at >= ? ORDER BY d.created_at DESC, d.id DESC`).all(appId, since)) as unknown as AlertItemRow[];
   }
 
   // ---- ingest and Abigaail itself --------------------------------------------

@@ -3,15 +3,20 @@
 // The live run polls this every few seconds over a read-only connection; the
 // replay tests feed it after every simulated agent run.
 
-import type { Finding, Severity, StoreReader } from "@abigaail/store";
+import { isRed, type Finding, type Severity, type StoreReader } from "@abigaail/store";
 import { NEVER_ALLOWED, STARTUP_ALLOWED, type Expectation, type Scenario } from "./scenarios.js";
 
 const RANK: Record<Severity, number> = { info: 0, unknown: 1, warning: 2, critical: 3 };
 
-/** At least as severe, within the same family (info and unknown must match exactly). */
-function reaches(actual: Severity, expected: Severity): boolean {
-  if (expected === "info" || expected === "unknown") return actual === expected;
-  return RANK[actual] >= RANK[expected] && actual !== "unknown";
+/**
+ * At least as severe, within the same family (info and unknown must match
+ * exactly). A critical counts only once confirmed red (2 runs in a row at
+ * critical, isRed): that is when the app turns red and an alert goes out.
+ */
+function reaches(actual: Emission, expected: Severity): boolean {
+  if (expected === "info" || expected === "unknown") return actual.severity === expected;
+  if (expected === "critical") return isRed({ state: "open", severity: actual.severity, critical_streak: actual.critical_streak });
+  return RANK[actual.severity] >= RANK[expected] && actual.severity !== "unknown";
 }
 
 export interface Tracked {
@@ -46,6 +51,7 @@ export interface Emission {
   severity: Severity;
   summary: string;
   cause: string | null;
+  critical_streak: number;
 }
 
 interface Seen {
@@ -83,7 +89,7 @@ export class Tracker {
       let s = this.seen.get(f.id);
       if (!s) this.seen.set(f.id, (s = { finding: f, emissions: new Map() }));
       s.finding = f;
-      if (s.emissions.size < MAX_EMISSIONS) s.emissions.set(f.last_seen, { severity: f.severity, summary: f.summary, cause: f.cause });
+      if (s.emissions.size < MAX_EMISSIONS) s.emissions.set(f.last_seen, { severity: f.severity, summary: f.summary, cause: f.cause, critical_streak: f.critical_streak });
     }
   }
 
@@ -114,7 +120,7 @@ export class Tracker {
         .flatMap((s) => [...s.emissions].map(([at, e]) => ({ at, ...e })))
         .filter((e) => e.at >= item.startAt)
         .sort((a, b) => a.at - b.at);
-      const hit = emitted.find((e) => reaches(e.severity, exp.severity));
+      const hit = emitted.find((e) => reaches(e, exp.severity));
       if (!hit) {
         const other = emitted[0] ? ` (seen as ${emitted[0].severity})` : "";
         return now > showBy ? { ...base, status: "fail", detail: `not ${exp.severity} within ${mins(exp.showWithinMs)}${other}` } : { ...base, status: "waiting", detail: `waiting${other}` };

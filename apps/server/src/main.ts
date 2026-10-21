@@ -3,6 +3,9 @@
 import { existsSync } from "node:fs";
 import { openAuthStore, openStore } from "@abigaail/store";
 import { Runner } from "./agents/runner.js";
+import { Alerter } from "./alerts/alerter.js";
+import { makeChannels } from "./alerts/channels.js";
+import { Heartbeat } from "./alerts/heartbeat.js";
 import { loadConfig, type Config } from "./config.js";
 import { LIVE, LiveHub, startLive } from "./live.js";
 import { convertForShrinking, Retention } from "./retention.js";
@@ -37,8 +40,22 @@ if (existsSync(config.authDbPath)) {
 }
 // Runs whether or not the agents are on: data must age out either way.
 const retention = new Retention({ store, days: config.retention, authDbPath: config.authDbPath });
+// Alerts are sent from this process, so they work with the dashboard down (DECISIONS #11).
+const channels = makeChannels(config.alerts);
+try {
+  store.writeAlertChannels(channels.map((c) => ({ channel: c.name, label: c.label })));
+} catch {
+  log("alerts: could not record the configured channels");
+}
+const alerter = channels.length
+  ? new Alerter({ store, channels, ...(config.alerts.dashboardUrl ? { dashboardUrl: config.alerts.dashboardUrl } : {}) })
+  : undefined;
 const runner = config.agents
-  ? new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, retention: config.retention })
+  ? new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, retention: config.retention, alerts: !!alerter })
+  : undefined;
+const healthz = (): { ok: boolean; agents?: "off" } => (runner ? { ok: runner.watchdogFresh() } : { ok: true, agents: "off" });
+const heartbeat = config.alerts.heartbeatUrl
+  ? new Heartbeat({ url: config.alerts.heartbeatUrl, allowPrivate: !!config.alerts.heartbeatAllowPrivate, healthy: () => healthz().ok })
   : undefined;
 const hub = new LiveHub();
 
@@ -46,7 +63,7 @@ const server = createServer({
   store,
   salt,
   live: hub,
-  healthz: () => (runner ? { ok: runner.watchdogFresh() } : { ok: true, agents: "off" }),
+  healthz,
 });
 // Loopback only (LIVE.host); off, with one log line, without ABIGAAIL_LIVE_TOKEN.
 const live = await startLive({ hub, store, token: config.liveToken, port: config.livePort }).catch((err: unknown) => {
@@ -64,10 +81,16 @@ server.listen(config.port, config.host, () => {
   } else {
     console.log("[abigaail] agents are off (ABIGAAIL_AGENTS=off)");
   }
+  alerter?.start();
+  console.log(alerter ? `[abigaail] alerts: ${channels.map((c) => c.label).join("; ")}` : "[abigaail] alerts are off (no channel configured)");
+  heartbeat?.start();
+  if (heartbeat) console.log("[abigaail] heartbeat on (ABIGAAIL_HEARTBEAT_URL)");
 });
 
 function shutdown(): void {
   void runner?.stop();
+  alerter?.stop();
+  heartbeat?.stop();
   void retention.stop();
   live?.close();
   live?.closeAllConnections();

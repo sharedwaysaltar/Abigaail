@@ -191,6 +191,12 @@ export class Retention {
       this.drainScopes(this.store.retentionScopes("ingest_rejections"), (s) => this.store.deleteExpired("ingest_rejections", s, Math.floor(cut("ingest_rejections") / MINUTE_MS) * MINUTE_MS, this.batchRows), (n) => add("ingest_rejections", n)));
     await step("audit log", () =>
       this.drainScopes([...this.store.retentionScopes("audit_log"), null], (s) => this.store.deleteExpired("audit_log", s, cut("audit_log"), this.batchRows), (n) => add("audit_log", n)));
+    await step("alerts", async () => {
+      const before = cut("alerts");
+      const messages = await this.drain(() => this.store.deleteExpired("alert_deliveries", null, before, this.batchRows), (n) => add("alerts", n));
+      const states = await this.drainScopes([...this.store.retentionScopes("alert_state"), null], (s) => this.store.deleteExpired("alert_state", s, before, this.batchRows), (n) => add("alerts", n));
+      return messages || states;
+    });
     await step("agent runs", () => this.drain(() => this.store.deleteExpired("agent_runs", null, cut("agent_runs"), this.batchRows), (n) => add("agent_runs", n)));
     await step("db size samples", () => this.drain(() => this.store.deleteExpired("db_size_samples", null, cut("db_size_samples"), this.batchRows), (n) => add("db_size_samples", n)));
     await step("daily uniques", () => {

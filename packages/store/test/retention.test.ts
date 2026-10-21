@@ -176,6 +176,33 @@ describe("other tables", () => {
     expect(raw("SELECT count(*) AS n FROM findings")).toEqual([{ n: 1 }]);
   });
 
+  it("alerts: old messages go with their items, pending ones stay; only ok states that owe nothing expire", () => {
+    const a = store.createApp("a", "test").app.id;
+    const item = (fp: string) => ({ app_id: a, finding_id: 1, fingerprint: fp, change: "firing" as const });
+    const msg = (id: string, status: "pending" | "suppressed") => ({ delivery_id: id, channel: "webhook", kind: "alert" as const, payload: "{}", status, items: [item(id)] });
+    store.applyAlerts(
+      [
+        { app_id: a, fingerprint: "health:ok:", state: "ok", sent: "recovered", finding_id: 1, changed_at: NOW - 100 * DAY, fired_at: NOW - 100 * DAY, fired_summary: null, flaps: 0 },
+        { app_id: a, fingerprint: "health:firing:", state: "firing", sent: "firing", finding_id: 2, changed_at: NOW - 100 * DAY, fired_at: NOW - 100 * DAY, fired_summary: null, flaps: 0 },
+        { app_id: null, fingerprint: "watchdog:x:", state: "ok", sent: null, finding_id: 3, changed_at: NOW - 100 * DAY, fired_at: null, fired_summary: null, flaps: 0 },
+        { app_id: a, fingerprint: "health:recent:", state: "ok", sent: "recovered", finding_id: 4, changed_at: NOW - DAY, fired_at: NOW - DAY, fired_summary: null, flaps: 0 },
+      ],
+      [msg("old-done", "suppressed"), msg("old-pending", "pending"), msg("new", "suppressed")],
+    );
+    const db = new DatabaseSync(path);
+    db.prepare("UPDATE alert_deliveries SET created_at = ? WHERE delivery_id LIKE 'old-%'").run(NOW - 100 * DAY);
+    db.close();
+    const before = NOW - 90 * DAY;
+    expect(store.deleteExpired("alert_deliveries", null, before, 100)).toBe(1);
+    expect(raw("SELECT delivery_id FROM alert_deliveries ORDER BY id")).toEqual([{ delivery_id: "old-pending" }, { delivery_id: "new" }]);
+    // ON DELETE CASCADE: the message's items went with it.
+    expect(raw("SELECT fingerprint FROM alert_items ORDER BY rowid")).toEqual([{ fingerprint: "old-pending" }, { fingerprint: "new" }]);
+    expect(store.retentionScopes("alert_state")).toEqual([a]);
+    expect(store.deleteExpired("alert_state", a, before, 100)).toBe(1);
+    expect(store.deleteExpired("alert_state", null, before, 100)).toBe(1);
+    expect(raw("SELECT fingerprint FROM alert_state ORDER BY fingerprint")).toEqual([{ fingerprint: "health:firing:" }, { fingerprint: "health:recent:" }]);
+  });
+
   it("agent runs: old runs go, but each agent's newest ok run is kept", () => {
     const run = (agent: string, t: number, outcome: "ok" | "error") =>
       store.recordRun({ agent, started_at: t, finished_at: t, outcome, apps_ok: 0, apps_failed: 0 }, [], []);
@@ -237,7 +264,7 @@ describe("other tables", () => {
 });
 
 describe("every retention delete is scoped by app_id", () => {
-  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "audit_log"];
+  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "audit_log", "alert_state", "alert_items"];
   const src = readFileSync(fileURLToPath(new URL("../src/store.ts", import.meta.url)), "utf8");
   const deletes = [...src.matchAll(/`([^`]*)`|"((?:[^"\\]|\\.)*)"/g)]
     .map((m) => m[1] ?? m[2] ?? "")

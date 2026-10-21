@@ -12,6 +12,8 @@ export {
 export type { BaselineSource, Slots } from "./baseline.js";
 export {
   agentsView,
+  alertsByFinding,
+  alertsView,
   appRetention,
   appSummary,
   dependsOn,
@@ -31,6 +33,8 @@ export {
 } from "./views.js";
 export type {
   AgentView,
+  AlertsView,
+  DeliveryView,
   AppSummary,
   Dependency,
   EarlierItem,

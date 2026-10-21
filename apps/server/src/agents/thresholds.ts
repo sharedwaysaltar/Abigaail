@@ -171,6 +171,8 @@ export const RETENTION = {
     db_size_samples: { env: "DB_SIZE", days: 90, minDays: 2 },
     /** Admin audit logs of both databases. */
     audit_log: { env: "AUDIT", days: 400, minDays: 90 },
+    /** Alert messages (and which findings each carried) and alert states that owe nothing. */
+    alerts: { env: "ALERTS", days: 90, minDays: 7 },
   },
   maxDays: 3650,
   /** Rows per delete transaction: ingest waits at most one batch. */
@@ -195,5 +197,42 @@ export const RETENTION = {
 } as const;
 
 export type RetentionPeriod = keyof typeof RETENTION.periods;
+
+/**
+ * Alerts (DECISIONS #95-#99). Only confirmed red findings notify (isRed in
+ * the store); the alerter runs in the server's main thread and never waits
+ * on a channel.
+ */
+export const ALERTS = {
+  /** One sweep a minute, this long after the minute, when the agents' runs of that minute are done. */
+  sweepEveryMs: MINUTE,
+  sweepOffsetMs: 15_000,
+  /** At most one "firing" message per fingerprint in this long (same as the findings reopen cooldown). */
+  cooldownMs: FINDINGS.cooldownMs,
+  /** Findings listed in one message; the rest are counted ("and 4 more"). */
+  maxItems: 10,
+  /** Messages per channel per hour; past it, one "storm" message and the rest only on the dashboard. */
+  perChannelPerHour: 20,
+  /** Messages waiting per channel in memory; past it the oldest is given up. */
+  queueMax: 100,
+  webhookTimeoutMs: 10_000,
+  /** The whole SMTP conversation; nodemailer's own connect/greeting/socket timeouts are shorter. */
+  smtpTimeoutMs: 30_000,
+  /** Waits before each retry; after the last one the message is given up. */
+  retryDelaysMs: [30_000, MINUTE, 2 * MINUTE, 5 * MINUTE, 10 * MINUTE],
+  /** A message still pending at startup is resumed if younger than this, else given up. */
+  resumeMaxAgeMs: 30 * MINUTE,
+  /** Bytes of a receiver's answer that are read before the socket is closed. */
+  responseMaxBytes: 4096,
+  /** Watchdog: consecutive failed attempts on a channel before alert_delivery_failed. */
+  failingAttempts: 3,
+  /** Dead-man's switch: ping ABIGAAIL_HEARTBEAT_URL this often while /healthz is ok. */
+  heartbeatEveryMs: 5 * MINUTE,
+  heartbeatTimeoutMs: 10_000,
+  minSecretLength: 32,
+  maxRecipients: 5,
+  /** Discord rejects longer content. */
+  discordMaxChars: 2000,
+};
 /** Days kept per table, as loaded from the environment. */
 export type RetentionDays = Record<RetentionPeriod, number>;

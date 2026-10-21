@@ -80,7 +80,7 @@ export const SCENARIOS: readonly Scenario[] = [
       { at: 5 * MIN, action: { faults: { dependency: "ok" } } },
     ],
     faultMs: 5 * MIN,
-    expect: [{ fingerprint: health("dependency", "localhost"), severity: "critical", summary: ["localhost is failing", "so /checkout fails"], showWithinMs: 4 * MIN, resolveWithinMs: 21 * MIN }],
+    expect: [{ fingerprint: health("dependency", "localhost"), severity: "critical", summary: ["localhost is failing", "so /checkout fails"], showWithinMs: 5 * MIN, resolveWithinMs: 21 * MIN }],
   },
   {
     name: "slow-route",
@@ -91,7 +91,7 @@ export const SCENARIOS: readonly Scenario[] = [
       { at: 5 * MIN, action: { faults: { slowSearch: false } } },
     ],
     faultMs: 5 * MIN,
-    expect: [{ fingerprint: health("latency", "/search"), severity: "critical", summary: ["/search p95 is 1.2 s", "its usual"], showWithinMs: 3 * MIN, resolveWithinMs: 11 * MIN }],
+    expect: [{ fingerprint: health("latency", "/search"), severity: "critical", summary: ["/search p95 is 1.2 s", "its usual"], showWithinMs: 4 * MIN, resolveWithinMs: 11 * MIN }],
   },
   {
     name: "error-burst",

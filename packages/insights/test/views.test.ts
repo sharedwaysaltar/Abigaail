@@ -288,6 +288,18 @@ describe("findings, usage and agents views stay scoped by app", () => {
     expect(agentsView(store, [app], NOW + 10 * 60_000).find((r) => r.name === "watchdog")!.status).toBe("grey");
   });
 
+  it("the alerts row is grey and off with no channel configured, judged like the others with one", () => {
+    run("watchdog", [], [null]);
+    store.recordRun({ agent: "alerts", started_at: NOW - 30_000, finished_at: NOW - 30_000, outcome: "ok", apps_ok: 0, apps_failed: 0 }, [], []);
+    expect(agentsView(store, [app], NOW).find((r) => r.name === "alerts")).toMatchObject({ status: "grey", off: "off (no channel configured)" });
+    store.writeAlertChannels([{ channel: "webhook", label: "webhook (ntfy, ntfy.sh)" }]);
+    const row = agentsView(store, [app], NOW).find((r) => r.name === "alerts")!;
+    expect(row.status).toBe("green");
+    expect(row.off).toBeUndefined();
+    // Other agents are never "off".
+    expect(agentsView(store, [app], NOW).filter((r) => r.off).map((r) => r.name)).toEqual([]);
+  });
+
   it("SCHEDULE covers every registered agent with the same timings", () => {
     for (const a of AGENTS) expect(SCHEDULE[a.name as keyof typeof SCHEDULE]).toEqual({ everyMs: a.everyMs, timeoutMs: a.timeoutMs });
   });
@@ -301,7 +313,7 @@ describe("retention on the dashboard", () => {
     const job = new Retention({ store, days: { ...loadRetention({}), events: 14 }, now: () => NOW, log: () => {} });
     await job.runOnce();
     const rows = retentionView(store);
-    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "sessions"]);
+    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "alerts", "sessions"]);
     expect(rows[0]).toMatchObject({ keepDays: 14, lastRunAt: NOW, lastDeleted: 0 });
     expect(rows.at(-1)).toMatchObject({ name: "sessions", keepDays: 0 });
     expect(appRetention(store, app.id)).toEqual({ eventsDays: 14, rollupsDays: 400, oldestEvent: NOW - HOUR_MS });

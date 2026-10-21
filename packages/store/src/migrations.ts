@@ -221,6 +221,86 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE agent_runs ADD COLUMN behind INTEGER NOT NULL DEFAULT 0;
   `,
+  // 9: alerts. findings.critical_streak counts consecutive emissions at
+  // critical (red needs 2); open criticals start from their hits so no app
+  // changes colour at upgrade. alert_state is the persisted dedup per (app,
+  // fingerprint); alert_deliveries is the outbox, one row per message and
+  // channel (a message may group several apps, so it is a system table);
+  // alert_items says which findings of which app each message carried;
+  // alert_channels holds what the server has configured, as labels only.
+  `
+  ALTER TABLE findings ADD COLUMN critical_streak INTEGER NOT NULL DEFAULT 0;
+  UPDATE findings SET critical_streak = hits WHERE state = 'open' AND severity = 'critical';
+
+  CREATE TABLE alert_state (
+    -- NULL: a finding about Abigaail itself.
+    app_id      TEXT,
+    fingerprint TEXT NOT NULL,
+    -- 'firing' (red) or 'ok', as last judged.
+    state       TEXT NOT NULL,
+    -- The last message sent: 'firing', 'recovered' or NULL (none yet).
+    sent        TEXT,
+    finding_id  INTEGER,
+    changed_at  INTEGER NOT NULL,
+    fired_at    INTEGER,
+    -- State changes since the last message, reported with the next one.
+    flaps       INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE UNIQUE INDEX alert_state_key ON alert_state (coalesce(app_id, ''), fingerprint);
+  CREATE INDEX alert_state_app ON alert_state (app_id, state);
+
+  CREATE TABLE alert_deliveries (
+    id              INTEGER PRIMARY KEY,
+    -- Random id sent to the receiver, so it can drop a repeat.
+    delivery_id     TEXT NOT NULL UNIQUE,
+    channel         TEXT NOT NULL,
+    -- 'alert', 'storm' (the cap was reached) or 'test'.
+    kind            TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    -- The message (allowlisted finding fields only), kept so a restart can resume it.
+    payload         TEXT NOT NULL,
+    -- 'pending', 'delivered', 'gave_up' or 'suppressed' (over the cap, not sent).
+    status          TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER,
+    last_attempt_at INTEGER,
+    -- Error class and HTTP/SMTP status code only, never a message.
+    last_error      TEXT,
+    last_code       INTEGER,
+    finished_at     INTEGER
+  );
+  CREATE INDEX alert_deliveries_channel ON alert_deliveries (channel, created_at);
+  CREATE INDEX alert_deliveries_status ON alert_deliveries (status, channel);
+  CREATE INDEX alert_deliveries_created ON alert_deliveries (created_at);
+
+  CREATE TABLE alert_items (
+    delivery INTEGER NOT NULL REFERENCES alert_deliveries(id) ON DELETE CASCADE,
+    app_id      TEXT,
+    finding_id  INTEGER,
+    fingerprint TEXT NOT NULL,
+    -- 'firing' or 'recovered'.
+    change      TEXT NOT NULL
+  );
+  CREATE INDEX alert_items_app ON alert_items (app_id, finding_id);
+  CREATE INDEX alert_items_delivery ON alert_items (delivery);
+
+  CREATE TABLE alert_channels (
+    channel        TEXT PRIMARY KEY,
+    -- 'webhook (json, hooks.example.com)' or 'email to 2 recipients': never a URL path, secret or address.
+    label          TEXT NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    -- Consecutive failed attempts; the Watchdog's alert_delivery_failed reads it.
+    fail_streak    INTEGER NOT NULL DEFAULT 0,
+    last_ok_at     INTEGER,
+    last_failed_at INTEGER,
+    last_error     TEXT
+  );
+  `,
+  // 10: the finding's summary when its last "firing" message went out, so the
+  // recovery notice quotes what was wrong rather than the finding's last words.
+  `
+  ALTER TABLE alert_state ADD COLUMN fired_summary TEXT;
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

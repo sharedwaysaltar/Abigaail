@@ -222,6 +222,25 @@ describe("migrations", () => {
     expect(store.missingHours("a", 0, 3_600_000)).toEqual([0]);
   });
 
+  it("migration 9 keeps an app that was red red: open criticals start their streak from their hits", () => {
+    store.close();
+    const path = join(dir, "v8.db");
+    const v8 = new DatabaseSync(path);
+    for (const m of MIGRATIONS.slice(0, 8)) v8.exec(m);
+    v8.exec("PRAGMA user_version = 8");
+    v8.prepare("INSERT INTO apps (id, name, key_hash, created_at) VALUES ('a', 'a', 'h', 1)").run();
+    const add = v8.prepare(`INSERT INTO findings (app_id, agent, fingerprint, signal, severity, state, summary, action, evidence, hits, misses, first_seen, last_seen)
+                            VALUES ('a', 'health', ?, 's', ?, ?, 'x', 'y', '{}', ?, 0, 1, 1)`);
+    add.run("health:s:red", "critical", "open", 4);
+    add.run("health:s:warn", "warning", "open", 4);
+    add.run("health:s:old", "critical", "resolved", 4);
+    v8.close();
+    store = openStore(path);
+    const streaks = Object.fromEntries(store.findingHistory("a").map((f) => [f.fingerprint, f.critical_streak]));
+    expect(streaks).toEqual({ "health:s:red": 4, "health:s:warn": 0, "health:s:old": 0 });
+    expect(store.appStatus("a", { now: 1, freshMs: Infinity }).status).toBe("red");
+  });
+
   it("reopening an existing database does not re-run migrations or lose data", () => {
     const { app } = store.createApp("a", "test");
     store.insertBatch(app.id, batch([request()]));

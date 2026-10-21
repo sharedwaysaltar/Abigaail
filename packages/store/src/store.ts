@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AbigaailEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
-import { APP_COLUMNS, HOUR_MS, StoreReader, type App, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
+import { APP_COLUMNS, HOUR_MS, StoreReader, type AlertState, type App, type DeliveryStatus, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
 import { toRow, type Derived, type EventRow } from "./rows.js";
 import { checkpointTruncate, convertToIncremental, incrementalVacuum, type VacuumConversion } from "./vacuum.js";
 
@@ -72,20 +72,47 @@ export interface RecordRunOptions {
   reopenFrom?: number;
 }
 
+/** A message to queue: one channel, the findings it carries. */
+export interface DeliveryInput {
+  delivery_id: string;
+  channel: string;
+  kind: "alert" | "storm" | "test";
+  /** JSON of the message (allowlisted finding fields only). */
+  payload: string;
+  status: "pending" | "suppressed";
+  items: { app_id: string | null; finding_id: number | null; fingerprint: string; change: "firing" | "recovered" }[];
+}
+
+/** A queued message as the sender needs it. */
+export interface PendingDelivery {
+  id: number;
+  delivery_id: string;
+  channel: string;
+  kind: "alert" | "storm" | "test";
+  created_at: number;
+  payload: string;
+  attempts: number;
+  next_attempt_at: number | null;
+}
+
 const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "metric", "app"];
 const DAY_MS = 86_400_000;
 
 /** Tables with an app_id whose old rows retention deletes one app_id at a time. */
-export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log";
-const SCOPED_TABLES: readonly ScopedTable[] = ["events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log"];
+export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "alert_state";
+const SCOPED_TABLES: readonly ScopedTable[] = ["events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log", "alert_state"];
 
 /** What deleteExpired removes; events and rollups have their own methods (roll before delete, tables kept in step). */
-export type ExpiringTable = "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples";
+export type ExpiringTable =
+  | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples" | "alert_deliveries" | "alert_state";
 
 /**
  * One bounded batch per statement. App tables take (scope, cutoff, limit) or,
  * for app_id NULL rows, (cutoff, limit); system tables take (cutoff, limit).
  * Only resolved findings expire, and each agent's newest ok run is kept.
+ * Pending messages never expire (the sender gives them up); deleting a
+ * message deletes its alert_items (ON DELETE CASCADE). Only alert states
+ * that are ok and owe no message expire.
  */
 const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
   daily_uniques: {
@@ -116,6 +143,16 @@ const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
   },
   db_size_samples: {
     none: "DELETE FROM db_size_samples WHERE ts IN (SELECT ts FROM db_size_samples WHERE ts < ? ORDER BY ts LIMIT ?)",
+  },
+  alert_deliveries: {
+    none: `DELETE FROM alert_deliveries WHERE id IN (
+             SELECT id FROM alert_deliveries WHERE created_at < ? AND status <> 'pending' ORDER BY created_at LIMIT ?)`,
+  },
+  alert_state: {
+    app: `DELETE FROM alert_state WHERE app_id = ? AND rowid IN (
+            SELECT rowid FROM alert_state WHERE app_id = ? AND state = 'ok' AND (sent IS NULL OR sent = 'recovered') AND changed_at < ? LIMIT ?)`,
+    none: `DELETE FROM alert_state WHERE app_id IS NULL AND rowid IN (
+             SELECT rowid FROM alert_state WHERE app_id IS NULL AND state = 'ok' AND (sent IS NULL OR sent = 'recovered') AND changed_at < ? LIMIT ?)`,
   },
 };
 
@@ -334,15 +371,19 @@ export class Store extends StoreReader {
       const findRecent = this.db.prepare(`
         SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'resolved'
           AND resolved_at >= ? AND resolved_reason IS NULL ORDER BY resolved_at DESC, id DESC LIMIT 1`);
+      // critical_streak: consecutive emissions at critical. A miss neither counts nor
+      // breaks it (recovery needs 3 misses); an emission at any other severity resets it.
       const refresh = this.db.prepare(`
-        UPDATE findings SET state = 'open', resolved_at = NULL, resolved_reason = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
+        UPDATE findings SET
+          critical_streak = CASE WHEN ? <> 'critical' THEN 0 WHEN state = 'open' THEN critical_streak + 1 ELSE 1 END,
+          state = 'open', resolved_at = NULL, resolved_reason = NULL, hits = CASE WHEN state = 'open' THEN hits + 1 ELSE 1 END,
           misses = 0, signal = ?, severity = ?, summary = ?, cause = ?, action = ?, evidence = ?, resolves = ?,
           last_seen = ?
         WHERE id = ?`);
       const insert = this.db.prepare(`
         INSERT INTO findings (app_id, agent, fingerprint, signal, severity, state, summary, cause, action, evidence,
-                              resolves, hits, misses, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1, 0, ?, ?)`);
+                              resolves, hits, misses, critical_streak, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)`);
 
       for (const f of emitted.values()) {
         const scope = f.app_id ?? "";
@@ -353,10 +394,10 @@ export class Store extends StoreReader {
           | { id: number }
           | undefined;
         if (existing) {
-          refresh.run(f.signal, f.severity, f.summary, f.cause ?? null, f.action, evidence, resolves, now, existing.id);
+          refresh.run(f.severity, f.signal, f.severity, f.summary, f.cause ?? null, f.action, evidence, resolves, now, existing.id);
         } else {
           insert.run(f.app_id, f.agent, f.fingerprint, f.signal, f.severity, f.summary, f.cause ?? null, f.action,
-            evidence, resolves, now, now);
+            evidence, resolves, f.severity === "critical" ? 1 : 0, now, now);
         }
       }
 
@@ -570,6 +611,95 @@ export class Store extends StoreReader {
     const update = this.db.prepare("UPDATE retention_policy SET last_run_at = ?, last_deleted = ? WHERE name = ?");
     this.tx(() => {
       for (const [name, n] of Object.entries(deleted)) update.run(at, n, name);
+    });
+  }
+
+  // ---- alerts (DECISIONS #95, #99) -------------------------------------------
+
+  /** An admin action outside the app tables (actor "cli"), such as a test alert. */
+  auditAction(actor: string, action: string, detail?: Record<string, unknown>): void {
+    this.audit(actor, action, null, detail);
+  }
+
+  /** Record the configured channels (labels only); channels no longer configured are removed. */
+  writeAlertChannels(rows: readonly { channel: string; label: string }[]): void {
+    const upsert = this.db.prepare(`
+      INSERT INTO alert_channels (channel, label, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT (channel) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at`);
+    this.tx(() => {
+      const keep = new Set(rows.map((r) => r.channel));
+      for (const { channel } of this.alertChannels()) {
+        if (!keep.has(channel)) this.db.prepare("DELETE FROM alert_channels WHERE channel = ?").run(channel);
+      }
+      for (const r of rows) upsert.run(r.channel, r.label, this.now());
+    });
+  }
+
+  /**
+   * Apply one sweep in one transaction: the new alert states and the messages
+   * they cause. Written before anything is sent, so a restart never sends a
+   * message again. Returns the new deliveries' row ids, in order.
+   */
+  applyAlerts(states: readonly AlertState[], deliveries: readonly DeliveryInput[]): number[] {
+    const upsert = this.db.prepare(`
+      INSERT INTO alert_state (app_id, fingerprint, state, sent, finding_id, changed_at, fired_at, fired_summary, flaps)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (coalesce(app_id, ''), fingerprint) DO UPDATE SET state = excluded.state, sent = excluded.sent,
+        finding_id = excluded.finding_id, changed_at = excluded.changed_at, fired_at = excluded.fired_at,
+        fired_summary = excluded.fired_summary, flaps = excluded.flaps`);
+    const insert = this.db.prepare(`
+      INSERT INTO alert_deliveries (delivery_id, channel, kind, created_at, payload, status, next_attempt_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    const item = this.db.prepare("INSERT INTO alert_items (delivery, app_id, finding_id, fingerprint, change) VALUES (?, ?, ?, ?, ?)");
+    return this.tx(() => {
+      for (const s of states) upsert.run(s.app_id, s.fingerprint, s.state, s.sent, s.finding_id, s.changed_at, s.fired_at, s.fired_summary, s.flaps);
+      const ids: number[] = [];
+      const now = this.now();
+      for (const d of deliveries) {
+        const pending = d.status === "pending";
+        const id = Number(insert.run(d.delivery_id, d.channel, d.kind, now, d.payload, d.status, pending ? now : null, pending ? null : now).lastInsertRowid);
+        for (const i of d.items) item.run(id, i.app_id, i.finding_id, i.fingerprint, i.change);
+        ids.push(id);
+      }
+      return ids;
+    });
+  }
+
+  /**
+   * Queued messages of every channel, oldest first. Only the server's sender
+   * reads payloads (a message may group several apps; the dashboard reads
+   * status columns and alert_items by app_id).
+   */
+  pendingDeliveries(): PendingDelivery[] {
+    return this.db
+      .prepare(`SELECT id, delivery_id, channel, kind, created_at, payload, attempts, next_attempt_at FROM alert_deliveries
+                WHERE status = 'pending' ORDER BY created_at, id`)
+      .all() as unknown as PendingDelivery[];
+  }
+
+  /**
+   * Record one send attempt and the channel's failure streak together.
+   * `retryAt` keeps it pending; otherwise a failure gives it up. A message
+   * given up without an attempt (expired, queue full) passes attempted: false.
+   */
+  recordAttempt(id: number, channel: string, r: { ok: boolean; error?: string; code?: number; retryAt?: number; attempted?: boolean }): void {
+    const now = this.now();
+    const status: DeliveryStatus = r.ok ? "delivered" : r.retryAt !== undefined ? "pending" : "gave_up";
+    const attempted = r.attempted ?? true;
+    this.tx(() => {
+      this.db
+        .prepare(`UPDATE alert_deliveries SET status = ?, attempts = attempts + ?, last_attempt_at = CASE WHEN ? THEN ? ELSE last_attempt_at END,
+                    last_error = ?, last_code = ?, next_attempt_at = ?, finished_at = ? WHERE id = ?`)
+        .run(status, attempted ? 1 : 0, attempted ? 1 : 0, now, r.error ?? null, r.code ?? null, r.retryAt ?? null,
+          status === "pending" ? null : now, id);
+      if (!attempted) return;
+      if (r.ok) {
+        this.db.prepare("UPDATE alert_channels SET fail_streak = 0, last_ok_at = ? WHERE channel = ?").run(now, channel);
+      } else {
+        this.db
+          .prepare("UPDATE alert_channels SET fail_streak = fail_streak + 1, last_failed_at = ?, last_error = ? WHERE channel = ?")
+          .run(now, r.error ?? null, channel);
+      }
     });
   }
 
