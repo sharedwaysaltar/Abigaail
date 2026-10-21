@@ -3,7 +3,7 @@
 // the agents judge with (DECISIONS #42, #49). Where evidence is short they
 // return null with a reason; the dashboard shows that grey, never as healthy.
 
-import { HOUR_MS, type AgentRun, type App, type AppStatus, type Finding, type RunOutcome, type StatRow, type StoreReader } from "@abigaail/store";
+import { HOUR_MS, type AgentRun, type App, type AppStatus, type Finding, type RetentionName, type RunOutcome, type StatRow, type StoreReader } from "@abigaail/store";
 import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
 import { median, poissonCdf, poissonUpperTail } from "./stats.js";
 import { BASELINE, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
@@ -477,4 +477,47 @@ export function agentsView(store: StoreReader, apps: readonly App[], now: number
       open: openByAgent.get(name) ?? 0,
     };
   });
+}
+
+// ---- retention -----------------------------------------------------------------------------
+
+/** What each retention policy covers, in the order the dashboard lists them. */
+export const RETENTION_LABEL: Record<RetentionName, string> = {
+  events: "Raw events: requests, calls, errors, metrics, with the daily visitor ID",
+  rollups: "Hourly summaries (counts and percentiles; the baselines)",
+  daily_uniques: "Unique humans per day (counts only)",
+  findings: "Resolved findings",
+  agent_runs: "Agent runs",
+  ingest_rejections: "Refused ingest requests (counts per minute)",
+  db_size_samples: "Database size samples",
+  audit_log: "Admin and sign-in audit logs",
+  sessions: "Dashboard sessions",
+};
+
+export interface RetentionRow {
+  name: RetentionName;
+  label: string;
+  /** 0: deleted when it expires (sessions). */
+  keepDays: number;
+  lastRunAt: number | null;
+  lastDeleted: number | null;
+}
+
+/**
+ * The periods the server enforces, as it recorded them (the dashboard never
+ * reads the server's environment). Empty when the server has not recorded any yet.
+ */
+export function retentionView(store: StoreReader): RetentionRow[] {
+  const order = Object.keys(RETENTION_LABEL) as RetentionName[];
+  return store
+    .retentionPolicy()
+    .filter((p) => order.includes(p.name))
+    .sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name))
+    .map((p) => ({ name: p.name, label: RETENTION_LABEL[p.name], keepDays: p.keep_days, lastRunAt: p.last_run_at, lastDeleted: p.last_deleted }));
+}
+
+/** For one app's page: how long its raw events and summaries are kept, and its oldest stored event. */
+export function appRetention(store: StoreReader, appId: string): { eventsDays: number | null; rollupsDays: number | null; oldestEvent: number | null } {
+  const policy = new Map(store.retentionPolicy().map((p) => [p.name, p.keep_days]));
+  return { eventsDays: policy.get("events") ?? null, rollupsDays: policy.get("rollups") ?? null, oldestEvent: store.oldestEventTs(appId) ?? null };
 }

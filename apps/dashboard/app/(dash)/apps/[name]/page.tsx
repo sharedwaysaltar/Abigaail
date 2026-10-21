@@ -1,4 +1,4 @@
-import { appSummary, dependsOn, earlier, fourNumbers, responseSeries, routesThatChanged, usageNumbers, type RouteChange } from "@abigaail/insights";
+import { appRetention, appSummary, dependsOn, earlier, fourNumbers, responseSeries, routesThatChanged, usageNumbers, type RouteChange } from "@abigaail/insights";
 import { notFound } from "next/navigation";
 import { AppNav } from "@/components/AppNav";
 import { Figures } from "@/components/Figures";
@@ -36,6 +36,7 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
   const routes = routesThatChanged(r, app.id, now);
   const past = earlier(r, app.id, now);
   const usage = usageNumbers(r, app.id, now);
+  const kept = appRetention(r, app.id);
   const region = app.region ? regionInfo(app.region) : undefined;
   const top = s.top && s.top.severity !== "unknown" ? s.top : undefined;
   const hasPoints = series.some((p) => p.p95 !== null);
@@ -251,6 +252,14 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
           )}
         </section>
       </div>
+
+      {kept.eventsDays !== null ? (
+        <p className="small muted">
+          Raw events are deleted after {kept.eventsDays} days
+          {kept.oldestEvent !== null ? ` (oldest stored: ${when(kept.oldestEvent)})` : ""}.
+          {kept.rollupsDays !== null ? ` Hourly summaries are kept ${kept.rollupsDays} days.` : ""}
+        </p>
+      ) : null}
     </main>
   );
 }

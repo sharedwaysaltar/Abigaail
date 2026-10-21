@@ -2,10 +2,11 @@
 // Every change is written to the audit log with actor "cli".
 // `npm run events:tail -- <name> [n]` prints recent events (read-only, not audited).
 // `npm run findings -- <name>` prints the app's status and open findings.
-// `npm run agents:once` runs the rollup and every agent once, then prints findings.
+// `npm run agents:once` runs retention, the rollup and every agent once, then prints findings.
 
 import { openStore, type Finding } from "@abigaail/store";
 import { Runner } from "./agents/runner.js";
+import { Retention } from "./retention.js";
 import { FINDINGS } from "./agents/thresholds.js";
 import { loadConfig } from "./config.js";
 
@@ -92,7 +93,10 @@ async function main(): Promise<void> {
       break;
     }
     case "agents-once": {
-      const runner = new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, log: (m) => console.error(m) });
+      const retention = await new Retention({ store, days: config.retention, authDbPath: config.authDbPath, log: (m) => console.error(m) }).runOnce();
+      const total = Object.values(retention.deleted).reduce((a, b) => a + (b ?? 0), 0);
+      console.log(`retention: ${retention.outcome}${retention.error_class ? ` (${retention.error_class})` : ""}, ${total} row(s) deleted${retention.behind ? ", work left" : ""}`);
+      const runner = new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, retention: config.retention, log: (m) => console.error(m) });
       for (const { run, findings } of await runner.runOnce()) {
         const err = run.error_class ? ` (${run.error_class})` : "";
         console.log(`${run.agent}: ${run.outcome}${err}, ${findings} finding(s), ${run.finished_at - run.started_at} ms`);

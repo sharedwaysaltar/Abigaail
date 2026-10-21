@@ -3,15 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AGENTS } from "@abigaail/server";
+import { AGENTS, Retention, loadRetention } from "@abigaail/server";
 import {
   agentsView,
+  appRetention,
   appSummary,
   EVAL_LAG_MS,
   findingsFor,
   fourNumbers,
   headline,
   responseSeries,
+  retentionView,
   routesThatChanged,
   SCHEDULE,
   servers,
@@ -288,5 +290,23 @@ describe("findings, usage and agents views stay scoped by app", () => {
 
   it("SCHEDULE covers every registered agent with the same timings", () => {
     for (const a of AGENTS) expect(SCHEDULE[a.name as keyof typeof SCHEDULE]).toEqual({ everyMs: a.everyMs, timeoutMs: a.timeoutMs });
+  });
+});
+
+describe("retention on the dashboard", () => {
+  it("shows what the server recorded, in a fixed order; nothing before the server ran", async () => {
+    expect(retentionView(store)).toEqual([]);
+    expect(appRetention(store, app.id)).toEqual({ eventsDays: null, rollupsDays: null, oldestEvent: null });
+    requests(NOW - HOUR_MS, HOUR_MS, 3);
+    const job = new Retention({ store, days: { ...loadRetention({}), events: 14 }, now: () => NOW, log: () => {} });
+    await job.runOnce();
+    const rows = retentionView(store);
+    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "sessions"]);
+    expect(rows[0]).toMatchObject({ keepDays: 14, lastRunAt: NOW, lastDeleted: 0 });
+    expect(rows.at(-1)).toMatchObject({ name: "sessions", keepDays: 0 });
+    expect(appRetention(store, app.id)).toEqual({ eventsDays: 14, rollupsDays: 400, oldestEvent: NOW - HOUR_MS });
+    // Retention is scheduled like the rollup, so the Agents page and the Watchdog know it.
+    expect(SCHEDULE.retention).toEqual({ everyMs: HOUR_MS });
+    expect(agentsView(store, [app], NOW).find((a) => a.name === "retention")).toMatchObject({ schedule: { everyMs: HOUR_MS } });
   });
 });

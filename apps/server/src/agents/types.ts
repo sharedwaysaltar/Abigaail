@@ -2,6 +2,7 @@
 // they read the store, including other agents' findings, and return findings.
 
 import type { App, Severity, StoreReader } from "@abigaail/store";
+import type { RetentionDays } from "./thresholds.js";
 
 /** An agent's schedule, as the runner and the Watchdog see it. */
 export interface AgentSchedule {
@@ -22,6 +23,8 @@ export interface AgentConfig {
   runnerStartedAt: number;
   /** When any agent last finished before this start: the end of Abigaail's last up period. */
   lastRunBeforeStart: number | null;
+  /** Retention periods being enforced, so the Watchdog can tell when data outlives them. */
+  retention?: RetentionDays;
 }
 
 export interface AgentContext {

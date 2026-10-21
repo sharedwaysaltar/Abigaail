@@ -12,6 +12,7 @@ export {
 export type { BaselineSource, Slots } from "./baseline.js";
 export {
   agentsView,
+  appRetention,
   appSummary,
   dependsOn,
   earlier,
@@ -19,6 +20,8 @@ export {
   fourNumbers,
   headline,
   responseSeries,
+  RETENTION_LABEL,
+  retentionView,
   routesThatChanged,
   servers,
   systemFindingsView,
@@ -36,6 +39,7 @@ export type {
   PointState,
   Reason,
   RegionInfo,
+  RetentionRow,
   RouteChange,
   SeriesPoint,
   Server,

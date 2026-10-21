@@ -1,3 +1,5 @@
+import { RETENTION, type RetentionDays, type RetentionPeriod } from "./agents/thresholds.js";
+
 /** Server configuration from the environment. Keys and secrets never live in the repo. */
 export interface Config {
   dbPath: string;
@@ -13,6 +15,8 @@ export interface Config {
   livePort: number;
   /** Bearer token the dashboard sends to the live feed. Empty: the Live view is off. */
   liveToken: string;
+  /** Days kept per table (ABIGAAIL_RETAIN_*_DAYS). */
+  retention: RetentionDays;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -29,5 +33,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authDbPath: env.ABIGAAIL_AUTH_DB_PATH || "./data/auth.db",
     livePort,
     liveToken: env.ABIGAAIL_LIVE_TOKEN ?? "",
+    retention: loadRetention(env),
   };
+}
+
+/**
+ * Retention periods from ABIGAAIL_RETAIN_<NAME>_DAYS. A value that is not a
+ * whole number of days, is below its minimum or above RETENTION.maxDays throws,
+ * so the server does not start: clamping would hide a misconfiguration.
+ */
+export function loadRetention(env: NodeJS.ProcessEnv = process.env): RetentionDays {
+  const out = {} as RetentionDays;
+  for (const [name, p] of Object.entries(RETENTION.periods) as [RetentionPeriod, (typeof RETENTION.periods)[RetentionPeriod]][]) {
+    const key = `ABIGAAIL_RETAIN_${p.env}_DAYS`;
+    const raw = env[key]?.trim();
+    if (!raw) {
+      out[name] = p.days;
+      continue;
+    }
+    if (!/^\d{1,5}$/.test(raw)) throw new Error(`${key} must be a whole number of days (at least ${p.minDays})`);
+    const days = Number(raw);
+    if (days < p.minDays) throw new Error(`${key}=${days} is below the minimum of ${p.minDays} days`);
+    if (days > RETENTION.maxDays) throw new Error(`${key}=${days} is above the maximum of ${RETENTION.maxDays} days`);
+    out[name] = days;
+  }
+  return out;
 }

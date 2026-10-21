@@ -1,8 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Runner, thresholds, type RunnerOptions } from "@abigaail/server";
+import { loadRetention, Runner, thresholds, type RunnerOptions } from "@abigaail/server";
 import { HOUR_MS, openStore, type Store } from "@abigaail/store";
 
 const fixture = (name: string) => new URL(`./fixtures/${name}.mjs`, import.meta.url);
@@ -204,5 +205,23 @@ describe("rollup maintenance", () => {
     expect(store.hourly(app.id, "route", [sixAgo])).toMatchObject([{ key: "/x", n: 1 }]);
     expect(store.recentRuns("rollup")[0]).toMatchObject({ outcome: "ok" });
     expect(store.dbSizeSamples(0)).toHaveLength(1);
+  });
+});
+
+describe("backfill and retention", () => {
+  it("never backfills hours whose raw events are past the retention period", async () => {
+    const now = Date.UTC(2026, 9, 20, 12, 30);
+    const { app } = store.createApp("a", "test");
+    // An app created 40 days ago that has never been rolled up.
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE apps SET created_at = ? WHERE id = ?").run(now - 40 * 86_400_000, app.id);
+    db.close();
+    const r = makeRunner({}, { now: () => now, retention: { ...loadRetention({}), events: 7 } });
+    await r.runOnce();
+    const DAY = 86_400_000;
+    const floor = Math.ceil((now - 7 * DAY) / HOUR_MS) * HOUR_MS;
+    expect(store.missingHours(app.id, floor, now - 4 * HOUR_MS)).toEqual([]);
+    // Older hours stay unrolled: retention rolls each one up itself just before deleting it.
+    expect(store.missingHours(app.id, now - 28 * DAY, floor)).toHaveLength((floor - Math.ceil((now - 28 * DAY) / HOUR_MS) * HOUR_MS) / HOUR_MS);
   });
 });

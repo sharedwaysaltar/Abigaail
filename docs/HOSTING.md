@@ -7,6 +7,14 @@ decided later (see DECISIONS #2); this list grows as chunks land.
       `salt.bin`) and swap. Overwriting the salt in place cannot reach SSD
       wear-levelling copies or filesystem journal / copy-on-write remnants
       (DECISIONS #24); encryption at rest is what covers those.
+- [ ] **Backups must not outlive retention.** Abigaail deletes raw events after
+      `ABIGAAIL_RETAIN_EVENTS_DAYS` (default 30) and erases them from the database file
+      (DECISIONS #89); a backup kept longer still holds them. Keep backups of `data/` for at
+      most that many days.
+- [ ] **Free disk of at least 2.2 × the database once**, at the first start after upgrading to
+      chunk 7: the server converts the file to incremental vacuum (a one-time VACUUM, temp copy
+      in `data/`). Without the room it skips this, keeps running and reports `vacuum_pending`;
+      deleted data is still erased, but the file cannot shrink until a restart with room.
 - [ ] **Exclude `data/salt.bin` from backups.** It is a one-day secret; restoring an
       old one would let that day's visitor hashes be recomputed. A lost salt only
       means a new one is generated.

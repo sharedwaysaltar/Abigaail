@@ -13,8 +13,8 @@ under GDPR, so the data is *pseudonymous*, not anonymous.
 No third-party service is involved.
 
 > Status: under construction, built in small chunks. Today: Node and Next.js apps,
-> the Usage, Health and Watchdog agents, and a dashboard. Automatic deletion of old
-> data (retention), alert delivery and more agents are planned, not built yet. See
+> the Usage, Health and Watchdog agents, a dashboard, and automatic deletion of old
+> data (retention). Alert delivery and more agents are planned, not built yet. See
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Contents
@@ -230,9 +230,25 @@ IDs, cookies, tokens, authorization headers, request or response bodies, form in
 query-string values, error messages, or any other free text. The server checks every
 event against an allowlist and refuses a whole batch if anything else is in it.
 
-**How long it is kept:** until you delete it. Automatic deletion of old data is
-planned, not built yet. The visitor-ID secret is the exception: it is replaced at
-midnight UTC and the old one is erased.
+**How long it is kept:** the server deletes old data every hour (every 5 minutes while
+it catches up). Deleted rows are overwritten and removed from the database file, not just
+hidden. The defaults, each changeable on the server within a safe minimum:
+
+| What | Kept | Setting (days) | Minimum |
+|---|---|---|---|
+| Raw events (requests, calls, errors, metrics, with the daily visitor ID) | 30 days | `ABIGAAIL_RETAIN_EVENTS_DAYS` | 7 |
+| Hourly summaries (counts and percentiles, used as baselines) | 400 days | `ABIGAAIL_RETAIN_ROLLUPS_DAYS` | 35 |
+| Unique humans per day (counts only) | 400 days | `ABIGAAIL_RETAIN_DAILY_DAYS` | 35 |
+| Resolved findings (open ones are kept) | 180 days | `ABIGAAIL_RETAIN_FINDINGS_DAYS` | 30 |
+| Agent runs | 30 days | `ABIGAAIL_RETAIN_AGENT_RUNS_DAYS` | 7 |
+| Refused ingest requests (counts) | 30 days | `ABIGAAIL_RETAIN_REJECTIONS_DAYS` | 1 |
+| Database size samples | 90 days | `ABIGAAIL_RETAIN_DB_SIZE_DAYS` | 2 |
+| Admin and sign-in audit logs | 400 days | `ABIGAAIL_RETAIN_AUDIT_DAYS` | 90 |
+| Dashboard sessions | until they expire (2 h idle, 12 h at most) | none | |
+
+Apps and their release names are kept. The visitor-ID secret is replaced at midnight UTC
+and the old one is erased. The dashboard's **Agents** page lists the periods in force
+under "Data kept", and each app's page shows its oldest stored event.
 
 Bots (crawlers, AI crawlers, scripts such as `curl`) and scanner probes are recorded but
 counted separately: they never affect an app's health status.
@@ -277,8 +293,9 @@ events are dropped from a small fixed-size queue and the SDK retries later.
 
 ## 7. A privacy-notice snippet
 
-Adapt this for your privacy notice. Fill in the brackets, and only state a retention
-period you actually enforce: Abigaail does not delete old data automatically yet.
+Adapt this for your privacy notice. Fill in the brackets. The periods below are the
+defaults: if you change `ABIGAAIL_RETAIN_EVENTS_DAYS` or `ABIGAAIL_RETAIN_ROLLUPS_DAYS`,
+change the snippet to match (the Agents page shows what is enforced).
 
 > We monitor this service with Abigaail, a monitoring tool we host ourselves. For each
 > request it records technical information: the page or API route, the response status
@@ -289,7 +306,8 @@ period you actually enforce: Abigaail does not delete old data automatically yet
 > changes every day, so your visits cannot be linked from one day to the next. It is
 > still personal data. We do not set cookies for this. The data stays on our own server
 > and is not shared with anyone. We use it to keep the service working and secure
-> (legitimate interest). We keep it for [period]. Contact [contact] with questions or to
+> (legitimate interest). We keep the detailed records for 30 days and only summary counts,
+> which contain no identifier, for 13 months. Contact [contact] with questions or to
 > exercise your rights.
 
 ## 8. Try it without your own app
@@ -336,7 +354,7 @@ in `apps/dashboard/.env` (and the same `ABIGAAIL_LIVE_TOKEN` for both, for the L
 | `npm run app:list` | Apps, their state and last event |
 | `npm run events:tail -- <name> [n]` | An app's latest events |
 | `npm run findings -- <name>` | An app's status and open findings |
-| `npm run agents:once` | Run every agent once now and print the findings |
+| `npm run agents:once` | Run retention, the rollup and every agent once now and print the findings |
 | `npm run dashboard` | Build and start the dashboard on http://localhost:4319 |
 | `npm run user:create -- <name>` | Create a dashboard user (also `user:disable`, `user:reset-mfa`, `user:unlock`) |
 | `npm run sim -- <command>` | The bad-traffic simulator (section 8) |
@@ -349,7 +367,9 @@ in `apps/dashboard/.env` (and the same `ABIGAAIL_LIVE_TOKEN` for both, for the L
 `127.0.0.1` only, port `ABIGAAIL_LIVE_PORT` (default `4320`), and only when
 `ABIGAAIL_LIVE_TOKEN` is set (`openssl rand -base64 32`; the dashboard needs the same value).
 `GET /healthz` answers 503 when the agents have stalled: point an external uptime check
-at it. Before hosting anywhere, go through [docs/HOSTING.md](docs/HOSTING.md).
+at it. Retention periods are the `ABIGAAIL_RETAIN_*_DAYS` settings in section 4; a value
+that is not a whole number, is below its minimum or above 3650 stops the server from
+starting. Before hosting anywhere, go through [docs/HOSTING.md](docs/HOSTING.md).
 
 ### What the SDK guarantees
 

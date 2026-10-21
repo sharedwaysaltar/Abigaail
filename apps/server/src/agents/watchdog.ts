@@ -10,10 +10,10 @@
 
 import { statfsSync, statSync } from "node:fs";
 import { dirname } from "node:path";
-import type { App } from "@abigaail/store";
+import { AUTO_VACUUM_INCREMENTAL, VACUUM_SPACE_FACTOR, type App } from "@abigaail/store";
 import { errorClass } from "./evaluate.js";
 import { humanDuration, median } from "@abigaail/insights";
-import { SCHEDULE, WATCHDOG as W } from "./thresholds.js";
+import { RETENTION, SCHEDULE, WATCHDOG as W } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 
 const DAY_MS = 86_400_000;
@@ -222,7 +222,7 @@ function database(ctx: AgentContext): AgentFinding[] {
     subject: "",
     severity: daysLeft < W.diskCriticalDays ? "critical" : "warning",
     summary: `Abigaail's disk fills in about ${daysLeft.toFixed(1)} days: the database grows ${(perDay / GIB).toFixed(2)} GiB a day and ${(free / GIB).toFixed(1)} GiB is free.`,
-    action: "Free disk space or add storage; retention and rollups (Phase 4) will cap growth.",
+    action: "Free disk space or add storage, or shorten the retention periods (ABIGAAIL_RETAIN_*_DAYS, within their minimums).",
     evidence: { ...evidence, days_left: Math.round(daysLeft * 10) / 10 },
   }];
 }
@@ -250,6 +250,71 @@ function salt(ctx: AgentContext): AgentFinding[] {
     cause: "Rotation failed, so new events get no visitor hash and yesterday's salt may still exist.",
     action: "Check the server log and that the salt file is writable by the server (see DECISIONS #24).",
     evidence: { last_rotated_at: mtime ?? null, utc_midnight: midnight },
+  }];
+}
+
+/**
+ * Retention kept its promise: no app's raw events (the pseudonymous data) and
+ * no resolved findings outlive their period by more than RETENTION.behindWarnMs.
+ * Catches a job that runs "ok" but deletes nothing; a job that stops or fails
+ * shows up as agent_stalled / agent_failing for "retention".
+ *
+ * Judged only once a retention run that started since the runner started has
+ * finished: at startup after a lowered period or downtime, old data is
+ * expected until the job's first run. While its latest run reports work left
+ * (catching up), it is a warning at most, until behindCriticalMs after that
+ * first run finished.
+ */
+function retention(ctx: AgentContext): AgentFinding[] {
+  const days = ctx.config.retention;
+  if (!days) return [];
+  const runs = ctx.store.runsSince("retention", ctx.config.runnerStartedAt);
+  if (!runs) return [];
+  const catchingUp = runs.latestBehind && ctx.now - runs.firstFinishedAt <= RETENTION.behindCriticalMs;
+  const out: AgentFinding[] = [];
+  const check = (subject: string, what: string, oldest: number | undefined, keepDays: number, setting: string) => {
+    if (oldest === undefined) return;
+    const over = ctx.now - keepDays * DAY_MS - oldest;
+    if (over <= RETENTION.behindWarnMs) return;
+    out.push({
+      signal: "retention_behind",
+      subject,
+      severity: over > RETENTION.behindCriticalMs && !catchingUp ? "critical" : "warning",
+      summary: `${what} older than ${keepDays} days are still stored: the oldest is ${((ctx.now - oldest) / DAY_MS).toFixed(1)} days old, so the retention period is not being kept.`,
+      cause: "The retention job is failing, falling behind or not deleting.",
+      action: `Check the server log for "retention" lines and the retention job on the Agents page; the period is ${setting}.`,
+      evidence: { oldest_at: oldest, keep_days: keepDays, over_ms: over, catching_up: catchingUp },
+      fact: true,
+    });
+  };
+  for (const app of ctx.apps) {
+    check(`events:${app.name}`, `Raw events of ${app.name}`, ctx.store.oldestEventTs(app.id), days.events, "ABIGAAIL_RETAIN_EVENTS_DAYS");
+    check(`findings:${app.name}`, `Resolved findings of ${app.name}`, ctx.store.oldestResolvedAt(app.id), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
+  }
+  check("findings:", "Resolved findings about Abigaail itself", ctx.store.oldestResolvedAt(null), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
+  return out;
+}
+
+/**
+ * The database file could not be switched to incremental vacuum for lack of
+ * disk (retention.ts, convertForShrinking): deleted data is erased, but freed
+ * pages stay in the file, so it cannot shrink. Retried at every start.
+ */
+function vacuum(ctx: AgentContext): AgentFinding[] {
+  if (ctx.store.autoVacuum() === AUTO_VACUUM_INCREMENTAL) return [];
+  const bytes = ctx.store.dbBytes();
+  const fs = statfsSync(dirname(ctx.config.dbPath));
+  const free = fs.bavail * fs.bsize;
+  const need = Math.ceil(VACUUM_SPACE_FACTOR * bytes);
+  return [{
+    signal: "vacuum_pending",
+    subject: "",
+    severity: "info",
+    summary: `Abigaail's database file cannot shrink yet: switching it to incremental vacuum needs about ${(need / GIB).toFixed(2)} GiB free, and ${(free / GIB).toFixed(2)} GiB is free. Deleted data is still erased.`,
+    cause: "The one-time conversion at startup was skipped because there was not enough free disk.",
+    action: "Free disk space, then restart Abigaail; the conversion runs at startup.",
+    evidence: { db_bytes: bytes, free_bytes: free, need_bytes: need, auto_vacuum: ctx.store.autoVacuum() },
+    fact: true,
   }];
 }
 
@@ -296,5 +361,7 @@ export const watchdog: Agent = {
     ...guarded(ctx, "disk", database),
     ...guarded(ctx, "salt", salt),
     ...guarded(ctx, "ingest keys", unknownKeys),
+    ...guarded(ctx, "retention", retention),
+    ...guarded(ctx, "vacuum", vacuum),
   ],
 };

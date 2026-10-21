@@ -4,6 +4,7 @@
 // and are read through systemFindings() only.
 
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import { autoVacuumMode, freelistCount } from "./vacuum.js";
 
 export interface App {
   id: string;
@@ -120,6 +121,20 @@ export interface HourlyStat extends StatRow {
 }
 
 export const HOUR_MS = 3_600_000;
+
+/** What retention deletes, by policy name (DECISIONS #87). "rollups" = hourly_route_stats + rollup_hours. */
+export type RetentionName =
+  | "events" | "rollups" | "daily_uniques" | "findings" | "agent_runs" | "ingest_rejections" | "db_size_samples" | "audit_log" | "sessions";
+
+export interface RetentionPolicyRow {
+  name: RetentionName;
+  /** 0: deleted as soon as it expires by its own rule (sessions). */
+  keep_days: number;
+  min_days: number;
+  updated_at: number;
+  last_run_at: number | null;
+  last_deleted: number | null;
+}
 
 /**
  * Traffic that matters (DECISIONS #37): not a known crawler or automation
@@ -249,6 +264,12 @@ export class StoreReader {
       .prepare("SELECT release FROM events WHERE app_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1")
       .get(appId, ts) as { release: string } | undefined;
     return row?.release;
+  }
+
+  /** Time of the app's oldest stored raw event, if any. */
+  oldestEventTs(appId: string): number | undefined {
+    const row = this.db.prepare("SELECT min(ts) AS t FROM events WHERE app_id = ?").get(appId) as { t: number | null };
+    return row.t ?? undefined;
   }
 
   /** The latest boot, if any: when the running process started. */
@@ -503,6 +524,22 @@ export class StoreReader {
     return row.t ?? undefined;
   }
 
+  /**
+   * For a maintenance job (retention): when its first run that started at or
+   * after `since` finished, and whether its latest run ended with work left.
+   * Undefined until such a run has finished.
+   */
+  runsSince(agent: string, since: number): { firstFinishedAt: number; latestBehind: boolean } | undefined {
+    const first = this.db
+      .prepare("SELECT finished_at FROM agent_runs WHERE agent = ? AND started_at >= ? ORDER BY started_at, id LIMIT 1")
+      .get(agent, since) as { finished_at: number } | undefined;
+    if (!first) return undefined;
+    const latest = this.db
+      .prepare("SELECT behind FROM agent_runs WHERE agent = ? AND outcome <> 'skipped' ORDER BY started_at DESC, id DESC LIMIT 1")
+      .get(agent) as { behind: number } | undefined;
+    return { firstFinishedAt: first.finished_at, latestBehind: Number(latest?.behind ?? 0) !== 0 };
+  }
+
   /** Finish time of the agent's last successful run. */
   lastOkRun(agent: string): number | undefined {
     const row = this.db
@@ -528,7 +565,32 @@ export class StoreReader {
     return { status: "green", findings: open };
   }
 
+  /** When the oldest resolved finding of an app (null: of Abigaail itself) was resolved. */
+  oldestResolvedAt(appId: string | null): number | undefined {
+    const row = (appId === null
+      ? this.db.prepare("SELECT min(resolved_at) AS t FROM findings WHERE app_id IS NULL AND state = 'resolved'").get()
+      : this.db.prepare("SELECT min(resolved_at) AS t FROM findings WHERE app_id = ? AND state = 'resolved'").get(appId)) as { t: number | null };
+    return row.t ?? undefined;
+  }
+
   // ---- ingest and Abigaail itself --------------------------------------------
+
+  /** The retention periods the server enforces, and its last run (written by the server only). */
+  retentionPolicy(): RetentionPolicyRow[] {
+    return this.db
+      .prepare("SELECT name, keep_days, min_days, updated_at, last_run_at, last_deleted FROM retention_policy ORDER BY name")
+      .all() as unknown as RetentionPolicyRow[];
+  }
+
+  /** PRAGMA auto_vacuum: 2 when freed pages can be returned to the filesystem (incremental). */
+  autoVacuum(): number {
+    return autoVacuumMode(this.db);
+  }
+
+  /** Pages freed by deletes but still part of the file. */
+  freePages(): number {
+    return freelistCount(this.db);
+  }
 
   /** Ingest refusals per status since `since`. appId '' = requests with an unknown key. */
   ingestRejections(appId: string, since: number): { status: number; n: number }[] {

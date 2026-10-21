@@ -36,6 +36,8 @@ export const SCHEDULE = {
   usage: { everyMs: 15 * 60_000, timeoutMs: 60_000 },
   /** Not an agent: the hourly rollup runs in the main thread. */
   rollup: { everyMs: 3_600_000 },
+  /** Not an agent: retention runs hourly in the main thread (every 5 min while catching up). */
+  retention: { everyMs: 3_600_000 },
 } as const;
 
 /** Status turns grey when Health has not completed a run for this long. */
