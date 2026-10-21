@@ -296,6 +296,11 @@ export const MIGRATIONS: readonly string[] = [
     last_error     TEXT
   );
   `,
+  // 10: the finding's summary when its last "firing" message went out, so the
+  // recovery notice quotes what was wrong rather than the finding's last words.
+  `
+  ALTER TABLE alert_state ADD COLUMN fired_summary TEXT;
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

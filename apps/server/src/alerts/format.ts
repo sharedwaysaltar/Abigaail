@@ -14,6 +14,7 @@ export interface AlertItem {
   change: "firing" | "recovered";
   severity: Severity;
   signal: string;
+  /** Firing: the finding's summary now. Recovered: its summary when the alert went red (what was wrong). */
   summary: string;
   cause: string | null;
   action: string;
@@ -52,13 +53,18 @@ export function findingLink(base: URL | undefined, app: string | null, f: Pick<F
   return `${base.origin}${base.pathname.replace(/\/+$/, "")}/findings${q ? `?${q}` : ""}#finding-${f.id}`;
 }
 
-export function itemFrom(f: Finding, app: string, change: AlertItem["change"], o: { flaps: number; notObserved?: boolean; link: string | null }): AlertItem {
+export function itemFrom(
+  f: Finding,
+  app: string,
+  change: AlertItem["change"],
+  o: { flaps: number; notObserved?: boolean; link: string | null; summary?: string },
+): AlertItem {
   return {
     app,
     change,
     severity: f.severity,
     signal: f.signal,
-    summary: f.summary,
+    summary: o.summary ?? f.summary,
     cause: f.cause,
     action: f.action,
     first_seen: f.first_seen,
@@ -81,8 +87,8 @@ function itemLines(i: AlertItem): string[] {
   const head = i.change === "firing"
     ? `🔴 ${i.app}: ${i.summary}`
     : i.not_observed
-      ? `✅ ${i.app}: no longer seen after Abigaail restarted: ${i.summary}`
-      : `✅ ${i.app}: resolved${i.resolved_at !== null ? ` after ${lasted(i.resolved_at - i.first_seen)}` : ""}: ${i.summary}`;
+      ? `✅ ${i.app}: no longer seen after Abigaail restarted (was: ${i.summary})`
+      : `✅ ${i.app}: resolved${i.resolved_at !== null ? ` after ${lasted(i.resolved_at - i.first_seen)}` : ""} (was: ${i.summary})`;
   const out = [head];
   if (i.change === "firing") {
     if (i.cause) out.push(`Likely cause: ${i.cause}`);
@@ -109,7 +115,7 @@ function headline(m: AlertMessage): string {
 export function subject(m: AlertMessage): string {
   const one = m.items.length === 1 && !m.more ? m.items[0]! : undefined;
   const s = one && m.kind === "alert"
-    ? `Abigaail: ${one.change === "firing" ? "RED" : "resolved"} · ${one.app}: ${one.summary}`
+    ? one.change === "firing" ? `Abigaail: RED · ${one.app}: ${one.summary}` : `Abigaail: resolved · ${one.app} (was: ${one.summary})`
     : headline(m);
   return s.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200);
 }

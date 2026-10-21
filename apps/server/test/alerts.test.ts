@@ -109,9 +109,34 @@ describe("when an alert is sent", () => {
     expect(store.openFindings(appId)).toEqual([]);
     expect(sent.map((m) => m.items[0]!.change)).toEqual(["firing", "recovered"]);
     // First seen at minute 1, resolved at minute 7 (third run without it).
-    expect(text(sent[1]!)).toContain("shop: resolved after 6 min");
+    expect(text(sent[1]!)).toContain("shop: resolved after 6 min (was: server_errors /checkout summary");
     for (let i = 0; i < 3; i++) await minute(a, []);
     expect(sent).toHaveLength(2);
+  });
+
+  it("the recovery quotes the summary from when it went red, as past, in every format, also after a restart", async () => {
+    const { channel, sent } = recordingChannel("webhook");
+    const a = alerter([channel]);
+    const was = "localhost is failing: 63 of 63 calls in 5 min ended in an error, timeout or 5xx, so /checkout fails.";
+    const later = "localhost is failing: 27 of 27 calls in 15 min ended in an error, timeout or 5xx.";
+    await minute(a, [{ ...red(), summary: was }]);
+    await minute(a, [{ ...red(), summary: was }]);
+    await minute(a, [{ ...red(), summary: later }]);
+    a.stop();
+    // The recovery comes from a restarted alerter: the red-time summary is persisted.
+    const b = alerter([channel]);
+    for (let i = 0; i < 3; i++) await minute(b, []);
+    const m = sent[1]!;
+    expect(m.items[0]).toMatchObject({ change: "recovered", summary: was });
+    expect(text(m)).toContain(`✅ shop: resolved after 5 min (was: ${was})`);
+    expect(subject(m)).toBe(`Abigaail: resolved · shop (was: ${was})`.slice(0, 200));
+    const rendered = [text(m), subject(m), ...WEBHOOK_FORMATS.map((f) => webhookRequest(m, f, "s".repeat(32), clock).body)];
+    for (const r of rendered) {
+      expect(r).toContain("(was: localhost is failing: 63 of 63");
+      expect(r).not.toContain("27 of 27");
+    }
+    // The firing message said it in the present, with the summary of that moment.
+    expect(text(sent[0]!)).toContain(`🔴 shop: ${was}`);
   });
 
   it("Abigaail's own critical findings alert too, named Abigaail", async () => {

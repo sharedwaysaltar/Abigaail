@@ -436,6 +436,8 @@ export interface AgentView {
   status: AppStatus;
   /** The Watchdog finding behind a non-green status, if any. */
   finding: Finding | undefined;
+  /** Not running by configuration (alerts with no channel configured): shown grey with this reason. */
+  off?: string;
   lastOkAt: number | undefined;
   /** Newest first, at most VIEWS.agentRuns. */
   runs: AgentRun[];
@@ -464,13 +466,18 @@ export function agentsView(store: StoreReader, apps: readonly App[], now: number
     const ok = runs.filter((r) => r.outcome === "ok").map((r) => r.duration_ms);
     const about = (signal: string) => system.find((f) => f.agent === "watchdog" && f.fingerprint === `watchdog:${signal}:${name}`);
     const finding = about("agent_stalled") ?? about("agent_failing") ?? about("agent_slowing");
-    const status: AppStatus = finding
-      ? finding.severity === "critical" ? "red" : "amber"
-      : !runs.length || !watchdogFresh ? "grey" : "green";
+    // The alerter runs only with a channel configured; the server records the channels (none: off).
+    const off = name === "alerts" && !store.alertChannels().length ? "off (no channel configured)" : undefined;
+    const status: AppStatus = off
+      ? "grey"
+      : finding
+        ? finding.severity === "critical" ? "red" : "amber"
+        : !runs.length || !watchdogFresh ? "grey" : "green";
     return {
       name,
       schedule: (SCHEDULE as Record<string, { everyMs: number; timeoutMs?: number }>)[name],
       status,
+      ...(off ? { off } : {}),
       finding,
       lastOkAt: store.lastOkRun(name),
       runs,

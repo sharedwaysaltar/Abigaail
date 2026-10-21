@@ -162,6 +162,22 @@ describe("heartbeat", () => {
   });
 });
 
+describe("heartbeat on your own network", () => {
+  const resolving = (address: string) => (_h: string, _o: unknown, cb: (e: NodeJS.ErrnoException | null, a: { address: string; family: number }[]) => void) =>
+    cb(null, [{ address, family: 4 }]);
+
+  it("a private address only with ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE; link-local and metadata never", async () => {
+    const url = checkUrl("https://kuma.home.example/api/push/x");
+    const beat = (allowPrivate: boolean, address: string) =>
+      new Heartbeat({ url, allowPrivate, healthy: () => true, timeoutMs: 300, log: () => {}, resolve: resolving(address) }).beat();
+    expect(await beat(false, "100.101.102.103")).toEqual({ ok: false, error: "UrlRefused" });
+    expect(await beat(false, "192.168.1.5")).toEqual({ ok: false, error: "UrlRefused" });
+    // With the opt-in the address passes the check and the connection is attempted.
+    expect((await beat(true, "10.255.255.1"))!.error).not.toBe("UrlRefused");
+    expect(await beat(true, "169.254.169.254")).toEqual({ ok: false, error: "UrlRefused" });
+  });
+});
+
 describe("ingest is unaffected when every channel hangs", () => {
   let s: TestServer;
 

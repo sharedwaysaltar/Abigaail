@@ -35,27 +35,36 @@ export interface AlertConfig {
   dashboardUrl?: URL;
   /** Dead-man's switch pinged while /healthz is ok. */
   heartbeatUrl?: URL;
+  /** ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE=1: the heartbeat receiver is on the owner's own network (never link-local). */
+  heartbeatAllowPrivate?: boolean;
 }
 
 // No spaces, quotes, angle brackets, commas or semicolons: one plain address, nothing a header could split on.
 const EMAIL_RE = /^[^\s@<>,;"'()\\]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 const HOST_RE = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$|^\d{1,3}(?:\.\d{1,3}){3}$/;
 
-function url(env: NodeJS.ProcessEnv, key: string, allowPrivate = false): URL | undefined {
+/** The opt-in for private addresses: "1" or unset. */
+function optIn(env: NodeJS.ProcessEnv, key: string): boolean {
+  const raw = env[key]?.trim();
+  if (raw && raw !== "1") throw new Error(`${key} must be 1 or unset`);
+  return raw === "1";
+}
+
+function url(env: NodeJS.ProcessEnv, key: string, allowPrivate: boolean, optInKey: string): URL | undefined {
   const raw = env[key]?.trim();
   if (!raw) return undefined;
   try {
     return checkUrl(raw, { allowPrivate });
   } catch (err) {
-    throw new Error(`${key} is not allowed: ${err instanceof UrlRefused ? err.reason : "invalid"}`);
+    const reason = err instanceof UrlRefused ? err.reason : "invalid";
+    const hint = reason === "private address" ? ` (set ${optInKey}=1 for a receiver on your own network)` : "";
+    throw new Error(`${key} is not allowed: ${reason}${hint}`);
   }
 }
 
 function webhook(env: NodeJS.ProcessEnv): WebhookConfig | undefined {
-  const allowRaw = env.ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE?.trim();
-  if (allowRaw && allowRaw !== "1") throw new Error("ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE must be 1 or unset");
-  const allowPrivate = allowRaw === "1";
-  const target = url(env, "ABIGAAIL_ALERT_WEBHOOK_URL", allowPrivate);
+  const allowPrivate = optIn(env, "ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE");
+  const target = url(env, "ABIGAAIL_ALERT_WEBHOOK_URL", allowPrivate, "ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE");
   const secret = env.ABIGAAIL_ALERT_WEBHOOK_SECRET ?? "";
   const formatRaw = env.ABIGAAIL_ALERT_WEBHOOK_FORMAT?.trim().toLowerCase();
   if (!target) {
@@ -115,6 +124,13 @@ export function loadAlertConfig(env: NodeJS.ProcessEnv = process.env): AlertConf
   const w = webhook(env);
   const e = email(env);
   const d = dashboardUrl(env);
-  const h = url(env, "ABIGAAIL_HEARTBEAT_URL");
-  return { ...(w ? { webhook: w } : {}), ...(e ? { email: e } : {}), ...(d ? { dashboardUrl: d } : {}), ...(h ? { heartbeatUrl: h } : {}) };
+  const hPrivate = optIn(env, "ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE");
+  const h = url(env, "ABIGAAIL_HEARTBEAT_URL", hPrivate, "ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE");
+  if (!h && hPrivate) throw new Error("ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE is set but ABIGAAIL_HEARTBEAT_URL is not");
+  return {
+    ...(w ? { webhook: w } : {}),
+    ...(e ? { email: e } : {}),
+    ...(d ? { dashboardUrl: d } : {}),
+    ...(h ? { heartbeatUrl: h, heartbeatAllowPrivate: hPrivate } : {}),
+  };
 }

@@ -215,6 +215,8 @@ export interface AlertState {
   finding_id: number | null;
   changed_at: number;
   fired_at: number | null;
+  /** The finding's summary when the last firing message was sent; quoted by the recovery notice. */
+  fired_summary: string | null;
   flaps: number;
 }
 
@@ -259,7 +261,7 @@ export interface AlertChannelRow {
 
 const DELIVERY_COLUMNS =
   "id, delivery_id, channel, kind, created_at, status, attempts, next_attempt_at, last_attempt_at, last_error, last_code, finished_at";
-const ALERT_STATE_COLUMNS = "app_id, fingerprint, state, sent, finding_id, changed_at, fired_at, flaps";
+const ALERT_STATE_COLUMNS = "app_id, fingerprint, state, sent, finding_id, changed_at, fired_at, fired_summary, flaps";
 
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 

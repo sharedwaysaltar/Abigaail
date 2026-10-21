@@ -346,7 +346,8 @@ in `apps/dashboard/.env` (and the same `ABIGAAIL_LIVE_TOKEN` for both, for the L
 
 Abigaail tells you when an app (or Abigaail itself) **needs you**: only findings that are
 confirmed red, meaning critical in 2 agent runs in a row, so a single blip never notifies.
-You get one message when it turns red and one when it resolves. Warnings and info never
+You get one message when it turns red and one when it resolves; the second quotes what was
+wrong when it went red ("resolved after 26 min (was: localhost is failing: …)"). Warnings and info never
 notify; they are on the dashboard. Alerts are sent by the server, so they work while the
 dashboard is down.
 
@@ -431,7 +432,9 @@ while Abigaail is healthy (what `/healthz` would answer). A service that alerts 
 stop then covers what Abigaail cannot report itself: the server or its host down, or the
 agents stalled. For example healthchecks.io (`https://hc-ping.com/<uuid>`, period 5 min) or
 an Uptime Kuma push monitor (`https://kuma.example.com/api/push/<token>`). The same URL rules
-as the webhook apply, without the private-address opt-in.
+as the webhook apply. For a monitor on your own network (LAN, Tailscale) set
+`ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE=1`, the heartbeat's own opt-in with the same rules and risk as
+the webhook's; link-local and metadata addresses are always refused.
 
 ## 10. Reference
 

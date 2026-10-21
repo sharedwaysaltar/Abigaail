@@ -54,7 +54,9 @@ const runner = config.agents
   ? new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, retention: config.retention, alerts: !!alerter })
   : undefined;
 const healthz = (): { ok: boolean; agents?: "off" } => (runner ? { ok: runner.watchdogFresh() } : { ok: true, agents: "off" });
-const heartbeat = config.alerts.heartbeatUrl ? new Heartbeat({ url: config.alerts.heartbeatUrl, healthy: () => healthz().ok }) : undefined;
+const heartbeat = config.alerts.heartbeatUrl
+  ? new Heartbeat({ url: config.alerts.heartbeatUrl, allowPrivate: !!config.alerts.heartbeatAllowPrivate, healthy: () => healthz().ok })
+  : undefined;
 const hub = new LiveHub();
 
 const server = createServer({

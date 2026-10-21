@@ -17,7 +17,7 @@ import { isIPv4, isIPv6, type LookupFunction } from "node:net";
 export type AddressKind = "public" | "loopback" | "private" | "link_local" | "special";
 
 export interface UrlPolicy {
-  /** ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1: private, CGNAT and ULA addresses too. */
+  /** ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1 / ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE=1: private, CGNAT and ULA addresses too. */
   allowPrivate?: boolean;
 }
 
@@ -117,7 +117,7 @@ export function checkUrl(raw: string, policy: UrlPolicy = {}): URL {
   if (isIPv4(host) || isIPv6(host)) {
     if (!addressAllowed(host, url, policy)) {
       const kind = addressKind(host);
-      throw new UrlRefused(kind === "private" ? "private address (set ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1 for a webhook on your own network)" : `${kind.replace("_", "-")} address`);
+      throw new UrlRefused(`${kind.replace("_", "-")} address`);
     }
   } else if (host !== "localhost" && host.endsWith(".localhost")) {
     throw new UrlRefused("*.localhost names are not allowed");

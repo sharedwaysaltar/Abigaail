@@ -182,10 +182,10 @@ describe("other tables", () => {
     const msg = (id: string, status: "pending" | "suppressed") => ({ delivery_id: id, channel: "webhook", kind: "alert" as const, payload: "{}", status, items: [item(id)] });
     store.applyAlerts(
       [
-        { app_id: a, fingerprint: "health:ok:", state: "ok", sent: "recovered", finding_id: 1, changed_at: NOW - 100 * DAY, fired_at: NOW - 100 * DAY, flaps: 0 },
-        { app_id: a, fingerprint: "health:firing:", state: "firing", sent: "firing", finding_id: 2, changed_at: NOW - 100 * DAY, fired_at: NOW - 100 * DAY, flaps: 0 },
-        { app_id: null, fingerprint: "watchdog:x:", state: "ok", sent: null, finding_id: 3, changed_at: NOW - 100 * DAY, fired_at: null, flaps: 0 },
-        { app_id: a, fingerprint: "health:recent:", state: "ok", sent: "recovered", finding_id: 4, changed_at: NOW - DAY, fired_at: NOW - DAY, flaps: 0 },
+        { app_id: a, fingerprint: "health:ok:", state: "ok", sent: "recovered", finding_id: 1, changed_at: NOW - 100 * DAY, fired_at: NOW - 100 * DAY, fired_summary: null, flaps: 0 },
+        { app_id: a, fingerprint: "health:firing:", state: "firing", sent: "firing", finding_id: 2, changed_at: NOW - 100 * DAY, fired_at: NOW - 100 * DAY, fired_summary: null, flaps: 0 },
+        { app_id: null, fingerprint: "watchdog:x:", state: "ok", sent: null, finding_id: 3, changed_at: NOW - 100 * DAY, fired_at: null, fired_summary: null, flaps: 0 },
+        { app_id: a, fingerprint: "health:recent:", state: "ok", sent: "recovered", finding_id: 4, changed_at: NOW - DAY, fired_at: NOW - DAY, fired_summary: null, flaps: 0 },
       ],
       [msg("old-done", "suppressed"), msg("old-pending", "pending"), msg("new", "suppressed")],
     );

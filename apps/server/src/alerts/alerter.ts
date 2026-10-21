@@ -205,6 +205,7 @@ export class Alerter {
           finding_id: finding?.id ?? prev?.finding_id ?? null,
           changed_at: changed ? now : (prev?.changed_at ?? now),
           fired_at: prev?.fired_at ?? null,
+          fired_summary: prev?.fired_summary ?? null,
           flaps: (prev?.flaps ?? 0) + (changed ? 1 : 0),
         };
         // What the receiver was last told vs what is true now.
@@ -219,16 +220,22 @@ export class Alerter {
         if (send && finding) {
           const flaps = Math.max(0, next.flaps - 1);
           const link = findingLink(this.opts.dashboardUrl, scope.id === null ? null : scope.name, finding);
-          changes.push({ item: itemFrom(finding, scope.name, send, { flaps, notObserved, link }), app_id: scope.id, finding_id: finding.id, fingerprint: fp });
+          // A recovery quotes what was wrong when it went red, not the finding's last summary.
+          const summary = send === "recovered" ? (next.fired_summary ?? finding.summary) : finding.summary;
+          changes.push({ item: itemFrom(finding, scope.name, send, { flaps, notObserved, link, summary }), app_id: scope.id, finding_id: finding.id, fingerprint: fp });
           next.sent = send;
           next.flaps = 0;
-          if (send === "firing") next.fired_at = now;
+          if (send === "firing") {
+            next.fired_at = now;
+            next.fired_summary = finding.summary;
+          }
         } else if (send) {
           // Nothing left to describe (the finding expired): settle silently.
           next.sent = send;
           next.flaps = 0;
         }
-        if (!prev || changed || next.sent !== prev.sent || next.flaps !== prev.flaps || next.fired_at !== prev.fired_at || next.finding_id !== prev.finding_id) {
+        if (!prev || changed || next.sent !== prev.sent || next.flaps !== prev.flaps || next.fired_at !== prev.fired_at || next.finding_id !== prev.finding_id ||
+          next.fired_summary !== prev.fired_summary) {
           states.push(next);
         }
       }

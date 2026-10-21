@@ -73,7 +73,7 @@ describe("checkUrl", () => {
 
   it("private, CGNAT and ULA addresses only with the explicit opt-in; link-local and metadata never", () => {
     for (const raw of ["https://10.0.0.5/hook", "https://192.168.1.20:8443/", "https://100.101.102.103/", "https://[fd7a:115c:a1e0::1]/"]) {
-      expect(refused(raw)).toMatch(/^private address \(set ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1/);
+      expect(refused(raw)).toBe("private address");
       expect(checkUrl(raw, { allowPrivate: true }).href).toBe(new URL(raw).href);
     }
     for (const raw of ["https://169.254.169.254/", "https://[fe80::1]/", "https://[::ffff:169.254.169.254]/", "https://0.0.0.0/"]) {
@@ -165,7 +165,7 @@ describe("alert settings", () => {
 
   it.each([
     [{ ...base, ABIGAAIL_ALERT_WEBHOOK_URL: "http://ntfy.sh/topic-SECRET" }, "ABIGAAIL_ALERT_WEBHOOK_URL is not allowed: plain http is allowed only to localhost"],
-    [{ ...base, ABIGAAIL_ALERT_WEBHOOK_URL: "https://10.0.0.9/topic-SECRET" }, "ABIGAAIL_ALERT_WEBHOOK_URL is not allowed: private address"],
+    [{ ...base, ABIGAAIL_ALERT_WEBHOOK_URL: "https://10.0.0.9/topic-SECRET" }, "ABIGAAIL_ALERT_WEBHOOK_URL is not allowed: private address (set ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE=1"],
     [{ ...base, ABIGAAIL_ALERT_WEBHOOK_SECRET: "short" }, "ABIGAAIL_ALERT_WEBHOOK_SECRET must be at least 32 characters"],
     [{ ABIGAAIL_ALERT_WEBHOOK_URL: base.ABIGAAIL_ALERT_WEBHOOK_URL }, "ABIGAAIL_ALERT_WEBHOOK_SECRET must be at least 32 characters"],
     [{ ...base, ABIGAAIL_ALERT_WEBHOOK_FORMAT: "teams" }, "ABIGAAIL_ALERT_WEBHOOK_FORMAT must be one of json, slack, discord, ntfy"],
@@ -179,15 +179,23 @@ describe("alert settings", () => {
     [{ ABIGAAIL_SMTP_HOST: "smtp.example.com", ABIGAAIL_SMTP_PORT: "99999", ABIGAAIL_ALERT_EMAIL_FROM: "a@example.com", ABIGAAIL_ALERT_EMAIL_TO: "b@example.com" }, "ABIGAAIL_SMTP_PORT must be a port number"],
     [{ ABIGAAIL_ALERT_EMAIL_TO: "b@example.com" }, "ABIGAAIL_ALERT_EMAIL_TO is set but ABIGAAIL_SMTP_HOST is not"],
     [{ ABIGAAIL_DASHBOARD_URL: "https://dash.example/?token=SECRET" }, "ABIGAAIL_DASHBOARD_URL must be a plain http(s) URL"],
-    [{ ABIGAAIL_HEARTBEAT_URL: "https://192.168.1.5/push/SECRET" }, "ABIGAAIL_HEARTBEAT_URL is not allowed: private address"],
+    [{ ABIGAAIL_HEARTBEAT_URL: "https://192.168.1.5/push/SECRET" }, "ABIGAAIL_HEARTBEAT_URL is not allowed: private address (set ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE=1"],
+    [{ ABIGAAIL_HEARTBEAT_URL: "https://169.254.169.254/push/SECRET", ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE: "1" }, "ABIGAAIL_HEARTBEAT_URL is not allowed: link-local address"],
+    [{ ABIGAAIL_HEARTBEAT_URL: "https://hc-ping.com/SECRET", ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE: "true" }, "ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE must be 1 or unset"],
+    [{ ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE: "1" }, "ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE is set but ABIGAAIL_HEARTBEAT_URL is not"],
     [{ ABIGAAIL_HEARTBEAT_URL: "http://hc-ping.com/SECRET" }, "ABIGAAIL_HEARTBEAT_URL is not allowed: plain http"],
   ])("refuses %o", (env, message) => {
     expect(fails(env)).toContain(message);
   });
 
-  it("the opt-in is for the webhook only: the heartbeat stays public-only", () => {
+  it("each URL has its own opt-in: the webhook's does not open the heartbeat, nor the other way round", () => {
     expect(loadAlertConfig({ ...base, ABIGAAIL_ALERT_WEBHOOK_URL: "https://192.168.1.5/hook", ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE: "1" }).webhook?.allowPrivate).toBe(true);
     expect(fails({ ...base, ABIGAAIL_ALERT_WEBHOOK_ALLOW_PRIVATE: "1", ABIGAAIL_HEARTBEAT_URL: "https://192.168.1.5/push" })).toContain("ABIGAAIL_HEARTBEAT_URL is not allowed: private address");
+    const hb = loadAlertConfig({ ABIGAAIL_HEARTBEAT_URL: "https://100.101.102.103:3001/api/push/x", ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE: "1" });
+    expect(hb).toMatchObject({ heartbeatAllowPrivate: true });
+    expect(loadAlertConfig({ ABIGAAIL_HEARTBEAT_URL: "https://hc-ping.com/x" })).toMatchObject({ heartbeatAllowPrivate: false });
+    expect(fails({ ...base, ABIGAAIL_ALERT_WEBHOOK_URL: "https://192.168.1.5/hook", ABIGAAIL_HEARTBEAT_URL: "https://hc-ping.com/x", ABIGAAIL_HEARTBEAT_ALLOW_PRIVATE: "1" }))
+      .toContain("ABIGAAIL_ALERT_WEBHOOK_URL is not allowed: private address");
   });
 
   it("an invalid setting stops the server (loadConfig throws)", () => {

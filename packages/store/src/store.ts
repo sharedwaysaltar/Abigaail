@@ -642,16 +642,17 @@ export class Store extends StoreReader {
    */
   applyAlerts(states: readonly AlertState[], deliveries: readonly DeliveryInput[]): number[] {
     const upsert = this.db.prepare(`
-      INSERT INTO alert_state (app_id, fingerprint, state, sent, finding_id, changed_at, fired_at, flaps)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO alert_state (app_id, fingerprint, state, sent, finding_id, changed_at, fired_at, fired_summary, flaps)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (coalesce(app_id, ''), fingerprint) DO UPDATE SET state = excluded.state, sent = excluded.sent,
-        finding_id = excluded.finding_id, changed_at = excluded.changed_at, fired_at = excluded.fired_at, flaps = excluded.flaps`);
+        finding_id = excluded.finding_id, changed_at = excluded.changed_at, fired_at = excluded.fired_at,
+        fired_summary = excluded.fired_summary, flaps = excluded.flaps`);
     const insert = this.db.prepare(`
       INSERT INTO alert_deliveries (delivery_id, channel, kind, created_at, payload, status, next_attempt_at, finished_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     const item = this.db.prepare("INSERT INTO alert_items (delivery, app_id, finding_id, fingerprint, change) VALUES (?, ?, ?, ?, ?)");
     return this.tx(() => {
-      for (const s of states) upsert.run(s.app_id, s.fingerprint, s.state, s.sent, s.finding_id, s.changed_at, s.fired_at, s.flaps);
+      for (const s of states) upsert.run(s.app_id, s.fingerprint, s.state, s.sent, s.finding_id, s.changed_at, s.fired_at, s.fired_summary, s.flaps);
       const ids: number[] = [];
       const now = this.now();
       for (const d of deliveries) {
