@@ -26,9 +26,18 @@ from spec phases 4 and 3, then the scrubber, then agents 4-7, each planned again
 | 7b | `app:purge`: delete one app's data on request (GDPR deletion path), audited | Planned after chunk 7 |
 | 8 | **Alerts**: webhook + email for critical findings only, from the server process (works with the dashboard down), dedup and cooldown by fingerprint, recovery notice; Watchdog `alert_delivery_failed` | Planned in chunk 8 |
 | 9 | **Allowlist scrubber + privacy tests**: the SDK-side scrubber for the first free-text-like fields (lifts #12 only where it is proven safe), property and fuzz tests that forbidden values never leave the app or reach the store | Planned in chunk 9 |
-| 10 | **Agent 4, Resilience**: leak = rising post-GC floor, restart loops, the route that blocks the event loop, cold-start cost | Planned against AGENTS.md |
-| 11 | **Agent 5, Rollout Safety**: same routes and hours before/after a release with a significance test, new error types, newly 404ing routes, crash loops after deploy, "recommend rollback" only with high impact and confidence (closes the deploy-metadata data gap) | Planned against AGENTS.md |
+| 10 | **Agent 4, Resilience**: leak = rising post-GC floor, restart loops, the route that blocks the event loop, cold-start cost; **continuous profiling** (low-rate CPU and heap sampling, flame data per route) and **memory-leak hunting** (heap snapshots analysed in the app; only class names and counts leave it) (DECISIONS #92) | Planned against AGENTS.md |
+| 11 | **Agent 5, Rollout Safety**: same routes and hours before/after a release with a significance test, new error types, newly 404ing routes, crash loops after deploy, "recommend rollback" only with high impact and confidence (closes the deploy-metadata data gap); **code-aware findings** through an optional, read-only GitHub link (release → diff → file/line) (#92) | Planned against AGENTS.md |
 | 12 | **Agent 6, Privacy Auditor**: scans stored values (emails, IPs, tokens, JWTs, phone numbers, IBANs, name-like route segments), verifies retention ran and `salt.bin` ≤ 1 day old, re-identification suppression | Planned against AGENTS.md |
-| 13 | **Agent 7, Outbound Dependencies**: per-host normals, first-seen host, retry storms, N+1 per inbound request (closes the DB query timing / pool data gap) | Planned against AGENTS.md |
+| 13 | **Agent 7, Outbound Dependencies**: per-host normals, first-seen host, retry storms, N+1 per inbound request; **database insight**: query fingerprints with every value stripped, slow queries, N+1 queries, pool use (closes the DB query timing / pool data gap, #92) |
+| 14 | **Background jobs, queues and cron**: runs, failures, duration and missed schedules (#92) | Planned against AGENTS.md |
+| 15 | **Cross-service tracing**: one request followed across the owner's services (#92) | Planned against AGENTS.md |
+| 16 | **AI investigator** (last): off by default; sends findings, metrics and code only, never event rows, to the Claude API or a self-hosted model; suggestions and draft PRs only (#92) | Planned against AGENTS.md | Planned against AGENTS.md |
 
-Later phases follow the spec: agents 8-16, backups, packaging, hosting.
+Everything above stays read-only towards monitored apps (#92).
+
+Later phases follow the spec: agents 8-16, backups, packaging, hosting. **Runtime security**
+(loaded packages, reachable CVEs, new outbound hosts) is built with the Security (11) and
+Supply Chain (13) agents (#92). An enterprise tier (SSO, roles and teams, Postgres/ClickHouse
++ HA, SIEM audit export, data residency and compliance reports, support) comes later and is
+not on this roadmap yet (#93).
