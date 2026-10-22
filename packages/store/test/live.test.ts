@@ -43,6 +43,19 @@ describe("toLiveEvent", () => {
     expect(boot).toEqual({ type: "lifecycle", ts: 5_000, release: "rel-1", kind: "boot" });
   });
 
+  it("an error shows its stored, scrubbed message, code and cause; an outbound failure its code; frames never", () => {
+    const err: AbigaailEvent = {
+      type: "error", event_id: ID, client_ts: 1, error_type: "TypeError", handled: false, frames: [{ file: "src/a.ts", line: 1 }],
+      message: "User <email> not found", code: "P2025", cause_type: "Error", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED <ip>:5432", scrub_version: 1,
+    };
+    expect(toLiveEvent(toRow(err, derived), "r")).toEqual({
+      type: "error", ts: 5_000, release: "r", error_type: "TypeError", route: null, handled: false,
+      message: "User <email> not found", code: "P2025", cause_type: "Error", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED <ip>:5432",
+    });
+    const out: AbigaailEvent = { type: "outbound", event_id: ID, client_ts: 1, host: "a.example", method: "GET", duration_ms: 1, outcome: "error", error_code: "ENOTFOUND" };
+    expect(toLiveEvent(toRow(out, derived), "r")).toMatchObject({ outcome: "error", error_code: "ENOTFOUND" });
+  });
+
   it("ignores unknown types and broken attrs", () => {
     const row = toRow(events[0]!, derived);
     expect(toLiveEvent({ ...row, type: "other" } as EventRow, "r")).toBeUndefined();
@@ -52,7 +65,7 @@ describe("toLiveEvent", () => {
 
 describe("every read of app data is scoped by app_id", () => {
   // Tables holding monitored-app data. Reading any of them needs `app_id = ?`.
-  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "alert_state", "alert_items"];
+  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "alert_state", "alert_items", "scrub_mismatches"];
   const src = readFileSync(fileURLToPath(new URL("../src/reader.ts", import.meta.url)), "utf8");
   const sql = [...src.matchAll(/`([^`]*)`|"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1] ?? m[2] ?? "").filter((q) => /\b(FROM|JOIN)\s+\w+/i.test(q));
 

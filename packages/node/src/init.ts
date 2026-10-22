@@ -23,7 +23,7 @@ import {
 } from "@abigaail/schema";
 import { requestFlags } from "./flags.js";
 import { clientIp, isLocalAddress } from "./proxy.js";
-import { errorType, parseStack } from "./stack.js";
+import { errorCodeOf, errorDetail, errorType, parseStack } from "./stack.js";
 
 export const DEFAULT_IGNORE: readonly string[] = ["/_next/static/*", "/_next/image", "/favicon.ico", "/robots.txt"];
 
@@ -421,7 +421,7 @@ class NodeAdapter implements AbigaailNode {
 
   // Outbound --------------------------------------------------------------
 
-  private outbound(key: object, status: number | undefined, outcome: OutboundOutcome): void {
+  private outbound(key: object, status: number | undefined, outcome: OutboundOutcome, errorCode?: string): void {
     const rec = this.starts.get(key);
     if (rec === undefined) return;
     this.starts.delete(key);
@@ -435,6 +435,7 @@ class NodeAdapter implements AbigaailNode {
       ...(status !== undefined ? { status } : {}),
       duration_ms: Math.round((performance.now() - rec) * 100) / 100,
       outcome,
+      ...(errorCode ? { error_code: errorCode } : {}),
       ...(meta.parent ? { parent_id: meta.parent } : {}),
     });
   }
@@ -457,7 +458,7 @@ class NodeAdapter implements AbigaailNode {
   }
 
   private onClientError({ request, error }: { request: ClientRequest; error: unknown }): void {
-    this.outbound(request, undefined, timeoutLike(error) ? "timeout" : "error");
+    this.outbound(request, undefined, timeoutLike(error) ? "timeout" : "error", errorCodeOf(error));
   }
 
   private onFetchCreate({ request }: { request: { origin?: unknown; method?: unknown } }): void {
@@ -476,7 +477,7 @@ class NodeAdapter implements AbigaailNode {
   }
 
   private onFetchError({ request, error }: { request: object; error: unknown }): void {
-    this.outbound(request, undefined, timeoutLike(error) ? "timeout" : "error");
+    this.outbound(request, undefined, timeoutLike(error) ? "timeout" : "error", errorCodeOf(error));
   }
 
   // Errors, metrics, lifecycle ---------------------------------------------
@@ -489,6 +490,8 @@ class NodeAdapter implements AbigaailNode {
       this.client.capture({
         type: "error",
         error_type: errorType(err),
+        // Raw here; the core sanitiser scrubs it before anything is queued.
+        ...(errorDetail(err) as Record<string, string>),
         handled: ctx.handled ?? true,
         ...(ctx.route ? { route: ctx.route } : {}),
         ...(frames ? { frames } : {}),

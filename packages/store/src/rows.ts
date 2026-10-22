@@ -79,9 +79,16 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
     case "error":
       row.route = event.route ?? null;
       row.name = event.error_type;
+      // message / cause_message arrive here already scrubbed again by the server (DECISIONS #104).
       row.attrs = attrsJson({
         handled: event.handled,
         frames: event.frames?.map((f) => ({ file: f.file, line: f.line, col: f.col, fn: f.fn })),
+        message: event.message,
+        code: event.code,
+        cause_type: event.cause_type,
+        cause_code: event.cause_code,
+        cause_message: event.cause_message,
+        scrub_version: event.message !== undefined || event.cause_message !== undefined ? event.scrub_version : undefined,
       });
       row.parent_id = event.parent_id ?? null;
       break;
@@ -90,7 +97,7 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
       row.method = event.method;
       row.status = event.status ?? null;
       row.duration_ms = event.duration_ms;
-      row.attrs = attrsJson({ outcome: event.outcome });
+      row.attrs = attrsJson({ outcome: event.outcome, error_code: event.error_code });
       row.parent_id = event.parent_id ?? null;
       break;
     case "metric":

@@ -2,6 +2,7 @@
 
 import type { LiveEvent } from "@abigaail/store";
 import { useEffect, useRef, useState } from "react";
+import { Cause, Scrubbed } from "./Scrubbed";
 
 // The Live view's stream reader. fetch + a stream reader rather than
 // EventSource, so the status is visible: 401 and 503 stop for good ("Signed
@@ -104,7 +105,10 @@ function Line({ e }: { e: LiveEvent }) {
           <span className="k">error</span>
           <span className="what bad">
             {e.error_type}
+            {e.code ? ` ${e.code}` : ""}
             {e.route ? ` ${e.route}` : ""}
+            {e.message ? <> · <Scrubbed text={e.message} /></> : null}
+            {e.cause_type || e.cause_code || e.cause_message ? <> · <Cause type={e.cause_type} code={e.cause_code} message={e.cause_message} /></> : null}
           </span>
           <span>{e.handled ? "handled" : "unhandled"}</span>
           <span className="r" />

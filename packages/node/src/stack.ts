@@ -1,7 +1,9 @@
 import type { StackFrame } from "@abigaail/schema";
 
-// Error details that may leave the app: the class name and project-relative
-// frames. Never the message, never absolute paths (they leak usernames and hosts).
+// Error details that may leave the app: the class name, project-relative
+// frames, and the raw message, code and cause for the core sanitiser, which
+// keeps codes only by pattern and sends a message only after the shared
+// scrubber (DECISIONS #101). Never absolute paths (they leak usernames and hosts).
 
 const MAX_LINE = 500;
 const MAX_LINES = 50;
@@ -18,6 +20,62 @@ export function errorType(err: unknown): string {
   } catch {
     return "Error";
   }
+}
+
+/**
+ * An own data property, read without running any getter: a throwing or slow
+ * getter, or a Proxy, cannot affect the host app.
+ */
+function own(o: unknown, key: string): unknown {
+  try {
+    if (!o || (typeof o !== "object" && typeof o !== "function")) return undefined;
+    const d = Object.getOwnPropertyDescriptor(o, key);
+    return d && "value" in d ? d.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface ErrorDetail {
+  message?: string;
+  code?: unknown;
+  cause_type?: string;
+  cause_code?: unknown;
+  cause_message?: string;
+}
+
+/**
+ * Raw message, code and one level of cause. Unscrubbed: the core sanitiser
+ * scrubs them before anything is queued. A thrown string is its own message;
+ * other non-Error values give nothing.
+ */
+export function errorDetail(err: unknown): ErrorDetail {
+  try {
+    if (typeof err === "string") return { message: err.slice(0, 2048) };
+    if (!(err instanceof Error)) return {};
+    const out: ErrorDetail = {};
+    const message = own(err, "message");
+    if (typeof message === "string") out.message = message.slice(0, 2048);
+    const code = own(err, "code");
+    if (typeof code === "string" || typeof code === "number") out.code = code;
+    const cause = own(err, "cause");
+    if (cause instanceof Error) {
+      out.cause_type = errorType(cause);
+      const cm = own(cause, "message");
+      if (typeof cm === "string") out.cause_message = cm.slice(0, 2048);
+      const cc = own(cause, "code");
+      if (typeof cc === "string" || typeof cc === "number") out.cause_code = cc;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** A failed outbound call's error code (own `code`, or its cause's): kept only if it matches a code pattern later. */
+export function errorCodeOf(err: unknown): string | undefined {
+  const code = own(err, "code") ?? own(own(err, "cause"), "code");
+  return typeof code === "string" ? code : undefined;
 }
 
 /** Turn a stack location into a project-relative path, or undefined to drop the frame. */

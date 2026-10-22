@@ -23,6 +23,7 @@ export type {
   StatKind,
   StatRow,
   StoredEvent,
+  TopError,
 } from "./reader.js";
 export { generateIngestKey, hashIngestKey, INGEST_KEY_PREFIX, INGEST_KEY_RE } from "./keys.js";
 export { toRow } from "./rows.js";

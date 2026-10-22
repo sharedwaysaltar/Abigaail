@@ -301,6 +301,17 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE alert_state ADD COLUMN fired_summary TEXT;
   `,
+  // 11: scrubbed text the server had to scrub again (the SDK's text was not
+  // a fixed point of the server's rules: an older SDK, or tampering), counted
+  // per app and minute like ingest refusals. Never the text itself.
+  `
+  CREATE TABLE scrub_mismatches (
+    app_id TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    n      INTEGER NOT NULL,
+    PRIMARY KEY (app_id, minute)
+  );
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

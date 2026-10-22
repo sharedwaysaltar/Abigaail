@@ -321,3 +321,12 @@ h2.grouph a { color: var(--ink); text-transform: none; letter-spacing: 0; font-s
   .agent-name, .agent-what, .agent-runs { grid-column: 1 / -1; }
   .agents .fig { text-align: left; }
 }
+
+/* Scrubbed text: placeholders replaced in the monitored app (DECISIONS #107). */
+.scrubbed { overflow-wrap: anywhere; }
+.scrubbed .ph {
+  font-family: var(--mono); font-size: 0.82em; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin: 0 1px; white-space: nowrap;
+}
+.errlist li { display: block; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.errlist li:last-child { border-bottom: 0; }

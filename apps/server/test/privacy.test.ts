@@ -151,3 +151,78 @@ describe("visitor hash", () => {
     expect(h).toBeNull();
   });
 });
+
+describe("error messages are scrubbed again by the server (DECISIONS #104)", () => {
+  const errorEvent = (o: Record<string, unknown>) => ({ type: "error", event_id: uuidFor(), client_ts: T0, error_type: "Error", handled: true, ...o });
+  let n = 0;
+  const uuidFor = () => `00000000-0000-4000-8000-${String(900_000 + ++n).padStart(12, "0")}`;
+  const stored = () => s.raw<{ attrs: string }>("SELECT attrs FROM events WHERE type = 'error' ORDER BY event_id").map((r) => JSON.parse(r.attrs) as Record<string, unknown>);
+
+  it("a forged batch that bypasses the SDK stores nothing personal, in rows, the file or its WAL", async () => {
+    const forged = [
+      "User jane.doe@example.com not found for 203.0.113.77",
+      "Order for Hannah Okafor failed: card 4242 4242 4242 4242",
+      "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqYW5lIn0.c2lnbmF0dXJlLXNlY3JldA rejected for the user",
+      // A fake key, built from parts so the source holds no key-shaped string.
+      `Login failed for the user ${["sk", "live", "51H8xYzAbCdEfGhIjKlMnOp"].join("_")}`,
+    ];
+    const res = await post(s, batch(forged.map((message, i) => errorEvent({ message, cause_message: forged[(i + 1) % forged.length] }))), { key });
+    expect(res.status).toBe(202);
+    const rows = stored();
+    expect(rows.map((r) => r.message)).toEqual([
+      "User <email> not found for <ip>",
+      "Order for <word> <word> failed: card <card>",
+      "token <jwt> rejected for the user",
+      "Login failed for the user <key>",
+    ]);
+    expect(rows.every((r) => r.scrub_version === 2)).toBe(true);
+    const markers = ["jane.doe", "203.0.113.77", "Hannah", "Okafor", "4242 4242", "eyJzdWIiOiJqYW5lIn0", "sk_live_51H8"];
+    for (const table of s.raw<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name)) {
+      const dump = JSON.stringify(s.raw(`SELECT * FROM "${table}"`));
+      for (const m of markers) expect(dump, `${table} ${m}`).not.toContain(m);
+    }
+    for (const path of [s.dbPath, `${s.dbPath}-wal`]) {
+      if (!existsSync(path)) continue;
+      const bytes = readFileSync(path);
+      for (const m of markers) expect(bytes.includes(m), `${path} ${m}`).toBe(false);
+    }
+    // Every changed text is counted (never stored): 4 messages and 4 causes.
+    s.clock.now += 60_000;
+    await s.stopListening();
+    expect(s.store.scrubMismatches(appId, 0)).toBe(8);
+  });
+
+  it("text the SDK scrubbed is stored as sent and not counted, under the server's scrubber version", async () => {
+    const res = await post(s, batch([errorEvent({ message: "User <email> not found", code: "P2025", scrub_version: 1 })]), { key });
+    expect(res.status).toBe(202);
+    // An SDK on version 1 whose text is unchanged by today's rules: stored as sent, stamped with today's version.
+    expect(stored()[0]).toMatchObject({ message: "User <email> not found", code: "P2025", scrub_version: 2 });
+    await s.stopListening();
+    expect(s.store.scrubMismatches(appId, 0)).toBe(0);
+  });
+
+  it("a hostname is kept only if this app is known to call it: from stored outbound events or the same batch", async () => {
+    const msg = "getaddrinfo ENOTFOUND api.payments.example";
+    await post(s, batch([errorEvent({ message: msg })]), { key });
+    const outbound = { type: "outbound", event_id: uuidFor(), client_ts: T0, host: "api.payments.example", method: "GET", duration_ms: 3, outcome: "error", error_code: "ENOTFOUND" };
+    // The same batch teaches the server the host before its errors are scrubbed.
+    await post(s, batch([outbound, errorEvent({ message: msg })]), { key });
+    // Another app has never called it.
+    const other = s.store.createApp("app-b", "test");
+    await post(s, batch([errorEvent({ message: msg })]), { key: other.key });
+    const rows = s.raw<{ app_id: string; attrs: string }>("SELECT app_id, attrs FROM events WHERE type = 'error' ORDER BY event_id").map((r) => [r.app_id, JSON.parse(r.attrs).message]);
+    expect(rows).toEqual([
+      [appId, "getaddrinfo ENOTFOUND <host>"],
+      [appId, msg],
+      [other.app.id, "getaddrinfo ENOTFOUND <host>"],
+    ]);
+    expect(JSON.parse(s.raw<{ attrs: string }>("SELECT attrs FROM events WHERE type = 'outbound'")[0]!.attrs)).toMatchObject({ error_code: "ENOTFOUND" });
+  });
+
+  it("refuses a code that is not one, as any invalid field (the SDK never sends one)", async () => {
+    const res = await post(s, batch([errorEvent({ code: "jane@example.com" })]), { key });
+    expect(res.status).toBe(400);
+    const long = await post(s, batch([errorEvent({ message: "x".repeat(201) })]), { key });
+    expect(long.status).toBe(400);
+  });
+});

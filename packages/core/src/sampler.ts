@@ -1,3 +1,27 @@
+/**
+ * How many error messages per second may be scrubbed (DECISIONS #105): past
+ * it, errors still go out, without their message, so an error storm cannot
+ * spend the host app's CPU on text. A token bucket, refilled continuously.
+ */
+export class ScrubBudget {
+  private tokens: number;
+  private last: number;
+
+  constructor(private readonly perSecond: number, private readonly now: () => number) {
+    this.tokens = perSecond;
+    this.last = now();
+  }
+
+  take(): boolean {
+    const t = this.now();
+    this.tokens = Math.min(this.perSecond, this.tokens + ((t - this.last) / 1000) * this.perSecond);
+    this.last = t;
+    if (this.tokens < 1) return false;
+    this.tokens -= 1;
+    return true;
+  }
+}
+
 export interface SamplerOptions {
   /** Queue fill (0..1) above which request events start being sampled. */
   threshold: number;

@@ -59,7 +59,9 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
 ## Layout
 
 - `packages/schema`: event schema v1. `src/index.ts` is types/constants (zero deps);
-  `src/validate.ts` is strict zod validation for the server.
+  `src/validate.ts` is strict zod validation for the server. `src/scrub.ts` + `scrub-vocab.ts`: the
+  fail-closed allowlist scrubber for error messages (`SCRUB_VERSION`), shared by SDK and server; the
+  route heuristic's `isRouteWord` comes from it. Privacy test generators: `test/pii.ts`; corpus: `test/fixtures/error-corpus.ts`.
 - `packages/core`: `@abigaail/core` SDK (queue, breaker, sampler, transport, route normaliser).
 - `packages/node`: `@abigaail/node` adapter (`diagnostics_channel` capture, flags, stack frames, metrics).
 - `packages/next`: `@abigaail/next` (`register` / `onRequestError` for `instrumentation.ts`, routes manifest).
@@ -71,6 +73,7 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
 - `packages/auth`: `@abigaail/auth`, scrypt passwords, TOTP, sealed secrets, sign-in and session rules.
 - `apps/server`: ingest server (`src/server.ts`), derivations (`src/derive.ts`), daily salt
   file (`src/salt.ts`, never in the DB), admin CLI. Hosting requirements: docs/HOSTING.md.
+  `src/rescrub.ts`: scrubs every message again before storing (the app's known hosts), counts changes in `scrub_mismatches`.
   `src/live.ts`: the Live feed (SSE, 127.0.0.1 only, bearer token, bounded; `LIVE` holds its limits).
   `src/retention.ts`: hourly deletion past each period (`RETENTION` in `agents/thresholds.ts`), runs even with
   agents off; erasure helpers (secure_delete, incremental vacuum, WAL truncate) are `packages/store/src/vacuum.ts`.

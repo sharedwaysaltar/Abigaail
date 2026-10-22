@@ -7,11 +7,13 @@ import {
 } from "@abigaail/schema";
 import { CircuitBreaker, type BreakerState } from "./breaker.js";
 import { BoundedQueue } from "./queue.js";
-import { sanitizeEvent } from "./sanitize.js";
-import { Sampler } from "./sampler.js";
+import { sanitizeEvent, type SanitizeContext } from "./sanitize.js";
+import { Sampler, ScrubBudget } from "./sampler.js";
 import { fetchTransport, type Transport } from "./transport.js";
 
 export const SDK_NAME = "@abigaail/core";
+/** Outbound hosts remembered for the scrubber's host rule. */
+const MAX_KNOWN_HOSTS = 500;
 export const SDK_VERSION = "0.1.0";
 
 export interface ClientOptions {
@@ -39,6 +41,13 @@ export interface ClientOptions {
   transport?: Transport;
   /** Called (never awaited, errors swallowed) when the SDK hits an internal problem. */
   onInternalError?: (err: unknown) => void;
+  /**
+   * Send error messages, after the shared scrubber removes anything personal
+   * (DECISIONS #101). Default true; false sends class names and codes only.
+   */
+  errorMessages?: boolean;
+  /** Error messages scrubbed per second at most; the rest are sent without. Default 100. */
+  maxScrubsPerSecond?: number;
   now?: () => number;
   random?: () => number;
 }
@@ -138,6 +147,9 @@ class Client implements AbigaailClient {
   private inFlight: Promise<void> | undefined;
   private closed = false;
   private counters = { invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0 };
+  /** The app's outbound hosts seen so far: the only hostnames an error message may keep. */
+  private readonly hosts = new Set<string>();
+  private readonly sanitize: SanitizeContext;
 
   constructor(
     private readonly opts: ClientOptions,
@@ -160,6 +172,15 @@ class Client implements AbigaailClient {
     });
     this.transport =
       opts.transport ?? fetchTransport({ endpoint: opts.endpoint, ingestKey: opts.ingestKey });
+    const budget = new ScrubBudget(Math.max(0, opts.maxScrubsPerSecond ?? 100), this.now);
+    this.sanitize = {
+      messages: opts.errorMessages !== false,
+      scrubBudget: () => budget.take(),
+      knownHost: (h) => this.hosts.has(h),
+      onHost: (h) => {
+        if (this.hosts.size < MAX_KNOWN_HOSTS) this.hosts.add(h);
+      },
+    };
 
     const interval = opts.flushIntervalMs ?? 5000;
     if (interval > 0) {
@@ -173,7 +194,7 @@ class Client implements AbigaailClient {
     try {
       if (this.closed) return;
       // Rebuilt from allowed fields and mapped to values ingest accepts.
-      const event = sanitizeEvent(input, uuid, this.now);
+      const event = sanitizeEvent(input, uuid, this.now, this.sanitize);
       if (!event) {
         this.counters.invalid++;
         return;

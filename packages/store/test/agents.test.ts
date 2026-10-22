@@ -529,3 +529,27 @@ describe("findings not observed while Abigaail was down", () => {
     expect(store.openFindings(appA)[0]!.id).toBe(old.id);
   });
 });
+
+describe("topErrors (App page)", () => {
+  const err = (ts: number, route: string, cause_code: string, cause_message: string) => ({
+    event: {
+      type: "error" as const, event_id: id(), client_ts: ts, error_type: "TypeError", route, handled: true,
+      message: "fetch failed", cause_type: "Error", cause_code, cause_message, scrub_version: 2,
+    },
+    derived: { ts },
+  });
+
+  it("groups by type, code, message and cause code: different causes are not merged; routes are listed", () => {
+    insert(appA, [
+      err(T0 + 1, "/checkout", "ECONNREFUSED", "connect ECONNREFUSED <ip>:43641"),
+      err(T0 + 2, "/fetch-error", "ECONNREFUSED", "connect ECONNREFUSED <ip>:43642"),
+      err(T0 + 3, "/checkout", "ENOTFOUND", "getaddrinfo ENOTFOUND <host>"),
+    ]);
+    insert(appB, [err(T0 + 4, "/other", "ECONNREFUSED", "connect ECONNREFUSED <ip>:1")]);
+    expect(store.topErrors(appA, T0, T0 + 10)).toEqual([
+      // The cause message is the latest one of its group.
+      { error_type: "TypeError", code: null, message: "fetch failed", cause_type: "Error", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED <ip>:43642", routes: ["/checkout", "/fetch-error"], n: 2, last: T0 + 2 },
+      { error_type: "TypeError", code: null, message: "fetch failed", cause_type: "Error", cause_code: "ENOTFOUND", cause_message: "getaddrinfo ENOTFOUND <host>", routes: ["/checkout"], n: 1, last: T0 + 3 },
+    ]);
+  });
+});

@@ -28,6 +28,7 @@ import {
   SUPPORTED_SCHEMA_VERSIONS,
   type Batch,
 } from "./index.js";
+import { cleanCode } from "./scrub.js";
 
 // Patterns are shared with the SDK sanitiser (see ./index.ts).
 const route = z
@@ -40,6 +41,13 @@ const route = z
 const host = z.string().max(LIMITS.maxHostLength).regex(HOST_RE, "must be a bare hostname");
 
 const eventId = z.string().regex(EVENT_ID_RE, "must be a UUID");
+/** An error code by pattern only. */
+const code = z.string().max(LIMITS.maxCodeLength).refine((c) => cleanCode(c) === c, "must be an error code");
+/**
+ * Scrubbed text. The server scrubs it again with its own rules before storing
+ * (apps/server), so a different scrubber version never loses a batch (#19).
+ */
+const scrubbed = z.string().min(1).max(LIMITS.maxMessageLength);
 const clientTs = z.number().int().nonnegative();
 const method = z.enum(HTTP_METHODS);
 const durationMs = z.number().nonnegative().max(MAX_DURATION_MS);
@@ -86,6 +94,12 @@ export const errorEventSchema = z.strictObject({
     )
     .max(LIMITS.maxStackFrames)
     .optional(),
+  message: scrubbed.optional(),
+  code: code.optional(),
+  cause_type: z.string().max(LIMITS.maxErrorTypeLength).regex(IDENT_RE, "must be an error class name").optional(),
+  cause_code: code.optional(),
+  cause_message: scrubbed.optional(),
+  scrub_version: z.number().int().positive().max(1000).optional(),
   parent_id: eventId.optional(),
 });
 
@@ -98,6 +112,7 @@ export const outboundEventSchema = z.strictObject({
   status: z.number().int().min(100).max(599).optional(),
   duration_ms: durationMs,
   outcome: z.enum(OUTBOUND_OUTCOMES),
+  error_code: code.optional(),
   parent_id: eventId.optional(),
 });
 

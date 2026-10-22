@@ -162,3 +162,64 @@ describe("sanitizeEvent: region", () => {
     expect(validateBatch(batch).ok).toBe(true);
   });
 });
+
+describe("sanitizeEvent: error messages go through the scrubber (DECISIONS #101)", () => {
+  const error = (extra: Record<string, unknown>) => ({ type: "error", error_type: "Error", handled: true, ...extra });
+  async function sendWith(opts: Partial<Parameters<typeof createClient>[0]>, inputs: unknown[]) {
+    const batches: Batch[] = [];
+    const c = createClient({ ...base, ...opts, transport: async (b) => (batches.push(b), "ok") });
+    for (const i of inputs) c.capture(i as EventInput);
+    await c.flush();
+    for (const b of batches) expect(validateBatch(b)).toMatchObject({ ok: true });
+    return batches.flatMap((b) => b.events);
+  }
+
+  it("scrubs the message and cause, keeps codes by pattern, and sends the scrubber version", async () => {
+    const [e] = await sendWith({}, [
+      error({ message: "User jane@example.com not found", code: "P2025", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED 10.0.0.5:5432" }),
+    ]);
+    expect(e).toMatchObject({ message: "User <email> not found", code: "P2025", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED <ip>:5432", scrub_version: 2 });
+    expect(JSON.stringify(e)).not.toContain("jane");
+  });
+
+  it("an unclassifiable message or code is dropped, never sent as it is; the error still goes out", async () => {
+    const [e] = await sendWith({}, [error({ message: "Jane Smith", code: "JANE_SMITH", cause_type: "not an ident!" })]);
+    expect(e).toMatchObject({ type: "error", error_type: "Error" });
+    for (const k of ["message", "code", "cause_type", "scrub_version"]) expect(e).not.toHaveProperty(k);
+  });
+
+  it("errorMessages: false sends class names and codes only", async () => {
+    const [e] = await sendWith({ errorMessages: false }, [error({ message: "fetch failed", code: "ECONNRESET", cause_message: "socket hang up" })]);
+    expect(e).toMatchObject({ code: "ECONNRESET" });
+    expect(e).not.toHaveProperty("message");
+    expect(e).not.toHaveProperty("cause_message");
+  });
+
+  it("past the scrub budget errors go out without their message", async () => {
+    let t = 1_000;
+    const events = await sendWith({ maxScrubsPerSecond: 3, now: () => t }, Array.from({ length: 10 }, () => error({ message: "fetch failed for the user" })));
+    expect(events).toHaveLength(10);
+    expect(events.filter((e) => "message" in e)).toHaveLength(3);
+    // The budget refills.
+    t += 1_000;
+    const later = await sendWith({ maxScrubsPerSecond: 3, now: () => t }, [error({ message: "fetch failed for the user" })]);
+    expect(later[0]).toHaveProperty("message");
+  });
+
+  it("a hostname survives only after the app has called it", async () => {
+    const msg = "getaddrinfo ENOTFOUND api.payments.example";
+    const before = await sendWith({}, [error({ message: msg })]);
+    expect(before[0]).toMatchObject({ message: "getaddrinfo ENOTFOUND <host>" });
+    const after = await sendWith({}, [outbound("api.payments.example"), error({ message: msg })]);
+    expect(after[1]).toMatchObject({ message: msg });
+  });
+
+  it("an outbound failure carries its code; a successful call never does", async () => {
+    const events = await sendWith({}, [
+      { ...outbound("a.example"), outcome: "error", error_code: "ENOTFOUND" },
+      { ...outbound("a.example"), outcome: "ok", error_code: "ENOTFOUND" },
+      { ...outbound("a.example"), outcome: "timeout", error_code: "jane@example.com" },
+    ]);
+    expect(events.map((e) => (e as { error_code?: string }).error_code)).toEqual(["ENOTFOUND", undefined, undefined]);
+  });
+});
