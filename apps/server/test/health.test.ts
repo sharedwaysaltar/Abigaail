@@ -291,15 +291,12 @@ describe("other signals", () => {
     expect(signals(fx.run(health))).toEqual(["new_error:RangeError /b:warning"]);
   });
 
-  it("a crash restart is a warning; a clean restart is not", () => {
+  it("reports no restarts: they are the Resilience agent's, with their cause (#111)", () => {
     recent(40);
     fx.lifecycle(fx.now - 30 * MIN, "boot");
     fx.lifecycle(fx.now - 20 * MIN, "heartbeat");
     fx.lifecycle(fx.now - 10 * MIN, "boot");
-    expect(signals(fx.run(health))).toEqual(["restart::warning"]);
-    fx.lifecycle(fx.now - 5 * MIN, "shutdown");
-    fx.lifecycle(fx.now - 4 * MIN, "boot");
-    expect(only("restart")[0]!.evidence).toMatchObject({ boots_without_shutdown: [fx.now - 10 * MIN] });
+    expect(signals(fx.run(health))).toEqual([]);
   });
 
   it("a boot on a new release is a deploy (info, no warning)", () => {
@@ -314,14 +311,13 @@ describe("other signals", () => {
     expect(found[0]!.summary).toMatch(/^app deployed release r2 \(was r1\) at \d\d:\d\d UTC\.$/);
   });
 
-  it("a second boot on the same new release without a shutdown is a crash", () => {
+  it("a second boot on the same new release is no second deploy", () => {
     fx.requests(E() - 4 * MIN, E() - 1_000, 40, {}, "r2");
     fx.lifecycle(fx.now - 30 * MIN, "heartbeat", "r1");
     fx.lifecycle(fx.now - 12 * MIN, "boot", "r2");
     fx.lifecycle(fx.now - 8 * MIN, "heartbeat", "r2");
     fx.lifecycle(fx.now - 4 * MIN, "boot", "r2");
-    expect(signals(fx.run(health))).toEqual(["deploy:r2:info", "restart::warning"]);
-    expect(only("restart")[0]!.evidence).toMatchObject({ boots_without_shutdown: [fx.now - 4 * MIN] });
+    expect(signals(fx.run(health))).toEqual(["deploy:r2:info"]);
   });
 
   it("event-loop lag names the slowest routes in the same window", () => {

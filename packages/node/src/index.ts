@@ -4,3 +4,5 @@ export { requestFlags, MAX_SCAN } from "./flags.js";
 export { clientIp, isLocalAddress } from "./proxy.js";
 export { errorCodeOf, errorDetail, errorType, parseStack, relativePath } from "./stack.js";
 export type { ErrorDetail } from "./stack.js";
+export { instanceId, RUNTIME, RuntimeMonitor } from "./runtime.js";
+export type { RuntimeOptions } from "./runtime.js";

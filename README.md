@@ -112,6 +112,7 @@ however it gets its configuration). Never commit the key.
 | `ABIGAAIL_RELEASE` | recommended | The deployed version, e.g. the git commit. Without it the release is `unknown` and deploys cannot be told apart from restarts. |
 | `ABIGAAIL_ENVIRONMENT` | no | `production`, `staging`, `development` or `test`. Default: from `NODE_ENV`. |
 | `ABIGAAIL_REGION` | no | Where the app runs, as a hosting region code such as `LON1` (uppercase letters, digits, hyphens). Sent once when the app starts; it places the app on the dashboard's map. Without it the app is listed as "not on the map". |
+| `ABIGAAIL_CRASH_RECORD_DIR` | no | An existing directory the app may write to. When the process ends, the SDK writes a few hundred bytes there (exit code, the uncaught error's class and first project frame, heap in use), and the next start reports and deletes them, so a restart says *why* it happened. Off by default. A kill by signal or out of memory leaves nothing, which is itself the answer. |
 
 If the endpoint or key is missing, the SDK switches itself off (and says so once);
 your app runs as before.
@@ -150,6 +151,13 @@ segments become `[id]`), so raw URLs are never stored even without `routes`.
 **Optional:** on a clean shutdown, call `await abigaail.shutdown()` so the last events
 are sent and Abigaail knows the stop was intended (otherwise it looks like a crash).
 The SDK never adds signal handlers itself.
+
+**Runtime signals** (on by default; `runtimeSignals: false` turns them off): the lowest
+heap after each garbage collection (a leak is a floor that keeps rising), which route was
+running when the event loop blocked, and how long the process took to start. They cost a
+timer and a GC observer, and are sent only once your Abigaail server says it accepts
+them, so upgrading the SDK before the server loses nothing. The app's **Runtime** tab
+shows them; the Resilience agent judges them.
 
 ## 3. Connect a Next.js app
 
@@ -337,6 +345,8 @@ npm run sim -- list                 # scenarios and the finding each must produc
 npm run sim -- run slow-route       # one scenario (about 20 min)
 npm run sim -- run all              # every scenario (about 55 min)
 npm run sim -- run all --app next   # demo-next (build it first: npm run build -w @abigaail/demo-next)
+npm run sim -- run blocking-route   # runtime scenarios, each on its own: blocking-route, oom-loop,
+npm run sim -- run leak             # and leak (about 4 h)
 npm run sim -- reset                # delete the simulator's data
 ```
 
@@ -347,7 +357,8 @@ The simulator runs its own server and demo app on a separate database in `data/s
 seeds four weeks of normal history there so the agents have a baseline, then sends
 realistic traffic: visitors on an hour-of-week curve, crawlers and scanner probes, a
 failing dependency, a slow route, a burst of server errors, a crash loop, an outage, a
-traffic collapse and a deploy. It prints PASS or FAIL for each expected finding, with how
+traffic collapse and a deploy; on their own, a route that blocks the event loop, an
+out-of-memory restart loop and a slow memory leak. It prints PASS or FAIL for each expected finding, with how
 long it took to appear and to resolve. It only talks to demo apps on this machine and
 never touches `data/abigaail.db`; stop `npm run dev:server` and the demo first (it needs
 their ports). To watch a run in the dashboard, set `ABIGAAIL_DB_PATH=./data/sim/abigaail.db`

@@ -62,6 +62,27 @@ export const REQUEST_FLAGS = [
 ] as const;
 export type RequestFlag = (typeof REQUEST_FLAGS)[number];
 
+/**
+ * Optional parts of schema v1 that a server announces in its 202 answer
+ * (`{features: [...]}`). An SDK sends what a feature covers only after the
+ * server it talks to has announced it, so a newer SDK never loses batches to an
+ * older server (DECISIONS #110).
+ */
+export const FEATURES = ["runtime_v1"] as const;
+export type Feature = (typeof FEATURES)[number];
+export const FEATURE_RE = /^[a-z][a-z0-9_]{0,31}$/;
+export const MAX_FEATURES = 16;
+
+/** Metrics covered by `runtime_v1`: post-GC heap floor, GC work, off-heap memory, event-loop blocks. */
+export const RUNTIME_METRIC_NAMES = [
+  "heap_floor_mb",
+  "event_loop_blocks",
+  "gc_major_count",
+  "gc_pause_ms",
+  "memory_external_mb",
+  "memory_array_buffers_mb",
+] as const;
+
 export const METRIC_NAMES = [
   "memory_rss_mb",
   "memory_heap_used_mb",
@@ -70,10 +91,12 @@ export const METRIC_NAMES = [
   "event_loop_lag_p99_ms",
   "sdk_queue_size",
   "sdk_dropped_events",
+  ...RUNTIME_METRIC_NAMES,
 ] as const;
 export type MetricName = (typeof METRIC_NAMES)[number];
 
-export const LIFECYCLE_KINDS = ["boot", "heartbeat", "shutdown"] as const;
+/** `ready` (runtime_v1): the process is listening; carries startup cost and the previous exit. */
+export const LIFECYCLE_KINDS = ["boot", "heartbeat", "shutdown", "ready"] as const;
 export type LifecycleKind = (typeof LIFECYCLE_KINDS)[number];
 
 export const OUTBOUND_OUTCOMES = ["ok", "error", "timeout"] as const;
@@ -160,6 +183,20 @@ export interface MetricEvent extends BaseEvent {
   value: number;
 }
 
+/** How the previous process of this instance ended, from the SDK's opt-in crash record. */
+export interface PrevExit {
+  /** Exit code Node reported (0-255). A kill by signal or out of memory leaves no record at all. */
+  code: number;
+  /** Class name of the uncaught error that ended it, if one did. */
+  error_type?: string;
+  /** Its first project-relative frame. */
+  frame?: StackFrame;
+  /** Heap in use at exit, MB. */
+  heap_mb?: number;
+  /** How long that process ran, seconds. */
+  uptime_s?: number;
+}
+
 export interface LifecycleEvent extends BaseEvent {
   type: "lifecycle";
   kind: LifecycleKind;
@@ -168,9 +205,40 @@ export interface LifecycleEvent extends BaseEvent {
    * only; the dashboard places the app on its map from it.
    */
   region?: string;
+  /**
+   * Opaque instance id (12 hex): a keyed hash of host name, process-manager
+   * instance and cluster worker, never the names themselves. On ready,
+   * heartbeat and shutdown (runtime_v1), so restarts are paired per instance.
+   */
+  instance?: string;
+  /** ready only: the `event_id` of this process's boot event (not a new identifier). */
+  boot_id?: string;
+  /** ready only: ms from process start until the first server was listening. */
+  startup_ms?: number;
+  /** ready only: V8's heap limit, MB. */
+  heap_limit_mb?: number;
+  /** ready only: the container's memory limit, MB, when one is set. */
+  memory_limit_mb?: number;
+  /** ready only: how the previous process of this instance ended (crash record, opt-in). */
+  prev_exit?: PrevExit;
 }
 
-export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent;
+/**
+ * Event-loop blocks in one metrics interval charged to a route (runtime_v1).
+ * No route: nothing was in flight (timers, startup or background work).
+ */
+export interface BlockEvent extends BaseEvent {
+  type: "block";
+  route?: string;
+  /** Blocks this route was charged for. */
+  count: number;
+  /** Blocked time charged to it (a block shared by several suspects is split). */
+  total_ms: number;
+  /** Longest block it was charged for. */
+  max_ms: number;
+}
+
+export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent | BlockEvent;
 export type EventType = AbigaailEvent["type"];
 
 /** Event as handed to the SDK: the SDK fills in event_id and client_ts. */
@@ -215,6 +283,13 @@ export const IPV4_RE =
 export const IPV6_RE =
   /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
 
+/** Opaque instance ids (see LifecycleEvent.instance). */
+export const INSTANCE_RE = /^[0-9a-f]{12}$/;
+/** Exit codes Node reports. */
+export const MAX_EXIT_CODE = 255;
+/** Upper bound for memory sizes in MB (1 PB); anything above is not a reading. */
+export const MAX_MEMORY_MB = 1e9;
+
 /** Hosting region codes (e.g. "LON1", "US-EAST-1"): uppercase letters, digits and hyphens. */
 export const REGION_RE = /^[A-Z0-9-]{2,24}$/;
 
@@ -228,6 +303,14 @@ export const HOST_IP_LITERAL = "ip-literal";
 export const HOST_INVALID = "invalid-host";
 export const MAX_UA_LENGTH = 512;
 export const MAX_FN_LENGTH = 100;
+
+/** The feature an event needs the server to have announced, or undefined for the base schema. */
+export function eventFeature(e: { type: string; name?: unknown; kind?: unknown; instance?: unknown }): Feature | undefined {
+  if (e.type === "block") return "runtime_v1";
+  if (e.type === "metric") return (RUNTIME_METRIC_NAMES as readonly unknown[]).includes(e.name) ? "runtime_v1" : undefined;
+  if (e.type === "lifecycle") return e.kind === "ready" || e.instance !== undefined ? "runtime_v1" : undefined;
+  return undefined;
+}
 
 export const isRoute = (r: unknown): r is string =>
   typeof r === "string" &&

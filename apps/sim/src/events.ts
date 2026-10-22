@@ -4,7 +4,7 @@
 // produce them.
 
 import { createHash } from "node:crypto";
-import type { AbigaailEvent, Batch, Environment } from "@abigaail/schema";
+import type { AbigaailEvent, Batch, Environment, LifecycleEvent, MetricName } from "@abigaail/schema";
 import { requestFlags } from "@abigaail/node";
 import { classifyUserAgent } from "@abigaail/server";
 import type { Derived } from "@abigaail/store";
@@ -60,8 +60,19 @@ export function requestItems(r: Rng, req: SimRequest, out: Outcome, ts = req.at)
   return items;
 }
 
-export function lifecycleItem(r: Rng, ts: number, kind: "boot" | "heartbeat" | "shutdown", region?: string): Item {
-  return { event: { type: "lifecycle", event_id: uuid(r), client_ts: ts, kind, ...(region && kind === "boot" ? { region } : {}) }, derived: { ts } };
+export function lifecycleItem(r: Rng, ts: number, kind: LifecycleEvent["kind"], region?: string, extra: Partial<LifecycleEvent> = {}): Item {
+  return {
+    event: { type: "lifecycle", event_id: uuid(r), client_ts: ts, kind, ...(region && kind === "boot" ? { region } : {}), ...extra },
+    derived: { ts },
+  };
+}
+
+export function metricItem(r: Rng, ts: number, name: MetricName, value: number): Item {
+  return { event: { type: "metric", event_id: uuid(r), client_ts: ts, name, value: Math.round(value * 100) / 100 }, derived: { ts } };
+}
+
+export function blockItem(r: Rng, ts: number, route: string, count: number, total_ms: number, max_ms: number): Item {
+  return { event: { type: "block", event_id: uuid(r), client_ts: ts, route, count, total_ms, max_ms }, derived: { ts } };
 }
 
 /** The wire batch for these events, as validateBatch checks it. */

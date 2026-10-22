@@ -221,3 +221,62 @@ describe("validateBatch: error messages, codes and causes (DECISIONS #103)", () 
     if (!r.ok) expect(JSON.stringify(r.issues)).not.toContain("jane");
   });
 });
+
+describe("validateBatch: runtime_v1 (DECISIONS #110-#114)", () => {
+  const life = (e: Record<string, unknown>) => ({ type: "lifecycle", event_id: ID, client_ts: 1, ...e });
+  const ready = { kind: "ready", boot_id: ID, instance: "0123456789ab" };
+  const block = { type: "block", event_id: ID, client_ts: 1, route: "/report", count: 3, total_ms: 900, max_ms: 400 };
+  const ok = (e: unknown) => validateBatch(batch([e])).ok;
+
+  it("accepts ready with its fields, the instance on heartbeat and shutdown, blocks and runtime metrics", () => {
+    expect(
+      ok(life({ ...ready, startup_ms: 812.5, heap_limit_mb: 4144, memory_limit_mb: 512,
+        prev_exit: { code: 1, error_type: "TypeError", frame: { file: "src/orders.ts", line: 42, fn: "placeOrder" }, heap_mb: 120.5, uptime_s: 3600 } })),
+    ).toBe(true);
+    expect(ok(life({ kind: "heartbeat", instance: "0123456789ab" }))).toBe(true);
+    expect(ok(life({ kind: "shutdown", instance: "0123456789ab" }))).toBe(true);
+    expect(ok(block)).toBe(true);
+    const { route: _r, ...noRoute } = block;
+    expect(ok(noRoute)).toBe(true);
+    for (const name of ["heap_floor_mb", "event_loop_blocks", "gc_major_count", "gc_pause_ms", "memory_external_mb", "memory_array_buffers_mb"]) {
+      expect(ok({ type: "metric", event_id: ID, client_ts: 1, name, value: 1 })).toBe(true);
+    }
+  });
+
+  it("keeps boot exactly as before: no instance or ready fields on it", () => {
+    expect(ok(life({ kind: "boot", instance: "0123456789ab" }))).toBe(false);
+    expect(ok(life({ kind: "boot", startup_ms: 10 }))).toBe(false);
+  });
+
+  it("ready fields are refused anywhere else, and ready needs its boot id", () => {
+    for (const k of [{ startup_ms: 10 }, { heap_limit_mb: 10 }, { memory_limit_mb: 10 }, { boot_id: ID }, { prev_exit: { code: 1 } }]) {
+      expect(ok(life({ kind: "heartbeat", ...k }))).toBe(false);
+    }
+    expect(ok(life({ kind: "ready" }))).toBe(false);
+  });
+
+  it("refuses an instance that is not 12 hex (a host name, a longer hash)", () => {
+    for (const instance of ["web-01.example.com", "0123456789abcdef", "0123456789AB"]) {
+      expect(ok(life({ ...ready, instance }))).toBe(false);
+    }
+  });
+
+  it("refuses free text and absolute paths in the crash record", () => {
+    const prev = (p: Record<string, unknown>) => life({ ...ready, prev_exit: { code: 1, ...p } });
+    expect(ok(prev({ error_type: "Order for jane@example.com" }))).toBe(false);
+    expect(ok(prev({ frame: { file: "/home/jane/app/src/x.ts", line: 1 } }))).toBe(false);
+    expect(ok(prev({ message: "boom" }))).toBe(false);
+    expect(ok(life({ ...ready, prev_exit: { code: 256 } }))).toBe(false);
+    expect(ok(life({ ...ready, prev_exit: { code: "SIGKILL" } }))).toBe(false);
+  });
+
+  it("refuses a block with a raw path, an unknown field or a zero count", () => {
+    expect(ok({ ...block, route: "/report?user=jane" })).toBe(false);
+    expect(ok({ ...block, stack: "at x" })).toBe(false);
+    expect(ok({ ...block, count: 0 })).toBe(false);
+  });
+
+  it("refuses unknown metric names", () => {
+    expect(ok({ type: "metric", event_id: ID, client_ts: 1, name: "heap_snapshot_mb", value: 1 })).toBe(false);
+  });
+});

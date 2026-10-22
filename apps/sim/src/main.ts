@@ -171,6 +171,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
       else if ("kill" in a) await demo.kill();
       else if ("stop" in a) await demo.stop();
       else if ("start" in a) await demo.start((release = a.start.release ?? release));
+      else if ("supervise" in a) demo.supervise(a.supervise);
     };
     const announce = (s: Scenario, at: number) => () => console.log(`\n${clock(at)}  ${s.name}: ${s.description}`);
     for (const { scenario: s, at } of planned) {

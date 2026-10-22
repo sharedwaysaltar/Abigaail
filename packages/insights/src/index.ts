@@ -1,5 +1,7 @@
-export { BASELINE, EVAL_LAG_MS, SCHEDULE, STATUS_FRESH_MS, VIEWS, windowEnd } from "./thresholds.js";
-export { humanDuration, mad, median, poissonCdf, poissonUpperTail, wilsonLower } from "./stats.js";
+export { BASELINE, EVAL_LAG_MS, RESILIENCE, SCHEDULE, STATUS_FRESH_MS, VIEWS, windowEnd } from "./thresholds.js";
+export { humanDuration, mad, mannKendallZ, median, poissonCdf, poissonUpperTail, theilSen, wilsonLower } from "./stats.js";
+export { blockingRoutes, causeText, crashCause, leakVerdicts, restartVerdict, startupVerdict, unexpectedRestarts } from "./resilience.js";
+export type { BlockingRoute, Crash, CrashCause, LeakKind, LeakVerdict, RestartVerdict, StartupVerdict } from "./resilience.js";
 export {
   baselineSlots,
   rowsByKey,
@@ -27,6 +29,7 @@ export {
   routesThatChanged,
   servers,
   systemFindingsView,
+  runtimeView,
   topFinding,
   usageNumbers,
   worstStatus,
@@ -45,6 +48,7 @@ export type {
   RegionInfo,
   RetentionRow,
   RouteChange,
+  RuntimeView,
   SeriesPoint,
   Server,
   UsageNumbers,

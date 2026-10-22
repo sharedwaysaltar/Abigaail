@@ -15,6 +15,7 @@ import {
   responseSeries,
   retentionView,
   routesThatChanged,
+  runtimeView,
   SCHEDULE,
   servers,
   systemFindingsView,
@@ -320,5 +321,32 @@ describe("retention on the dashboard", () => {
     // Retention is scheduled like the rollup, so the Agents page and the Watchdog know it.
     expect(SCHEDULE.retention).toEqual({ everyMs: HOUR_MS });
     expect(agentsView(store, [app], NOW).find((a) => a.name === "retention")).toMatchObject({ schedule: { everyMs: HOUR_MS } });
+  });
+});
+
+describe("runtimeView", () => {
+  const MIN = 60_000;
+  it("an app without runtime signals says so, with nothing else to show", () => {
+    requests(NOW - 10 * MIN, 5 * MIN, 30);
+    const v = runtimeView(store, app.id, NOW);
+    expect(v).toMatchObject({ signals: false, leaks: [], blockingNow: [], blocks24h: [], crashes: [], startups: [], usualStartupMs: null, findings: [] });
+    expect(v.memory.every((p) => p.heapFloor === null && p.rss === null)).toBe(true);
+  });
+
+  it("memory is the lowest reading per 15 min; blocks are summed per route; startups and limits come from ready", () => {
+    const boot = id();
+    put([
+      { ts: NOW - 3 * HOUR_MS, event: { type: "lifecycle", event_id: boot, client_ts: 1, kind: "boot" } },
+      { ts: NOW - 3 * HOUR_MS + 1000, event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "ready", boot_id: boot, instance: "0123456789ab", startup_ms: 820, heap_limit_mb: 4096 } },
+      ...[90, 80, 85].map((value, i) => ({ ts: NOW - 2 * HOUR_MS + i * MIN, event: { type: "metric" as const, event_id: id(), client_ts: 1, name: "heap_floor_mb" as const, value } })),
+      ...[1, 2].map((i) => ({ ts: NOW - HOUR_MS + i * MIN, event: { type: "block" as const, event_id: id(), client_ts: 1, route: "/report", count: 2, total_ms: 600, max_ms: 400 } })),
+    ]);
+    const v = runtimeView(store, app.id, NOW);
+    expect(v.signals).toBe(true);
+    expect(v.memory.find((p) => p.heapFloor !== null)?.heapFloor).toBe(80);
+    expect(v.blocks24h).toEqual([{ route: "/report", blocks: 4, blocked_ms: 1200, max_ms: 400 }]);
+    expect(v.startups).toEqual([{ ts: NOW - 3 * HOUR_MS + 1000, release: "r1", startup_ms: 820 }]);
+    expect(v.heapLimitMb).toBe(4096);
+    expect(v.boots).toEqual([NOW - 3 * HOUR_MS]);
   });
 });

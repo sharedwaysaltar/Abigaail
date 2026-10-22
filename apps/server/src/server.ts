@@ -2,7 +2,7 @@
 // rejected before that point closes the connection so the body never is.
 
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { LIMITS } from "@abigaail/schema";
+import { FEATURES, LIMITS } from "@abigaail/schema";
 import { validateBatch } from "@abigaail/schema/validate";
 import type { App, EventRow, Store } from "@abigaail/store";
 import { classifyUserAgent, eventTime, utcDay, visitorHash } from "./derive.js";
@@ -246,7 +246,8 @@ export function createServer(opts: ServerOptions): http.Server {
       environment: batch.environment,
       events,
     });
-    send(res, 202, { accepted: inserted, duplicates });
+    // The optional schema parts this server stores; an SDK sends them only after seeing them (#110).
+    send(res, 202, { accepted: inserted, duplicates, features: FEATURES });
     if (opts.live) {
       try {
         opts.live.publish(app.id, rows, batch.release);

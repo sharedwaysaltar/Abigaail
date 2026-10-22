@@ -4,10 +4,19 @@
 
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { DEPENDENCY_MS as DEMO_DEP, faultControl, NORMAL_FAULTS as DEMO_NORMAL, NORMAL_MS, parseFaults, SLOW_SEARCH_MS as DEMO_SLOW } from "../../demo-node/faults.mjs";
-import { DEPENDENCY_MS, NODE_MS, NORMAL_FAULTS, SLOW_SEARCH_MS } from "@abigaail/sim";
+import {
+  BLOCK_DOCS_MS as DEMO_BLOCK,
+  DEPENDENCY_MS as DEMO_DEP,
+  faultControl,
+  NORMAL_FAULTS as DEMO_NORMAL,
+  NORMAL_MS,
+  parseFaults,
+  SLOW_SEARCH_MS as DEMO_SLOW,
+} from "../../demo-node/faults.mjs";
+import { BLOCK_DOCS_MS, DEPENDENCY_MS, NODE_MS, NORMAL_FAULTS, SLOW_SEARCH_MS } from "@abigaail/sim";
 
-const failing = { type: "faults", faults: { dependency: "failing", slowSearch: true, userErrorShare: 0.5 } };
+const ok = { dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, blockDocs: false, oomKillMb: 0 };
+const failing = { type: "faults", faults: { dependency: "failing", slowSearch: true, userErrorShare: 0.5, leakPerRequest: 2560, blockDocs: true, oomKillMb: 96 } };
 
 function proc(opts: { ipc: boolean; env?: Record<string, string> }) {
   const e = new EventEmitter();
@@ -38,12 +47,17 @@ describe("fault control", () => {
     null,
     "faults",
     { type: "faults" },
-    { type: "faults", faults: { dependency: "down", slowSearch: false, userErrorShare: 0 } },
-    { type: "faults", faults: { dependency: "ok", slowSearch: "yes", userErrorShare: 0 } },
-    { type: "faults", faults: { dependency: "ok", slowSearch: false, userErrorShare: 2 } },
-    { type: "faults", faults: { dependency: "ok", slowSearch: false } },
-    { type: "faults", faults: { dependency: "ok", slowSearch: false, userErrorShare: 0, exec: "x" } },
-    { type: "faults", faults: { dependency: "ok", slowSearch: false, userErrorShare: 0 }, extra: 1 },
+    { type: "faults", faults: { ...ok, dependency: "down" } },
+    { type: "faults", faults: { ...ok, slowSearch: "yes" } },
+    { type: "faults", faults: { ...ok, userErrorShare: 2 } },
+    { type: "faults", faults: { ...ok, leakPerRequest: -1 } },
+    { type: "faults", faults: { ...ok, leakPerRequest: 1e9 } },
+    { type: "faults", faults: { ...ok, leakPerRequest: 1.5 } },
+    { type: "faults", faults: { ...ok, blockDocs: 1 } },
+    { type: "faults", faults: { ...ok, oomKillMb: "96" } },
+    { type: "faults", faults: { dependency: "ok", slowSearch: false, userErrorShare: 0 } },
+    { type: "faults", faults: { ...ok, exec: "x" } },
+    { type: "faults", faults: ok, extra: 1 },
   ])("rejects malformed message %j", (msg) => {
     expect(parseFaults(msg)).toBeUndefined();
   });
@@ -52,6 +66,7 @@ describe("fault control", () => {
     expect(NODE_MS).toEqual(NORMAL_MS);
     expect(DEPENDENCY_MS).toEqual(DEMO_DEP);
     expect(SLOW_SEARCH_MS).toBe(DEMO_SLOW);
+    expect(BLOCK_DOCS_MS).toBe(DEMO_BLOCK);
     expect(NORMAL_FAULTS).toEqual(DEMO_NORMAL);
   });
 });

@@ -152,6 +152,14 @@ export class RouteNormaliser {
     return this.cap(route);
   }
 
+  /** What normalise would return, without adding to the route cap. */
+  peek(url: string): string {
+    const path = pathOnly(url);
+    const route = this.match(path) ?? (this.fallback === "unmatched" ? ROUTE_UNMATCHED : heuristicRoute(path));
+    if (route === ROUTE_OTHER || route === ROUTE_UNMATCHED || this.seen.has(route)) return route;
+    return this.seen.size < this.maxRoutes ? route : ROUTE_OTHER;
+  }
+
   private cap(route: string): string {
     if (route === ROUTE_OTHER || route === ROUTE_UNMATCHED || this.seen.has(route)) return route;
     if (this.seen.size >= this.maxRoutes) return ROUTE_OTHER;

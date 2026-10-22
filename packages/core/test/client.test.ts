@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createClient, type Transport } from "@abigaail/core";
+import { createClient, fetchTransport, parseFeatures, type Transport } from "@abigaail/core";
 import type { Batch, EventInput } from "@abigaail/schema";
 
 const base = {
@@ -301,5 +301,99 @@ describe("timer and shutdown", () => {
     expect(performance.now() - start).toBeLessThan(500);
     c.capture(err());
     expect(c.stats().queued).toBe(0);
+  });
+});
+
+describe("schema features announced by the server (DECISIONS #110)", () => {
+  const ready = (): EventInput => ({ type: "lifecycle", kind: "ready", boot_id: "6f1c1d1e-2b2a-4c3d-8e4f-5a6b7c8d9e0f" });
+  const floor = (): EventInput => ({ type: "metric", name: "heap_floor_mb", value: 12 });
+  const block = (): EventInput => ({ type: "block", route: "/a", count: 1, total_ms: 120, max_ms: 120 });
+  const beat = (): EventInput => ({ type: "lifecycle", kind: "heartbeat", instance: "0123456789ab" });
+
+  it("sends nothing a feature covers before the server announced it, and counts it apart from drops", async () => {
+    const { batches, transport } = recording("ok");
+    const c = createClient({ ...base, transport });
+    expect(c.features()).toBeUndefined();
+    for (const e of [ready(), floor(), block(), beat(), req()]) c.capture(e);
+    // Not even queued: they cost no memory while the server's answer is unknown.
+    expect(c.stats().queued).toBe(1);
+    await c.flush();
+    expect(batches.flatMap((b) => b.events).map((e) => e.type)).toEqual(["request"]);
+    expect(c.stats()).toMatchObject({ unsupported: 4, dropped: 0, invalid: 0 });
+    // A plain "ok" is a server that announces nothing.
+    expect(c.features()).toEqual(new Set());
+  });
+
+  it("sends them once the server announced runtime_v1", async () => {
+    const batches: Batch[] = [];
+    const c = createClient({
+      ...base,
+      transport: async (b) => {
+        batches.push(b);
+        return { result: "ok", features: ["runtime_v1"] };
+      },
+    });
+    c.capture(req());
+    await c.flush();
+    expect(c.features()).toEqual(new Set(["runtime_v1"]));
+    for (const e of [ready(), floor(), block(), beat()]) c.capture(e);
+    await c.flush();
+    expect(batches[1]!.events.map((e) => e.type)).toEqual(["lifecycle", "metric", "block", "lifecycle"]);
+    expect(c.stats().unsupported).toBe(0);
+  });
+
+  it("drops queued feature events at send time if the server stopped announcing it", async () => {
+    let features = ["runtime_v1"];
+    const batches: Batch[] = [];
+    const c = createClient({
+      ...base,
+      batchSize: 1,
+      transport: async (b) => {
+        batches.push(b);
+        return { result: "ok", features };
+      },
+    });
+    c.capture(req());
+    await c.flush();
+    // Queued while the server took it; the next answer withdraws it before it is sent.
+    c.capture(req());
+    c.capture(floor());
+    features = [];
+    await c.flush();
+    expect(batches.flatMap((b) => b.events).map((e) => e.type)).toEqual(["request", "request"]);
+    expect(c.stats().unsupported).toBe(1);
+  });
+});
+
+describe("fetchTransport reads the features from a small 202 body", () => {
+  const serve = (body: string, status = 202) =>
+    fetchTransport({
+      endpoint: "http://127.0.0.1:1/ingest",
+      ingestKey: "k",
+      fetch: async () => new Response(body, { status }),
+    });
+  const batch = { schema_version: 1, sdk: { name: "x", version: "1" }, release: "r", environment: "test", events: [] } as unknown as Batch;
+  const signal = new AbortController().signal;
+
+  it("takes valid feature names only", async () => {
+    expect(await serve(JSON.stringify({ accepted: 1, duplicates: 0, features: ["runtime_v1", "BAD NAME", 7, "x".repeat(40)] }))(batch, signal)).toEqual({
+      result: "ok",
+      features: ["runtime_v1"],
+    });
+  });
+
+  it("an answer without features, or not JSON, or longer than 1 KiB announces none", async () => {
+    for (const body of [JSON.stringify({ accepted: 1, duplicates: 0 }), "<html>", JSON.stringify({ features: ["runtime_v1"], pad: "x".repeat(2000) })]) {
+      expect(await serve(body)(batch, signal)).toEqual({ result: "ok", features: [] });
+    }
+  });
+
+  it("other statuses are unchanged", async () => {
+    expect(await serve("", 400)(batch, signal)).toBe("rejected");
+    expect(await serve("", 503)(batch, signal)).toBe("failed");
+  });
+
+  it("parseFeatures never throws", () => {
+    for (const t of ["", "null", "[]", '{"features":null}', '{"features":"runtime_v1"}']) expect(parseFeatures(t)).toEqual([]);
   });
 });

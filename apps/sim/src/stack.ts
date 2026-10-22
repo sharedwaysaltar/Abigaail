@@ -161,7 +161,12 @@ export interface Demo {
   /** Clean stop. */
   stop(): Promise<void>;
   setFaults(f: Faults): Promise<void>;
+  /** Restart the demo 2 s after it dies on its own (never after our kill or stop). */
+  supervise(on: boolean): void;
 }
+
+/** A supervisor's restart delay (as systemd's RestartSec or pm2 would wait). */
+export const RESTART_AFTER_MS = 2_000;
 
 /** demo-node, forked with an IPC channel for its fault switches. */
 export class NodeDemo implements Demo {
@@ -172,12 +177,19 @@ export class NodeDemo implements Demo {
   readonly #key: string;
   private child: ChildProcess | undefined;
   private faults: Faults = NORMAL_FAULTS;
+  private supervising = false;
+  private release = "";
 
   constructor(key: string, private readonly log: Log) {
     this.#key = key;
   }
 
+  supervise(on: boolean): void {
+    this.supervising = on;
+  }
+
   async start(release: string): Promise<void> {
+    this.release = release;
     const endpoint = assertLocalTarget(`http://127.0.0.1:${PORTS.ingest}/ingest`);
     const env = {
       ...baseEnv(),
@@ -189,18 +201,33 @@ export class NodeDemo implements Demo {
       ABIGAAIL_DEMO_SIM: "1",
       PORT: String(PORTS.node),
     };
-    this.child = track(fork(DEMO_NODE_MAIN, [], { env, silent: true, execArgv: [] }));
-    capture(this.child, "demo-node", this.log);
+    const child = track(fork(DEMO_NODE_MAIN, [], { env, silent: true, execArgv: [] }));
+    this.child = child;
+    capture(child, "demo-node", this.log);
+    child.once("exit", (code, signal) => {
+      // Our own kill and stop clear this.child first; anything else died on its own.
+      if (this.child !== child) return;
+      this.child = undefined;
+      this.log.write("sim", `demo-node exited on its own (${signal ?? `code ${code}`})${this.supervising ? `; restarting in ${RESTART_AFTER_MS / 1000} s` : ""}`);
+      if (!this.supervising) return;
+      setTimeout(() => {
+        if (!this.child && this.supervising) this.start(this.release).catch((err: unknown) => this.log.write("sim", `restart failed: ${err instanceof Error ? err.message : String(err)}`));
+      }, RESTART_AFTER_MS);
+    });
     await waitForPort(PORTS.node, 15_000);
     if (this.faults !== NORMAL_FAULTS) await this.send();
   }
 
   async kill(): Promise<void> {
-    if (this.child) await terminate(this.child, "SIGKILL", 0);
+    const child = this.child;
+    this.child = undefined;
+    if (child) await terminate(child, "SIGKILL", 0);
   }
 
   async stop(): Promise<void> {
-    if (this.child) await terminate(this.child, "SIGINT", 5000);
+    const child = this.child;
+    this.child = undefined;
+    if (child) await terminate(child, "SIGINT", 5000);
   }
 
   async setFaults(f: Faults): Promise<void> {
@@ -272,6 +299,12 @@ export class NextDemo implements Demo {
   }
 
   async setFaults(f: Faults): Promise<void> {
-    if (f.dependency !== "ok" || f.slowSearch || f.userErrorShare > 0) throw new Error("demo-next has no fault switches");
+    if (f.dependency !== "ok" || f.slowSearch || f.userErrorShare > 0 || f.leakPerRequest > 0 || f.blockDocs || f.oomKillMb > 0) {
+      throw new Error("demo-next has no fault switches");
+    }
+  }
+
+  supervise(on: boolean): void {
+    if (on) throw new Error("demo-next runs no supervisor");
   }
 }

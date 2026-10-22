@@ -4,8 +4,11 @@
 // non-Errors, outbound URLs with credentials and query values) never appears,
 // in any encoding, in the batches the SDK sends.
 
+import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { init, type AbigaailNode } from "@abigaail/node";
 import type { Transport } from "@abigaail/core";
@@ -139,4 +142,66 @@ describe("no personal data leaves the app through the Node adapter", () => {
     expect(sent).not.toContain("203.0.113.77");
     expect(sent).not.toMatch(/\/home\/|\/Users\//);
   }, 60_000);
+});
+
+describe("the crash record carries nothing personal (DECISIONS #112)", () => {
+  it("an uncaught error full of personal data leaves only its class, a relative frame and numbers, on disk and on the wire", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "abigaail-crash-pii-"));
+    try {
+      const r = rng(77);
+      const planted = Array.from({ length: 40 }, () => pii(r));
+      const start = (transport: Transport) =>
+        init({
+          endpoint: "http://127.0.0.1:9/ingest", ingestKey: "abk_pii", release: "r1", environment: "test", flushIntervalMs: 0,
+          metricsIntervalMs: 0, heartbeatIntervalMs: 0, transport, env: {}, nodeVersion: "24.0.0", onInternalError: () => {},
+          crashRecordDir: dir, root: "/srv/app",
+        });
+      const listeners = () => [...process.listeners("exit"), ...process.listeners("uncaughtExceptionMonitor")] as unknown[];
+      const before = new Set(listeners());
+      adapter = start(async () => ({ result: "ok", features: ["runtime_v1"] }));
+      const added = (event: "exit" | "uncaughtExceptionMonitor") =>
+        (event === "exit" ? process.listeners("exit") : process.listeners("uncaughtExceptionMonitor")).filter((l) => !before.has(l)) as unknown as ((x: unknown) => void)[];
+
+      // A fatal error: personal data in its name, message, cause, custom fields and stack paths.
+      const err = new TypeError(`Order failed for ${planted.map((p) => p.text).join(" ")}`);
+      Object.defineProperty(err, "name", { value: "TypeError" });
+      Object.assign(err, { user: planted[0]!.text, cause: new Error(planted[1]!.text) });
+      err.stack = [
+        `TypeError: ${planted[2]!.text}`,
+        `    at ${planted[3]!.text.replace(/\W/g, "_")} (/home/${planted[4]!.text}/app/src/orders.ts:42:7)`,
+        "    at placeOrder (/srv/app/src/orders.ts:42:7)",
+      ].join("\n");
+      for (const l of added("uncaughtExceptionMonitor")) l(err);
+      for (const l of added("exit")) l(1);
+      const files = fs.readdirSync(dir);
+      expect(files).toHaveLength(1);
+      const record = fs.readFileSync(path.join(dir, files[0]!), "utf8");
+      await adapter.shutdown(100);
+
+      // The next start reports it.
+      const batches: Batch[] = [];
+      adapter = start(async (b) => {
+        batches.push(structuredClone(b));
+        return { result: "ok", features: ["runtime_v1"] };
+      });
+      await adapter.flush();
+      // ready goes once a server listens.
+      await listen((_q, res) => res.end());
+      await new Promise((res) => setTimeout(res, 1_200));
+      await adapter.flush();
+      const sent = JSON.stringify(batches);
+      for (const b of batches) expect(validateBatch(b)).toMatchObject({ ok: true });
+      const ready = batches.flatMap((b) => b.events).find((e) => e.type === "lifecycle" && e.kind === "ready");
+      // Not vacuous: the record arrived, with the class and the one frame inside the project.
+      expect(ready).toMatchObject({ prev_exit: { code: 1, error_type: "TypeError", frame: { file: "src/orders.ts", line: 42, fn: "placeOrder" } } });
+
+      for (const output of [record, sent]) {
+        const found = planted.flatMap((p) => leaks(output, p).map((n) => `${p.kind}: ${n}`));
+        expect([...new Set(found)]).toEqual([]);
+        expect(output).not.toMatch(/\/home\/|Order failed/);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

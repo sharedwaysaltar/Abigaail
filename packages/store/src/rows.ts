@@ -106,7 +106,32 @@ export function toRow(event: AbigaailEvent, derived: Derived): EventRow {
       break;
     case "lifecycle":
       row.name = event.kind;
-      row.attrs = attrsJson({ region: event.region });
+      row.attrs = attrsJson({
+        region: event.region,
+        instance: event.instance,
+        boot_id: event.boot_id,
+        startup_ms: event.startup_ms,
+        heap_limit_mb: event.heap_limit_mb,
+        memory_limit_mb: event.memory_limit_mb,
+        prev_exit: event.prev_exit && {
+          code: event.prev_exit.code,
+          error_type: event.prev_exit.error_type,
+          frame: event.prev_exit.frame && {
+            file: event.prev_exit.frame.file,
+            line: event.prev_exit.frame.line,
+            col: event.prev_exit.frame.col,
+            fn: event.prev_exit.frame.fn,
+          },
+          heap_mb: event.prev_exit.heap_mb,
+          uptime_s: event.prev_exit.uptime_s,
+        },
+      });
+      break;
+    case "block":
+      row.route = event.route ?? null;
+      row.value = event.total_ms;
+      row.duration_ms = event.max_ms;
+      row.attrs = attrsJson({ count: event.count });
       break;
   }
   return row;

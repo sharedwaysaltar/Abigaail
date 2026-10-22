@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { evaluate, findingInputs, type Agent, type AgentContext, type AgentFinding } from "@abigaail/server";
 import { HOUR_MS, openStore, type Store } from "@abigaail/store";
-import type { AbigaailEvent, RequestFlag } from "@abigaail/schema";
+import type { AbigaailEvent, LifecycleEvent, MetricName, RequestFlag } from "@abigaail/schema";
 import type { Derived } from "@abigaail/store";
 
 export const MIN = 60_000;
@@ -98,16 +98,34 @@ export class Fx {
     }]);
   }
 
-  error(ts: number, type: string, route?: string): void {
-    this.put([{ event: { type: "error", event_id: id(), client_ts: ts, error_type: type, handled: false, ...(route ? { route } : {}) }, derived: { ts } }]);
+  error(ts: number, type: string, route?: string, frame?: { file: string; line: number; fn?: string }): void {
+    this.put([{
+      event: { type: "error", event_id: id(), client_ts: ts, error_type: type, handled: false, ...(route ? { route } : {}), ...(frame ? { frames: [frame] } : {}) },
+      derived: { ts },
+    }]);
   }
 
-  metric(ts: number, name: "event_loop_lag_p99_ms" | "memory_rss_mb" | "cpu_percent" | "sdk_dropped_events" | "sdk_queue_size", value: number): void {
+  metric(ts: number, name: MetricName, value: number): void {
     this.put([{ event: { type: "metric", event_id: id(), client_ts: ts, name, value }, derived: { ts } }]);
   }
 
-  lifecycle(ts: number, kind: "boot" | "heartbeat" | "shutdown", release = "r1"): void {
-    this.put([{ event: { type: "lifecycle", event_id: id(), client_ts: ts, kind }, derived: { ts } }], release);
+  /** A lifecycle event; returns its event_id (a boot's id is what its ready event names). */
+  lifecycle(ts: number, kind: LifecycleEvent["kind"], release = "r1", extra: Partial<LifecycleEvent> = {}): string {
+    const event_id = id();
+    this.put([{ event: { type: "lifecycle", event_id, client_ts: ts, kind, ...extra }, derived: { ts } }], release);
+    return event_id;
+  }
+
+  /** A process start as the SDK with runtime signals reports it: boot, then ready naming it. */
+  start(ts: number, o: { release?: string; instance?: string; startup_ms?: number; heap_limit_mb?: number; memory_limit_mb?: number; prev_exit?: LifecycleEvent["prev_exit"] } = {}): string {
+    const { release = "r1", instance = "0123456789ab", ...ready } = o;
+    const boot = this.lifecycle(ts, "boot", release);
+    this.lifecycle(ts + 1_000, "ready", release, { boot_id: boot, instance, heap_limit_mb: 4096, ...ready });
+    return boot;
+  }
+
+  block(ts: number, route: string | undefined, count: number, total_ms: number, max_ms: number): void {
+    this.put([{ event: { type: "block", event_id: id(), client_ts: ts, ...(route ? { route } : {}), count, total_ms, max_ms }, derived: { ts } }]);
   }
 
   /** Heartbeats every minute over [from, to). */

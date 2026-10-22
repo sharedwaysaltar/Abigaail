@@ -36,10 +36,10 @@ only request, error, outbound, metric and lifecycle events.
 
 | # | Signal | Computation | Why it is not shallow |
 |---|---|---|---|
-| 1 | Is it running? | Heartbeats arriving; time since last `boot` | A `boot` with no `shutdown` before it means a crash or restart, even if the app is back up |
+| 1 | Is it running? | Heartbeats arriving; time since last `boot`; a `boot` on a new release is a deploy | Unexpected restarts (a `boot` with no `shutdown` before it) are the Resilience agent's, with their cause (DECISIONS #111) |
 | 2 | Server errors | 5xx rate per route, human traffic, sample-weighted | Lower confidence bound and at least 5 failures; 4xx tracked separately (a 401 spike is a login problem, not an outage) |
 | 3 | Latency | p50/p95/p99 per route vs that route's normal | Ratio (e.g. 2.5×) *and* an absolute floor, so 2 ms → 6 ms is not an alert |
-| 4 | Saturation | Event-loop lag p99, CPU, memory vs normal, sustained | Event-loop lag is the Node-specific signal; spikes are linked to the slowest routes in the same minute, because one blocked route freezes all of them |
+| 4 | Saturation | Event-loop lag p99, CPU, memory vs normal, sustained | Event-loop lag is the Node-specific signal; one blocked route freezes all of them. When the SDK names the route that blocks the loop, the lag (and that route's latency) fold into Resilience's `loop_blocked`; a rising floor folds RSS into its leak (#113, #114) |
 | 5 | Dependencies | Error/timeout/latency per outbound host | Names the cause: "Stripe is timing out, so `/api/checkout` fails", not two alerts |
 | 6 | Traffic collapse | Request rate vs normal while heartbeats are fine | "Up but nobody gets through": proxy, DNS or TLS broken. A heartbeat alone misses it |
 | 7 | New error bursts | Error types never seen before, or far above normal | First sign of a bad code path |
@@ -61,7 +61,7 @@ shorter timeout with a fallback message.
 |---|---|---|
 | 1 Usage | Page views, top pages | Daily unique humans (the daily salt makes cross-day uniques impossible by design; the dashboard says so). Hour-of-week seasonality. Routes going quiet. Referrer spikes. Adoption of new routes after each release |
 | 3 Watchdog | "No data for X minutes" | Learns each app's rhythm. Separates: process dead (no heartbeats); app alive but key revoked or rate-limited (ingest's 401/403/429 per key); no human traffic while heartbeats continue (Health); agent stalled or slowing. Watches Abigaail itself: DB growth, salt rotation failures, failed alert delivery. An external check watches the Watchdog |
-| 4 Resilience | Memory graph | Leak = rising floor (each post-GC low point higher than the last). Restart loops (N boots without shutdown in M minutes). Which route blocks the event loop. Cold-start cost |
+| 4 Resilience | Memory graph | Leak = a rising post-GC floor within one process (Mann-Kendall trend over ≥ 3 h after a 30 min warm-up, ≥ 20 MB), heap vs external vs RSS kept apart. Restart loops (≥ 3 in 15 min or ≥ 5 in 2 h), paired per instance, each with its cause (crash record, uncaught error, heap or container limit, or "unknown"). The route that blocks the event loop: the SDK charges the request that ran through each block, never a long-open stream. Cold-start cost against the app's earlier starts, and its first requests against their usual p95 (DECISIONS #110-#116) |
 | 5 Rollout Safety | Totals before/after deploy | Same routes, same hours, before vs after, with a significance test. New error types, routes newly returning 404, crash loops after deploy (often a failed migration). "Recommend rollback" only with high impact and high confidence |
 | 6 Privacy Auditor | Rare | Scans stored values for emails, IPs, tokens, JWTs, phone numbers, IBANs, name-like route segments. Re-scrubs stored error messages with today's rules: only a value that changes is a finding (re-scrubbed in place, counted, never shown); an older scrub version alone is not (DECISIONS #107). Verifies retention ran, `salt.bin` ≤ 1 day old, no transient fields stored. Re-identification risk: a country + city + browser combination matching one visitor is suppressed in the dashboard |
 | 7 Outbound Dependencies | Latency per host | Per-host normals. First-seen host (compromise or exfiltration signal). Retry storms. N+1 calls per inbound request |

@@ -23,6 +23,7 @@ import {
 } from "@abigaail/schema";
 import { requestFlags } from "./flags.js";
 import { clientIp, isLocalAddress } from "./proxy.js";
+import { RuntimeMonitor } from "./runtime.js";
 import { errorCodeOf, errorDetail, errorType, parseStack } from "./stack.js";
 
 export const DEFAULT_IGNORE: readonly string[] = ["/_next/static/*", "/_next/image", "/favicon.ico", "/robots.txt"];
@@ -60,6 +61,18 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
   nodeVersion?: string;
   /** Hosting region code sent with the boot event, e.g. "LON1". Default ABIGAAIL_REGION. */
   region?: string;
+  /**
+   * Runtime signals for the Resilience agent: post-GC heap floor, which route
+   * blocks the event loop, startup time. Default true; sent only once the
+   * server announces it takes them (DECISIONS #110).
+   */
+  runtimeSignals?: boolean;
+  /**
+   * Directory for the crash record (opt-in, default ABIGAAIL_CRASH_RECORD_DIR):
+   * on exit the SDK writes a few hundred bytes there (exit code, uncaught error
+   * class and frame, heap), and the next boot reports and deletes them.
+   */
+  crashRecordDir?: string;
 }
 
 /** Linking is on by default only where AsyncLocalStorage is cheap (Node >= 24). */
@@ -95,7 +108,7 @@ const NOOP: AbigaailNode = {
   routePattern: () => "other",
   flush: () => Promise.resolve(),
   shutdown: () => Promise.resolve(),
-  stats: () => ({ queued: 0, dropped: 0, invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0, breaker: "closed" }),
+  stats: () => ({ queued: 0, dropped: 0, invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0, unsupported: 0, breaker: "closed" }),
 };
 
 /** The running instance, if init() succeeded; for framework hooks that must not start one. */
@@ -262,7 +275,15 @@ export function init(opts: NodeOptions = {}): AbigaailNode {
     if (rawRegion && !region) {
       report(new AbigaailWarning("ABIGAAIL_REGION is not a region code (letters, digits and hyphens, 2-24); sending no region"));
     }
-    const instance = new NodeAdapter(client, { ...opts, linkOutbound, region }, report, hostOf(endpoint), sendTransient);
+    const crashRecordDir = opts.crashRecordDir ?? env.ABIGAAIL_CRASH_RECORD_DIR;
+    const instance = new NodeAdapter(
+      client,
+      { ...opts, linkOutbound, region, ...(crashRecordDir ? { crashRecordDir } : {}) },
+      report,
+      hostOf(endpoint),
+      sendTransient,
+      { key: ingestKey, env },
+    );
     g[SINGLETON] = instance;
     return instance;
   } catch (err) {
@@ -286,6 +307,8 @@ class NodeAdapter implements AbigaailNode {
   private readonly unsubscribers: (() => void)[] = [];
   private readonly timers: ReturnType<typeof setInterval>[] = [];
   private readonly loopDelay = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
+  /** Runtime signals (runtime.ts); undefined with runtimeSignals: false or if it could not start. */
+  private readonly runtime: RuntimeMonitor | undefined;
   private cpuPrev = process.cpuUsage();
   private wallPrev = performance.now();
   private warnedProxy = false;
@@ -298,6 +321,7 @@ class NodeAdapter implements AbigaailNode {
     private readonly ownHost: string | undefined,
     /** False when the endpoint is plain http off this machine (DECISIONS #36). */
     private readonly sendTransient: boolean,
+    identity: { key: string; env: NodeJS.ProcessEnv },
   ) {
     this.routes = new RouteNormaliser({
       ...(opts.routes ? { patterns: opts.routes } : {}),
@@ -309,6 +333,24 @@ class NodeAdapter implements AbigaailNode {
     this.root = opts.root ?? process.cwd();
     this.current = opts.linkOutbound === false ? undefined : new AsyncLocalStorage<string>();
 
+    if (opts.runtimeSignals !== false) {
+      try {
+        this.runtime = new RuntimeMonitor(
+          client,
+          report,
+          {
+            instanceKey: identity.key,
+            env: identity.env,
+            crashRecordDir: opts.crashRecordDir,
+            peekRoute: (path) => this.routes.peek(path),
+          },
+          (msg) => report(new AbigaailWarning(msg)),
+        );
+      } catch (err) {
+        report(err);
+      }
+    }
+
     this.listen("http.server.request.start", (m) => this.onServerStart(m));
     this.listen("http.server.response.finish", (m) => this.onServerFinish(m));
     this.listen("http.client.request.start", (m) => this.onClientStart(m));
@@ -318,9 +360,20 @@ class NodeAdapter implements AbigaailNode {
     this.listen("undici:request:headers", (m) => this.onFetchHeaders(m));
     this.listen("undici:request:error", (m) => this.onFetchError(m));
 
+    // When the first server listens: the process's startup cost.
+    if (this.runtime) this.listen("tracing:net.server.listen:asyncEnd", () => this.runtime?.listening("listen"));
+
     // Observes fatal errors without changing what Node does with them. The
-    // process usually exits before a flush; the next boot reveals the crash.
-    const onFatal = (err: unknown) => this.captureError(err, { handled: false });
+    // process usually exits before a flush; the next boot reveals the crash
+    // (and the crash record, when it is on, says which error it was).
+    const onFatal = (err: unknown) => {
+      this.captureError(err, { handled: false });
+      try {
+        this.runtime?.fatalError(errorType(err), parseStack(err, this.root)?.[0]);
+      } catch (e) {
+        this.report(e);
+      }
+    };
     process.on("uncaughtExceptionMonitor", onFatal);
     this.unsubscribers.push(() => process.off("uncaughtExceptionMonitor", onFatal));
 
@@ -330,8 +383,13 @@ class NodeAdapter implements AbigaailNode {
       this.every(metricsMs, () => this.sampleMetrics());
     }
     const heartbeatMs = opts.heartbeatIntervalMs ?? 60_000;
-    if (heartbeatMs > 0) this.every(heartbeatMs, () => this.client.capture({ type: "lifecycle", kind: "heartbeat" }));
-    this.client.capture({ type: "lifecycle", kind: "boot", ...(opts.region ? { region: opts.region } : {}) });
+    if (heartbeatMs > 0) {
+      this.every(heartbeatMs, () => this.client.capture({ type: "lifecycle", kind: "heartbeat", ...this.runtime?.instanceField() }));
+    }
+    // Boot is exactly as before runtime_v1; the held `ready` event names it by id.
+    const bootId = randomUUID();
+    this.client.capture({ type: "lifecycle", kind: "boot", event_id: bootId, ...(opts.region ? { region: opts.region } : {}) });
+    this.runtime?.booted(bootId);
   }
 
   /** Subscribe with every handler guarded: a subscriber that throws would surface in the host app. */
@@ -362,8 +420,13 @@ class NodeAdapter implements AbigaailNode {
 
   // Inbound ---------------------------------------------------------------
 
-  private onServerStart({ response }: { response: ServerResponse }): void {
+  private onServerStart({ request, response }: { request: IncomingMessage; response: ServerResponse }): void {
     this.starts.set(response, performance.now());
+    if (this.runtime) {
+      this.runtime.listening("request");
+      const path = pathOnly(typeof request.url === "string" ? request.url.slice(0, 2048) : "/");
+      if (!this.ignored(path)) this.runtime.requestStart(response, path);
+    }
     if (!this.current) return;
     const id = randomUUID();
     this.requestIds.set(response, id);
@@ -386,6 +449,7 @@ class NodeAdapter implements AbigaailNode {
     // A 404 on no known pattern is a probe or a typo, not a route: keeps scanners
     // from filling the route cap. A 404 on a known pattern keeps its pattern.
     const route = status === 404 && !this.routes.match(path) ? ROUTE_UNMATCHED : this.routes.normalise(path);
+    this.runtime?.requestFinish(response, route);
 
     const ip = clientIp(request, this.trustProxy);
     if (this.trustProxy === 0 && !this.warnedProxy && ip && isLocalAddress(ip)) {
@@ -535,6 +599,7 @@ class NodeAdapter implements AbigaailNode {
     this.loopDelay.reset();
     metric("sdk_queue_size", stats.queued);
     metric("sdk_dropped_events", stats.dropped + stats.invalid);
+    this.runtime?.sample(mem, metric);
   }
 
   flush(): Promise<void> {
@@ -544,8 +609,10 @@ class NodeAdapter implements AbigaailNode {
   async shutdown(timeoutMs = 1000): Promise<void> {
     try {
       if (this.stopped) return;
-      this.client.capture({ type: "lifecycle", kind: "shutdown" });
+      this.client.capture({ type: "lifecycle", kind: "shutdown", ...this.runtime?.instanceField() });
       this.stopped = true;
+      // A clean shutdown leaves no crash record.
+      this.runtime?.stop();
       for (const t of this.timers) clearInterval(t);
       for (const u of this.unsubscribers) u();
       this.loopDelay.disable();

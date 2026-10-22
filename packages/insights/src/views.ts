@@ -8,8 +8,9 @@ import {
   type RunOutcome, type StatRow, type StoreReader,
 } from "@abigaail/store";
 import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
+import { blockingRoutes, leakVerdicts, unexpectedRestarts, type BlockingRoute, type Crash, type LeakVerdict } from "./resilience.js";
 import { median, poissonCdf, poissonUpperTail } from "./stats.js";
-import { BASELINE, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
+import { BASELINE, RESILIENCE, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
 
 const MIN = 60_000;
 
@@ -573,4 +574,88 @@ export function alertsByFinding(store: StoreReader, appId: string | null, now: n
     out.set(i.finding_id, list);
   }
   return out;
+}
+
+// ---- runtime (the Resilience agent's numbers) ----------------------------------------------
+
+export interface MemoryPoint {
+  /** Start of the bucket. */
+  t: number;
+  /** Lowest reading in the bucket, MB; null without one. */
+  heapFloor: number | null;
+  rss: number | null;
+  external: number | null;
+}
+
+export interface RuntimeView {
+  /** Whether the app's SDK sends runtime signals (a heap floor, a ready event). */
+  signals: boolean;
+  /** Memory over the last day, per RUNTIME_BUCKET_MS. */
+  memory: MemoryPoint[];
+  /** Starts in the same day, for markers. */
+  boots: number[];
+  heapLimitMb: number | null;
+  memoryLimitMb: number | null;
+  leaks: LeakVerdict[];
+  /** Routes blocking the loop now (the agent's rule) and blocks per route over the last day. */
+  blockingNow: BlockingRoute[];
+  blocks24h: { route: string | null; blocks: number; blocked_ms: number; max_ms: number }[];
+  /** Unexpected restarts over the last day, newest first, with their cause. */
+  crashes: Crash[];
+  /** Startup times over the last day, newest first, and the usual one. */
+  startups: { ts: number; release: string; startup_ms: number }[];
+  usualStartupMs: number | null;
+  /** Open Resilience findings, worst first. */
+  findings: Finding[];
+}
+
+const RUNTIME_BUCKET_MS = 15 * MIN;
+const DAY_MS = 24 * HOUR_MS;
+
+/** The Runtime tab: the same rules the Resilience agent judges with (insights/resilience.ts). */
+export function runtimeView(store: StoreReader, appId: string, now: number): RuntimeView {
+  const end = windowEnd(now);
+  const from = Math.floor((now - DAY_MS) / RUNTIME_BUCKET_MS) * RUNTIME_BUCKET_MS;
+  const buckets = new Map<number, MemoryPoint>();
+  for (let t = from; t < now; t += RUNTIME_BUCKET_MS) buckets.set(t, { t, heapFloor: null, rss: null, external: null });
+  const fill = (name: string, key: "heapFloor" | "rss" | "external") => {
+    for (const p of store.metricSeries(appId, name, from, now + 1)) {
+      const b = buckets.get(Math.floor(p.ts / RUNTIME_BUCKET_MS) * RUNTIME_BUCKET_MS);
+      if (b && (b[key] === null || p.value < b[key]!)) b[key] = p.value;
+    }
+  };
+  fill("heap_floor_mb", "heapFloor");
+  fill("memory_rss_mb", "rss");
+  fill("memory_external_mb", "external");
+  const memory = [...buckets.values()];
+  const life = store.lifecycleDetail(appId, from, now + 1);
+  const ready = life.filter((r) => r.kind === "ready");
+  const latestReady = ready.at(-1);
+  const perRoute = new Map<string | null, { blocks: number; blocked_ms: number; max_ms: number }>();
+  for (const b of store.blocks(appId, from, now + 1)) {
+    const a = perRoute.get(b.route) ?? { blocks: 0, blocked_ms: 0, max_ms: 0 };
+    a.blocks += b.count;
+    a.blocked_ms += b.total_ms;
+    a.max_ms = Math.max(a.max_ms, b.max_ms);
+    perRoute.set(b.route, a);
+  }
+  const startups = store.startups(appId, from, now + 1, RESILIENCE.startupHistory);
+  const before = store.startups(appId, now - 30 * DAY_MS, now + 1, RESILIENCE.startupHistory).map((s) => s.startup_ms);
+  return {
+    signals: memory.some((p) => p.heapFloor !== null) || ready.length > 0,
+    memory,
+    boots: life.filter((r) => r.kind === "boot").map((r) => r.ts),
+    heapLimitMb: latestReady?.heap_limit_mb ?? null,
+    memoryLimitMb: latestReady?.memory_limit_mb ?? null,
+    leaks: leakVerdicts(store, appId, end),
+    blockingNow: blockingRoutes(store, appId, end),
+    blocks24h: [...perRoute]
+      .map(([route, a]) => ({ route, ...a, blocked_ms: Math.round(a.blocked_ms) }))
+      .sort((a, b) => b.blocked_ms - a.blocked_ms)
+      .slice(0, 10),
+    crashes: unexpectedRestarts(store, appId, now, DAY_MS).reverse(),
+    startups,
+    usualStartupMs: before.length >= RESILIENCE.startupMinHistory ? median(before)! : null,
+    findings: store.openFindings(appId).filter((f) => f.agent === "resilience").sort(worstFirst),
+  };
 }
