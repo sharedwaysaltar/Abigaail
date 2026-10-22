@@ -206,6 +206,20 @@ export function isRed(f: Pick<Finding, "state" | "severity" | "critical_streak">
   return f.state === "open" && f.severity === "critical" && f.critical_streak >= 2;
 }
 
+/** One group of errors on the App page. */
+export interface TopError {
+  error_type: string;
+  code: string | null;
+  message: string | null;
+  cause_type: string | null;
+  cause_code: string | null;
+  cause_message: string | null;
+  /** Routes it happened on (patterns only; a route never contains a comma). */
+  routes: string[];
+  n: number;
+  last: number;
+}
+
 /** Persisted alert dedup per (app, fingerprint). */
 export interface AlertState {
   app_id: string | null;
@@ -737,14 +751,22 @@ export class StoreReader {
     return hosts;
   }
 
-  /** The most frequent errors with ts in [from, to): type, code, scrubbed message and route. */
-  topErrors(appId: string, from: number, to: number, limit = 10): { error_type: string; code: string | null; message: string | null; route: string | null; n: number; last: number }[] {
-    return this.db
+  /**
+   * The most frequent errors with ts in [from, to), grouped by type, code,
+   * scrubbed message and cause code, so different causes are never merged.
+   * The cause's type and message come from the latest error of the group
+   * (SQLite takes bare columns from the max(ts) row); routes are listed.
+   */
+  topErrors(appId: string, from: number, to: number, limit = 10): TopError[] {
+    const rows = this.db
       .prepare(`SELECT name AS error_type, json_extract(attrs, '$.code') AS code, json_extract(attrs, '$.message') AS message,
-                       route, count(*) AS n, max(ts) AS last
+                       json_extract(attrs, '$.cause_code') AS cause_code, json_extract(attrs, '$.cause_type') AS cause_type,
+                       json_extract(attrs, '$.cause_message') AS cause_message,
+                       group_concat(DISTINCT route) AS routes, count(*) AS n, max(ts) AS last
                 FROM events WHERE app_id = ? AND type = 'error' AND ts >= ? AND ts < ?
-                GROUP BY name, code, message, route ORDER BY n DESC, last DESC LIMIT ?`)
-      .all(appId, from, to, limit) as unknown as { error_type: string; code: string | null; message: string | null; route: string | null; n: number; last: number }[];
+                GROUP BY name, code, message, cause_code ORDER BY n DESC, last DESC LIMIT ?`)
+      .all(appId, from, to, limit) as unknown as (Omit<TopError, "routes"> & { routes: string | null })[];
+    return rows.map((r) => ({ ...r, routes: r.routes ? r.routes.split(",").sort() : [] }));
   }
 
   /** Current database file size (excluding the WAL). */

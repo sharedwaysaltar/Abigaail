@@ -175,7 +175,7 @@ describe("error messages are scrubbed again by the server (DECISIONS #104)", () 
       "token <jwt> rejected for the user",
       "Login failed for the user <key>",
     ]);
-    expect(rows.every((r) => r.scrub_version === 1)).toBe(true);
+    expect(rows.every((r) => r.scrub_version === 2)).toBe(true);
     const markers = ["jane.doe", "203.0.113.77", "Hannah", "Okafor", "4242 4242", "eyJzdWIiOiJqYW5lIn0", "sk_live_51H8"];
     for (const table of s.raw<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").map((t) => t.name)) {
       const dump = JSON.stringify(s.raw(`SELECT * FROM "${table}"`));
@@ -192,10 +192,11 @@ describe("error messages are scrubbed again by the server (DECISIONS #104)", () 
     expect(s.store.scrubMismatches(appId, 0)).toBe(8);
   });
 
-  it("text the SDK scrubbed with the same rules is stored as sent and not counted", async () => {
+  it("text the SDK scrubbed is stored as sent and not counted, under the server's scrubber version", async () => {
     const res = await post(s, batch([errorEvent({ message: "User <email> not found", code: "P2025", scrub_version: 1 })]), { key });
     expect(res.status).toBe(202);
-    expect(stored()[0]).toMatchObject({ message: "User <email> not found", code: "P2025", scrub_version: 1 });
+    // An SDK on version 1 whose text is unchanged by today's rules: stored as sent, stamped with today's version.
+    expect(stored()[0]).toMatchObject({ message: "User <email> not found", code: "P2025", scrub_version: 2 });
     await s.stopListening();
     expect(s.store.scrubMismatches(appId, 0)).toBe(0);
   });

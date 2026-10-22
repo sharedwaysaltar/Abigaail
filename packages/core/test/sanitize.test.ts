@@ -178,7 +178,7 @@ describe("sanitizeEvent: error messages go through the scrubber (DECISIONS #101)
     const [e] = await sendWith({}, [
       error({ message: "User jane@example.com not found", code: "P2025", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED 10.0.0.5:5432" }),
     ]);
-    expect(e).toMatchObject({ message: "User <email> not found", code: "P2025", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED <ip>:5432", scrub_version: 1 });
+    expect(e).toMatchObject({ message: "User <email> not found", code: "P2025", cause_type: "TypeError", cause_code: "ECONNREFUSED", cause_message: "connect ECONNREFUSED <ip>:5432", scrub_version: 2 });
     expect(JSON.stringify(e)).not.toContain("jane");
   });
 

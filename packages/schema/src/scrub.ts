@@ -29,8 +29,9 @@ export function isRouteWord(segment: string): boolean {
 }
 
 /** Rules and vocabulary version. Any change to either bumps it. */
-export const SCRUB_VERSION = 1;
-export const SCRUB_VERSIONS: readonly number[] = [1];
+export const SCRUB_VERSION = 2;
+/** 1: chunk 9. 2: a number keeps only a fixed, case-exact unit ("221B" is no longer "221 bytes"). */
+export const SCRUB_VERSIONS: readonly number[] = [1, 2];
 
 export const SCRUB_LIMITS = {
   /** Characters looked at; the rest is cut before any work. */
@@ -100,10 +101,16 @@ export function identifierPieces(s: string): string[] {
   return out;
 }
 
-/** Every piece is a vocabulary word (or a number of at most 5 digits): an identifier made of known words only. */
-export function isVocabIdentifier(s: string): boolean {
+/**
+ * Every piece is a vocabulary word: an identifier made of known words only.
+ * A token mixing letters and digits is kept only if it is itself a
+ * vocabulary word ("utf8", "v1"), so "12a", "221B" or "email_1" are not;
+ * `digits` allows number pieces of at most 5 digits (error codes: ERR_HTTP2_...).
+ */
+export function isVocabIdentifier(s: string, digits = false): boolean {
   if (!s || s.length > SCRUB_LIMITS.tokenMax || !/^[A-Za-z0-9_./\-@$:]+$/.test(s) || !/[A-Za-z]/.test(s)) return false;
   if (VOCABULARY.has(s.toLowerCase())) return true;
+  if (!digits && /\d/.test(s)) return false;
   const pieces = identifierPieces(s);
   return pieces.length > 0 && pieces.every((p) => (/^\d+$/.test(p) ? p.length <= 5 : VOCABULARY.has(p.toLowerCase())));
 }
@@ -120,7 +127,7 @@ export function cleanCode(v: unknown): string | undefined {
   if (SQLSTATE_RE.test(v) && v.replace(/[^0-9]/g, "").length >= 2) return v;
   if (/^[A-Za-z][A-Za-z0-9_.]*$/.test(v)) {
     const rest = v.replace(/^(UND_ERR_|ERR_|ER_)/, "");
-    if (rest && isVocabIdentifier(rest)) return v;
+    if (rest && isVocabIdentifier(rest, true)) return v;
   }
   return undefined;
 }
@@ -139,7 +146,11 @@ const SECRET_NAMES = new Set([
 const EMAIL_RE = /^(?:mailto:)?[^\s@<>()]{1,64}@[^\s@<>()]{1,255}$/i;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const URL_START_RE = /^[A-Za-z][A-Za-z0-9+.-]{1,15}:\/\//;
-const NUMBER_RE = /^\d{1,5}(?:\.\d{1,3})?(?:ms|s|m|h|d|b|kb|mb|gb|kib|mib|gib|%)?$/i;
+/**
+ * A number with at most a known unit, case exact: a token mixing digits and
+ * letters is otherwise never kept ("221B", "4th", "2FA" are <word>).
+ */
+const NUMBER_RE = /^\d{1,5}(?:\.\d{1,3})?(?:ms|s|m|h|d|KB|MB|GB|TB|KiB|MiB|GiB|kB|%)?$/;
 const LONG_DIGITS_RE = /^\d{6,}$/;
 const HEX_ID_RE = /^(?:0x)?[0-9a-fA-F]{12,}$/;
 const PREFIXED_ID_RE = /^[A-Za-z]{2,10}_[A-Za-z0-9]{3,}$/;

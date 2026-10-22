@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { AppNav } from "@/components/AppNav";
 import { Figures } from "@/components/Figures";
 import { ResponseChart } from "@/components/ResponseChart";
-import { Scrubbed } from "@/components/Scrubbed";
+import { Cause, Scrubbed } from "@/components/Scrubbed";
 import { Status } from "@/components/Status";
 import { reader } from "@/lib/data";
 import { ago, hourLabel, ms, pct, when } from "@/lib/format";
@@ -197,9 +197,25 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
                   <div>
                     <span className="mono">{e.error_type}</span>
                     {e.code ? <span className="mono muted"> {e.code}</span> : null}
-                    {e.route ? <span className="muted small"> on <span className="mono">{e.route}</span></span> : null}
+                    {e.routes.length ? (
+                      <span className="muted small">
+                        {" on "}
+                        {e.routes.slice(0, 3).map((r, k) => (
+                          <span key={r}>{k ? ", " : ""}<span className="mono">{r}</span></span>
+                        ))}
+                        {e.routes.length > 3 ? ` and ${e.routes.length - 3} more` : ""}
+                      </span>
+                    ) : null}
                   </div>
-                  <div className="small">{e.message ? <Scrubbed text={e.message} /> : <span className="faint">no message</span>}</div>
+                  <div className="small">
+                    {e.message ? <Scrubbed text={e.message} /> : <span className="faint">no message</span>}
+                    {e.cause_type || e.cause_code || e.cause_message ? (
+                      <>
+                        {" · "}
+                        <Cause type={e.cause_type} code={e.cause_code} message={e.cause_message} />
+                      </>
+                    ) : null}
+                  </div>
                   <div className="small muted num">{count(e.n)} time{e.n === 1 ? "" : "s"} · last {when(e.last)}</div>
                 </li>
               ))}

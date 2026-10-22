@@ -115,6 +115,14 @@ describe("typed placeholders", () => {
     expect(scrub(input)).toBe(expected);
   });
 
+  it("a token mixing digits and letters stays only as a vocabulary word or a code (version 2)", () => {
+    expect(scrub("Order 12b failed for the customer")).toBe("Order <word> failed for the customer");
+    expect(scrub("Code 2FA check failed for the user")).toBe("Code <word> check failed for the user");
+    expect(scrub("Upload of 221B exceeded the limit for the user")).toBe("Upload of <word> exceeded the limit for the user");
+    expect(scrub("Request to the v1 api failed with utf8 sha256")).toBe("Request to the v1 api failed with utf8 sha256");
+    expect(scrub("invalid input syntax for type uuid: 3D000")).toBe("invalid input syntax for type uuid: 3D000");
+  });
+
   it("small numbers, units and codes stay", () => {
     expect(scrub("Request failed with status code 404")).toBe("Request failed with status code 404");
     expect(scrub("timeout of 5000ms exceeded")).toBe("timeout of 5000ms exceeded");

@@ -27,3 +27,16 @@ export function Scrubbed({ text }: { text: string }) {
     </span>
   );
 }
+
+/** "caused by ECONNREFUSED: connect ECONNREFUSED <ip>:43641": the cause's code (else its type) and scrubbed message. */
+export function Cause({ type, code, message }: { type?: string | null; code?: string | null; message?: string | null }) {
+  const name = code ?? type;
+  if (!name && !message) return null;
+  return (
+    <span className="cause">
+      caused by {name ? <span className="mono">{name}</span> : null}
+      {name && message ? ": " : null}
+      {message ? <Scrubbed text={message} /> : null}
+    </span>
+  );
+}

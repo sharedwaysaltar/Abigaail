@@ -125,4 +125,10 @@ export const CORPUS: readonly CorpusEntry[] = [
   { lib: "app", input: "user jane%40example.com not found", expected: "user <email> not found" },
   { lib: "app", input: "The user amFuZUBleGFtcGxlLmNvbQ== was not found", expected: "The user <token> was not found" },
   { lib: "app", input: "Upload failed for the user\nstack: at /home/jane/app/src/upload.ts:42", expected: "Upload failed for the user" },
+  // Version 2 (owner's test): a token mixing digits and letters is kept only as a vocabulary word or a code.
+  { lib: "app", input: "Address 221B Baker Street, London failed validation", expected: null },
+  { lib: "app", input: "Address 221B Baker Street, London failed validation for the customer account", expected: "Address <word> <word> <word>, <word> failed validation for the customer account" },
+  { lib: "app", input: "Delivery to flat 4th floor 12a failed for the user", expected: "<word> to <word> <word> <word> <word> failed for the user" },
+  { lib: "app", input: "Upload of 512KB exceeded the limit of 10MB", expected: "Upload of 512KB exceeded the limit of 10MB" },
+  { lib: "app", input: "Retry in 30s after 2h for the request", expected: "Retry in 30s after 2h for the request" },
 ];
