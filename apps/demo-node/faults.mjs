@@ -70,3 +70,21 @@ export function faultControl(proc = process) {
   }
   return { enabled, get: () => faults };
 }
+
+/**
+ * Keeps `kb` KB of real heap for good in `kept`: one 8192-element array of
+ * small integers (8 bytes each, 64 KB) per 64 KB. Not a string: V8 builds
+ * "x".repeat(n) as a rope, which retained about 0.6 MB for 40 MB intended
+ * (owner's measurement); a live test checks the heap really grows.
+ */
+export function rememberSearch(kept, kb) {
+  for (let i = 0; i < kb / 64; i++) kept.push(new Array(8192).fill(kept.length));
+}
+
+/** Synchronous work that blocks the event loop for `ms` (a live test measures the lag). */
+export function renderDocs(ms) {
+  const until = performance.now() + ms;
+  let x = 0;
+  while (performance.now() < until) x += Math.sqrt(x + 1);
+  return x;
+}

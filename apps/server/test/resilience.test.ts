@@ -38,7 +38,7 @@ describe("restarts", () => {
     fx.lifecycle(fx.now - 10 * MIN, "boot");
     const [f] = only("restart");
     expect(f).toMatchObject({ severity: "warning", evidence: { restarts_15_min: 1, loop: false } });
-    expect(f!.summary).toBe("app restarted once in the last 15 min without a clean shutdown. killed by a signal or the host (Node does not report which).");
+    expect(f!.summary).toBe("app restarted once in the last 15 min without a clean shutdown. Killed by a signal or the host (Node does not report which).");
   });
 
   it("3 in 15 min is a restart loop: the same finding turns critical", () => {
@@ -130,56 +130,56 @@ describe("restart causes, strongest evidence first", () => {
 
   it("the crash record's uncaught error", () => {
     crashAt({ code: 1, error_type: "TypeError", frame: { file: "src/orders.ts", line: 42, fn: "placeOrder" } });
-    expect(cause().summary).toContain("uncaught TypeError at src/orders.ts:42 (exit code 1)");
+    expect(cause().summary).toContain("Uncaught TypeError at src/orders.ts:42 (exit code 1)");
     expect(cause().action).toMatch(/^Fix the uncaught error/);
   });
 
   it("the crash record's exit code", () => {
     crashAt({ code: 3 });
-    expect(cause().summary).toContain("exited with code 3");
+    expect(cause().summary).toContain("Exited with code 3");
   });
 
   it("an uncaught error event that got out just before the process went quiet", () => {
     fx.error(fx.now - 10 * MIN - 20_000, "RangeError", "/report", { file: "src/report.ts", line: 9 });
     crashAt();
-    expect(cause().summary).toContain("uncaught RangeError at src/report.ts:9");
+    expect(cause().summary).toContain("Uncaught RangeError at src/report.ts:9");
   });
 
   it("an uncaught error long before is not the cause", () => {
     fx.error(fx.now - 30 * MIN, "RangeError", "/report");
     crashAt();
-    expect(cause().summary).toContain("killed by a signal or the host");
+    expect(cause().summary).toContain("Killed by a signal or the host");
   });
 
   it("heap near its limit, projected to when the process went quiet: out of memory", () => {
     for (let i = 0; i < 6; i++) fx.metric(fx.now - 13 * MIN + i * 30_000, "memory_heap_used_mb", 3000 + i * 150);
     crashAt();
-    expect(cause().summary).toMatch(/likely out of memory \(heap \d+ of 4096 MB\)/);
+    expect(cause().summary).toMatch(/Likely out of memory \(heap \d+ of 4096 MB\)/);
     expect(cause().action).toMatch(/Find what keeps memory growing/);
   });
 
   it("no record, no error, but the heap rose steadily until it stopped: likely out of memory", () => {
     for (let i = 0; i < 5; i++) fx.metric(fx.now - 13 * MIN + i * 30_000, "memory_heap_used_mb", 20 + i * 18);
     crashAt();
-    expect(cause().summary).toContain("likely out of memory: its heap grew from 20 to 92 MB until it stopped");
+    expect(cause().summary).toContain("Likely out of memory: its heap grew from 20 to 92 MB until it stopped");
   });
 
   it("a heap that rose and then levelled off before the crash is no evidence", () => {
     for (const [i, v] of [20, 50, 80, 80, 79].entries()) fx.metric(fx.now - 13 * MIN + i * 30_000, "memory_heap_used_mb", v);
     crashAt();
-    expect(cause().summary).toContain("killed by a signal or the host");
+    expect(cause().summary).toContain("Killed by a signal or the host");
   });
 
   it("RSS near the container's memory limit", () => {
     for (let i = 0; i < 4; i++) fx.metric(fx.now - 12 * MIN + i * 30_000, "memory_rss_mb", 1000);
     crashAt();
-    expect(cause().summary).toContain("likely killed by the container memory limit (1000 of 1024 MB)");
+    expect(cause().summary).toContain("Likely killed by the container memory limit (1000 of 1024 MB)");
   });
 
   it("without evidence: unknown, and says so", () => {
     for (let i = 0; i < 4; i++) fx.metric(fx.now - 12 * MIN + i * 30_000, "memory_heap_used_mb", 400);
     crashAt();
-    expect(cause().summary).toContain("killed by a signal or the host (Node does not report which)");
+    expect(cause().summary).toContain("Killed by a signal or the host (Node does not report which)");
   });
 });
 

@@ -23,3 +23,5 @@ export const MAX_LEAK_KB: number;
 export const NORMAL_FAULTS: Faults;
 export function parseFaults(msg: unknown): Faults | undefined;
 export function faultControl(proc?: FaultProcess): { enabled: boolean; get: () => Faults };
+export function rememberSearch(kept: unknown[], kb: number): void;
+export function renderDocs(ms: number): number;

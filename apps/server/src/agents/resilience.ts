@@ -52,11 +52,12 @@ function restarts(ctx: AgentContext, app: App): AgentFinding[] {
   const times = v.recent === 1 ? "once" : `${v.recent} times`;
   const longer = v.crashes.length > v.recent ? ` (${v.crashes.length} in the last ${humanDuration(R.loopLongMs)})` : "";
   const each = recent.every((c) => c.text === top.text) && recent.length > 1 ? "Each time: " : recent.length > 1 ? "Most often: " : "";
+  const said = each ? top.text : `${top.text[0]!.toUpperCase()}${top.text.slice(1)}`;
   return [{
     signal: "restart",
     subject: "",
     severity: v.severity,
-    summary: `${app.name} restarted ${times} in the last 15 min without a clean shutdown${longer}${v.loop ? ": a restart loop" : ""}. ${each}${top.text}.`,
+    summary: `${app.name} restarted ${times} in the last 15 min without a clean shutdown${longer}${v.loop ? ": a restart loop" : ""}. ${each}${said}.`,
     cause: top.replaced
       ? `${top.text[0]!.toUpperCase()}${top.text.slice(1)}; a new instance took its place.`
       : `${top.text[0]!.toUpperCase()}${top.text.slice(1)}.`,
