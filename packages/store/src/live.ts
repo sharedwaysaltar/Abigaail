@@ -27,7 +27,8 @@ export type LiveEvent =
       cause_message?: string;
     })
   | (LiveBase & { type: "metric"; name: string; value: number })
-  | (LiveBase & { type: "lifecycle"; kind: string });
+  | (LiveBase & { type: "lifecycle"; kind: string })
+  | (LiveBase & { type: "block"; route: string | null; count: number; total_ms: number; max_ms: number });
 
 /** Every key a live event of each type may carry. Tests hold toLiveEvent to this. */
 export const LIVE_FIELDS: Readonly<Record<LiveEvent["type"], readonly string[]>> = {
@@ -36,6 +37,7 @@ export const LIVE_FIELDS: Readonly<Record<LiveEvent["type"], readonly string[]>>
   error: ["type", "ts", "release", "error_type", "route", "handled", "message", "code", "cause_type", "cause_code", "cause_message"],
   metric: ["type", "ts", "release", "name", "value"],
   lifecycle: ["type", "ts", "release", "kind"],
+  block: ["type", "ts", "release", "route", "count", "total_ms", "max_ms"],
 };
 
 function attrs(row: EventRow): Record<string, unknown> {
@@ -98,6 +100,17 @@ export function toLiveEvent(row: EventRow, release: string): LiveEvent | undefin
       return { type: "metric", ...base, name: row.name ?? "", value: row.value ?? 0 };
     case "lifecycle":
       return { type: "lifecycle", ...base, kind: row.name ?? "" };
+    case "block": {
+      const count = attrs(row).count;
+      return {
+        type: "block",
+        ...base,
+        route: row.route,
+        count: typeof count === "number" ? count : 1,
+        total_ms: row.value ?? 0,
+        max_ms: row.duration_ms ?? 0,
+      };
+    }
     default:
       return undefined;
   }

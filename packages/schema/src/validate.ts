@@ -10,12 +10,15 @@ import {
   HOST_RE,
   HTTP_METHODS,
   IDENT_RE,
+  INSTANCE_RE,
   IPV4_RE,
   IPV6_RE,
   LIFECYCLE_KINDS,
   LIMITS,
   MAX_DURATION_MS,
+  MAX_EXIT_CODE,
   MAX_FN_LENGTH,
+  MAX_MEMORY_MB,
   MAX_UA_LENGTH,
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
@@ -53,6 +56,16 @@ const method = z.enum(HTTP_METHODS);
 const durationMs = z.number().nonnegative().max(MAX_DURATION_MS);
 const bytes = z.number().int().nonnegative();
 
+/** A stack frame: project-relative path and identifier only (DECISIONS #7). */
+export const frameSchema = z.strictObject({
+  file: z.string().max(LIMITS.maxFramePathLength).regex(FRAME_PATH_RE, "must be a relative path"),
+  line: z.number().int().nonnegative(),
+  col: z.number().int().nonnegative().optional(),
+  fn: z.string().max(MAX_FN_LENGTH).regex(IDENT_RE).optional(),
+});
+const errorType = z.string().max(LIMITS.maxErrorTypeLength).regex(IDENT_RE, "must be an error class name");
+const megabytes = z.number().nonnegative().max(MAX_MEMORY_MB);
+
 const transient = z
   .strictObject({
     ip: z.string().max(45).refine((ip) => IPV4_RE.test(ip) || IPV6_RE.test(ip), "must be an IP address").optional(),
@@ -80,23 +93,13 @@ export const errorEventSchema = z.strictObject({
   type: z.literal("error"),
   event_id: eventId,
   client_ts: clientTs,
-  error_type: z.string().max(LIMITS.maxErrorTypeLength).regex(IDENT_RE, "must be an error class name"),
+  error_type: errorType,
   route: route.optional(),
   handled: z.boolean(),
-  frames: z
-    .array(
-      z.strictObject({
-        file: z.string().max(LIMITS.maxFramePathLength).regex(FRAME_PATH_RE, "must be a relative path"),
-        line: z.number().int().nonnegative(),
-        col: z.number().int().nonnegative().optional(),
-        fn: z.string().max(MAX_FN_LENGTH).regex(IDENT_RE).optional(),
-      }),
-    )
-    .max(LIMITS.maxStackFrames)
-    .optional(),
+  frames: z.array(frameSchema).max(LIMITS.maxStackFrames).optional(),
   message: scrubbed.optional(),
   code: code.optional(),
-  cause_type: z.string().max(LIMITS.maxErrorTypeLength).regex(IDENT_RE, "must be an error class name").optional(),
+  cause_type: errorType.optional(),
   cause_code: code.optional(),
   cause_message: scrubbed.optional(),
   scrub_version: z.number().int().positive().max(1000).optional(),
@@ -124,6 +127,17 @@ export const metricEventSchema = z.strictObject({
   value: z.number().finite(),
 });
 
+export const prevExitSchema = z.strictObject({
+  code: z.number().int().min(0).max(MAX_EXIT_CODE),
+  error_type: errorType.optional(),
+  frame: frameSchema.optional(),
+  heap_mb: megabytes.optional(),
+  uptime_s: z.number().int().nonnegative().max(10 * 365 * 86_400).optional(),
+});
+
+/** Fields `ready` alone may carry. */
+const READY_ONLY = ["boot_id", "startup_ms", "heap_limit_mb", "memory_limit_mb", "prev_exit"] as const;
+
 export const lifecycleEventSchema = z
   .strictObject({
     type: z.literal("lifecycle"),
@@ -131,8 +145,35 @@ export const lifecycleEventSchema = z
     client_ts: clientTs,
     kind: z.enum(LIFECYCLE_KINDS),
     region: z.string().regex(REGION_RE, "must be a region code").optional(),
+    instance: z.string().regex(INSTANCE_RE, "must be an instance id").optional(),
+    boot_id: eventId.optional(),
+    startup_ms: durationMs.optional(),
+    heap_limit_mb: megabytes.optional(),
+    memory_limit_mb: megabytes.optional(),
+    prev_exit: prevExitSchema.optional(),
   })
-  .refine((e) => e.region === undefined || e.kind === "boot", { message: "region is sent on boot only", path: ["region"] });
+  .refine((e) => e.region === undefined || e.kind === "boot", { message: "region is sent on boot only", path: ["region"] })
+  // The boot event stays exactly as before runtime_v1, so an older server accepts it.
+  .refine((e) => e.instance === undefined || e.kind !== "boot", { message: "instance is not sent on boot", path: ["instance"] })
+  .superRefine((e, ctx) => {
+    if (e.kind === "ready") {
+      if (e.boot_id === undefined) ctx.addIssue({ code: "custom", message: "ready needs boot_id", path: ["boot_id"] });
+      return;
+    }
+    for (const k of READY_ONLY) {
+      if (e[k] !== undefined) ctx.addIssue({ code: "custom", message: `${k} is sent on ready only`, path: [k] });
+    }
+  });
+
+export const blockEventSchema = z.strictObject({
+  type: z.literal("block"),
+  event_id: eventId,
+  client_ts: clientTs,
+  route: route.optional(),
+  count: z.number().int().min(1).max(1_000_000),
+  total_ms: durationMs,
+  max_ms: durationMs,
+});
 
 export const eventSchema = z.discriminatedUnion("type", [
   requestEventSchema,
@@ -140,6 +181,7 @@ export const eventSchema = z.discriminatedUnion("type", [
   outboundEventSchema,
   metricEventSchema,
   lifecycleEventSchema,
+  blockEventSchema,
 ]);
 
 export const batchSchema = z.strictObject({

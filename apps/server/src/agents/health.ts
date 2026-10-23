@@ -7,7 +7,9 @@
 import { HOUR_MS, type App, type Severity, type StatRow } from "@abigaail/store";
 import {
   baselineSlots,
+  blockingRoutes,
   humanDuration,
+  leakVerdicts,
   median,
   poissonCdf,
   rowsByKey,
@@ -23,7 +25,6 @@ import { HEALTH as H, SCHEDULE, WATCHDOG } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 
 const MIN = 60_000;
-const DAY_MS = 24 * HOUR_MS;
 const RANK: Record<Severity, number> = { critical: 3, warning: 2, unknown: 1, info: 0 };
 const worse = (a: Severity, b: Severity): Severity => (RANK[a] >= RANK[b] ? a : b);
 const pct = (x: number) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
@@ -46,46 +47,30 @@ interface Windows {
 
 const byKey = (rows: StatRow[]) => new Map(rows.map((r) => [r.key, r]));
 
-// ---- 1. restarts and deploys ---------------------------------------------------
+// ---- 1. deploys ------------------------------------------------------------------
 
 /**
- * A boot on a new release is a deploy (info). A boot on the same release with
- * no shutdown before it is a crash or kill (warning). The release comes from
- * the app's last event of any type before the boot.
+ * A boot on a new release is a deploy (info). The release comes from the app's
+ * last event of any type before the boot. Unexpected restarts (a boot with no
+ * shutdown before it) are the Resilience agent's, with their cause (#111).
  */
-function restarts(ctx: AgentContext, app: App): AgentFinding[] {
-  const events = ctx.store.lifecycle(app.id, ctx.now - DAY_MS, ctx.now + 1);
-  const crashes: number[] = [];
+function deploys(ctx: AgentContext, app: App): AgentFinding[] {
   const out: AgentFinding[] = [];
-  events.forEach((e, i) => {
-    if (e.kind !== "boot" || e.ts < ctx.now - 15 * MIN) return;
+  for (const e of ctx.store.lifecycle(app.id, ctx.now - 15 * MIN, ctx.now + 1)) {
+    if (e.kind !== "boot") continue;
     const previous = ctx.store.releaseBefore(app.id, e.ts);
-    if (previous === undefined) return; // the app's first boot ever
-    if (previous !== e.release) {
-      out.push({
-        signal: "deploy",
-        subject: e.release,
-        severity: "info",
-        summary: `${app.name} deployed release ${e.release} (was ${previous}) at ${new Date(e.ts).toISOString().slice(11, 16)} UTC.`,
-        action: "Nothing to do. Health compares the new release with the app's normal; watch for findings in the next minutes.",
-        evidence: { release: e.release, previous_release: previous, booted_at: e.ts },
-        fact: true,
-      });
-      return;
-    }
-    // Same release, and the previous lifecycle event is not a shutdown: crash or kill.
-    if (i > 0 && events[i - 1]!.kind !== "shutdown") crashes.push(e.ts);
-  });
-  if (!crashes.length) return out;
-  return [...out, {
-    signal: "restart",
-    subject: "",
-    severity: "warning",
-    summary: `${app.name} restarted ${crashes.length === 1 ? "once" : `${crashes.length} times`} in the last 15 min without a clean shutdown.`,
-    cause: "The process crashed or was killed (out of memory, an unhandled error, or the host restarting it).",
-    action: "Check the app's own logs around the restart time for a fatal error or an OOM kill.",
-    evidence: { boots_without_shutdown: crashes, window_ms: 15 * MIN },
-  }];
+    if (previous === undefined || previous === e.release) continue; // the first boot ever, or a restart
+    out.push({
+      signal: "deploy",
+      subject: e.release,
+      severity: "info",
+      summary: `${app.name} deployed release ${e.release} (was ${previous}) at ${new Date(e.ts).toISOString().slice(11, 16)} UTC.`,
+      action: "Nothing to do. Health compares the new release with the app's normal; watch for findings in the next minutes.",
+      evidence: { release: e.release, previous_release: previous, booted_at: e.ts },
+      fact: true,
+    });
+  }
+  return out;
 }
 
 // ---- 2/3. routes: 5xx, auth failures, latency --------------------------------
@@ -310,14 +295,15 @@ function dependencyFinding(dep: Dependency, linked: { route: string | null; call
 
 // ---- 4. saturation ---------------------------------------------------------------
 
-function saturation(ctx: AgentContext, app: App, w: Windows, slots: Slots): AgentFinding[] {
+function saturation(ctx: AgentContext, app: App, w: Windows, slots: Slots, blocking: ReadonlySet<string>): AgentFinding[] {
   const out: AgentFinding[] = [];
   const series = (name: string, windowMs: number) =>
     ctx.store.metricSeries(app.id, name, w.end - windowMs, w.end).map((s) => s.value);
 
   const lag = series("event_loop_lag_p99_ms", 5 * MIN);
   const lagLevel = median(lag);
-  if (lag.length >= H.minLagSamples && lagLevel !== undefined && lagLevel >= H.lagWarnMs) {
+  // When the SDK names the route that blocks the loop, Resilience reports that route instead (#113).
+  if (lag.length >= H.minLagSamples && lagLevel !== undefined && lagLevel >= H.lagWarnMs && blocking.size === 0) {
     // One blocked route freezes all of them: name the slowest in the same window.
     const slowest = [...w.routes5.values()]
       .filter((r) => r.p95 !== null)
@@ -339,13 +325,15 @@ function saturation(ctx: AgentContext, app: App, w: Windows, slots: Slots): Agen
   const rss = series("memory_rss_mb", 15 * MIN);
   const rssLevel = median(rss);
   const rssNormal = typicalLevel(metricBase.get("memory_rss_mb"));
-  if (rss.length >= H.minResourceSamples && rssLevel !== undefined && rssNormal !== undefined && rssLevel >= H.rssWarnRatio * rssNormal) {
+  const high = rss.length >= H.minResourceSamples && rssLevel !== undefined && rssNormal !== undefined && rssLevel >= H.rssWarnRatio * rssNormal;
+  // A rising floor is the Resilience agent's leak finding, with its cause (#114).
+  if (high && leakVerdicts(ctx.store, app.id, w.end).length === 0) {
     out.push({
       signal: "memory",
       subject: "",
       severity: "warning",
-      summary: `${app.name} uses ${Math.round(rssLevel)} MB of memory, ${(rssLevel / rssNormal).toFixed(1)}× its usual ${Math.round(rssNormal)} MB${normalFor(slots, w.end)}.`,
-      action: "Check for a leak or an unusually large cache; the Resilience agent (Phase 2) will track the post-GC floor.",
+      summary: `${app.name} uses ${Math.round(rssLevel!)} MB of memory, ${(rssLevel! / rssNormal!).toFixed(1)}× its usual ${Math.round(rssNormal!)} MB${normalFor(slots, w.end)}.`,
+      action: "Check for an unusually large cache or load; a leak (a rising floor) is reported by the Resilience agent.",
       evidence: { window_ms: 15 * MIN, rss_mb: rssLevel, baseline_rss_mb: rssNormal, baseline: slots.source },
     });
   }
@@ -506,7 +494,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
     });
   }
 
-  out.push(...restarts(ctx, app));
+  out.push(...deploys(ctx, app));
 
   // Dependencies first, so failing routes they explain fold into them.
   const deps = dependencies(ctx, app, w, slots);
@@ -567,7 +555,10 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
     out.push(dependencyFinding(dep, linkedIn(dep.windowMs).filter((l) => l.host === dep.host), slots, end));
   }
 
+  // Routes the SDK caught blocking the event loop: their slowness is the Resilience agent's finding (#113).
+  const blocking = new Set(blockingRoutes(ctx.store, app.id, end).map((b) => b.route));
   for (const { route, finding } of routeLatency(w, slots, routeBase)) {
+    if (blocking.has(route)) continue;
     // A slow dependency this route calls is the likely cause (AGENTS.md example).
     const called = linked.filter((l) => l.route === route && slowHosts.has(l.host)).map((l) => slowHosts.get(l.host)!);
     if (called.length) {
@@ -583,7 +574,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
 
   out.push(
     ...authFailures(w, slots, routeBase),
-    ...saturation(ctx, app, w, slots),
+    ...saturation(ctx, app, w, slots, blocking),
     ...trafficCollapse(ctx, app, w, slots),
     ...errorBursts(ctx, app, w, slots),
     ...dataTrust(ctx, app, w),

@@ -3,10 +3,13 @@ import {
   HOST_INVALID,
   HOST_IP_LITERAL,
   HTTP_METHODS,
+  INSTANCE_RE,
   LIFECYCLE_KINDS,
   LIMITS,
   MAX_DURATION_MS,
+  MAX_EXIT_CODE,
   MAX_FN_LENGTH,
+  MAX_MEMORY_MB,
   MAX_UA_LENGTH,
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
@@ -22,8 +25,11 @@ import {
   isRoute,
   scrub,
   type AbigaailEvent,
+  type BlockEvent,
   type ErrorEvent,
+  type LifecycleEvent,
   type OutboundEvent,
+  type PrevExit,
   type RequestEvent,
   type RequestFlag,
   type StackFrame,
@@ -57,6 +63,7 @@ const isInt = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER): v is num
 const isStatus = (v: unknown): v is number => isInt(v, 100, 599);
 const isDuration = (v: unknown): v is number => isNum(v) && v >= 0 && v <= MAX_DURATION_MS;
 const isEventId = (v: unknown): v is string => typeof v === "string" && EVENT_ID_RE.test(v);
+const isMegabytes = (v: unknown): v is number => isNum(v) && v >= 0 && v <= MAX_MEMORY_MB;
 
 const IPV4_MAPPED_RE = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i;
 
@@ -92,20 +99,61 @@ function cleanTransient(t: unknown): Transient | undefined {
   return out.ip !== undefined || out.ua !== undefined ? out : undefined;
 }
 
+/** One frame with a relative path and an identifier, or undefined. */
+export function cleanFrame(f: unknown): StackFrame | undefined {
+  if (!f || typeof f !== "object") return undefined;
+  const raw = f as Raw;
+  if (!isFramePath(raw.file) || !isInt(raw.line, 0)) return undefined;
+  const frame: StackFrame = { file: raw.file, line: raw.line };
+  if (isInt(raw.col, 0)) frame.col = raw.col;
+  if (isIdent(raw.fn, MAX_FN_LENGTH)) frame.fn = raw.fn;
+  return frame;
+}
+
 function cleanFrames(frames: unknown): StackFrame[] | undefined {
   if (!Array.isArray(frames)) return undefined;
   const out: StackFrame[] = [];
   for (const f of frames) {
     if (out.length >= LIMITS.maxStackFrames) break;
-    if (!f || typeof f !== "object") continue;
-    const raw = f as Raw;
-    if (!isFramePath(raw.file) || !isInt(raw.line, 0)) continue;
-    const frame: StackFrame = { file: raw.file, line: raw.line };
-    if (isInt(raw.col, 0)) frame.col = raw.col;
-    if (isIdent(raw.fn, MAX_FN_LENGTH)) frame.fn = raw.fn;
-    out.push(frame);
+    const frame = cleanFrame(f);
+    if (frame) out.push(frame);
   }
   return out.length ? out : undefined;
+}
+
+/** A crash record's fields, each kept only if valid; undefined without a valid exit code. */
+export function cleanPrevExit(p: unknown): PrevExit | undefined {
+  if (!p || typeof p !== "object") return undefined;
+  const raw = p as Raw;
+  if (!isInt(raw.code, 0, MAX_EXIT_CODE)) return undefined;
+  const out: PrevExit = { code: raw.code };
+  if (isIdent(raw.error_type, LIMITS.maxErrorTypeLength)) out.error_type = raw.error_type;
+  const frame = cleanFrame(raw.frame);
+  if (frame) out.frame = frame;
+  if (isMegabytes(raw.heap_mb)) out.heap_mb = raw.heap_mb;
+  if (isInt(raw.uptime_s, 0, 10 * 365 * 86_400)) out.uptime_s = raw.uptime_s;
+  return out;
+}
+
+function cleanLifecycle(e: Raw, base: { event_id: string; client_ts: number }): LifecycleEvent | undefined {
+  if (!has(LIFECYCLE_KINDS, e.kind)) return undefined;
+  const out: LifecycleEvent = { type: "lifecycle", ...base, kind: e.kind };
+  if (e.kind === "boot") {
+    // Boot stays exactly as before runtime_v1 (no instance), so any server accepts it.
+    const region = cleanRegion(e.region);
+    if (region) out.region = region;
+    return out;
+  }
+  if (typeof e.instance === "string" && INSTANCE_RE.test(e.instance)) out.instance = e.instance;
+  if (e.kind !== "ready") return out;
+  if (!isEventId(e.boot_id)) return undefined;
+  out.boot_id = e.boot_id;
+  if (isDuration(e.startup_ms)) out.startup_ms = e.startup_ms;
+  if (isMegabytes(e.heap_limit_mb)) out.heap_limit_mb = e.heap_limit_mb;
+  if (isMegabytes(e.memory_limit_mb)) out.memory_limit_mb = e.memory_limit_mb;
+  const prev = cleanPrevExit(e.prev_exit);
+  if (prev) out.prev_exit = prev;
+  return out;
 }
 
 function cleanFlags(flags: unknown): RequestFlag[] | undefined {
@@ -197,10 +245,13 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
     case "metric":
       if (!has(METRIC_NAMES, e.name) || !isNum(e.value)) return undefined;
       return { type: "metric", ...base, name: e.name, value: e.value };
-    case "lifecycle": {
-      if (!has(LIFECYCLE_KINDS, e.kind)) return undefined;
-      const region = e.kind === "boot" ? cleanRegion(e.region) : undefined;
-      return { type: "lifecycle", ...base, kind: e.kind, ...(region ? { region } : {}) };
+    case "lifecycle":
+      return cleanLifecycle(e, base);
+    case "block": {
+      if (!isInt(e.count, 1, 1_000_000) || !isDuration(e.total_ms) || !isDuration(e.max_ms)) return undefined;
+      const out: BlockEvent = { type: "block", ...base, count: e.count, total_ms: e.total_ms, max_ms: e.max_ms };
+      if (e.route !== undefined) out.route = isRoute(e.route) ? e.route : ROUTE_OTHER;
+      return out;
     }
     default:
       return undefined;

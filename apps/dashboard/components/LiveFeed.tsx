@@ -25,6 +25,15 @@ const CONN_TEXT: Record<Conn, string> = {
   gone: "No such app",
 };
 
+const KIND_TEXT: Record<Kind, string> = {
+  request: "Requests",
+  outbound: "Outbound",
+  error: "Errors",
+  lifecycle: "Lifecycle",
+  block: "Loop blocks",
+  metric: "Metrics",
+};
+
 interface Row {
   n: number;
   e: LiveEvent;
@@ -132,6 +141,17 @@ function Line({ e }: { e: LiveEvent }) {
           <span className="r" />
         </>
       );
+    case "block":
+      return (
+        <>
+          <span className="k">blocked</span>
+          <span className="what">{e.route ?? "no request in flight"}</span>
+          <span>
+            {e.count}× · max {dur(e.max_ms)}
+          </span>
+          <span className="r">{dur(e.total_ms)}</span>
+        </>
+      );
   }
 }
 
@@ -141,7 +161,7 @@ export function LiveFeed({ app }: { app: string }) {
   const [gaps, setGaps] = useState(0);
   const [paused, setPaused] = useState(false);
   const [held, setHeld] = useState(0);
-  const [kinds, setKinds] = useState<Record<Kind, boolean>>({ request: true, outbound: true, error: true, lifecycle: true, metric: false });
+  const [kinds, setKinds] = useState<Record<Kind, boolean>>({ request: true, outbound: true, error: true, lifecycle: true, block: true, metric: false });
   const [bots, setBots] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const seconds = useRef<Second[]>([]);
@@ -266,10 +286,10 @@ export function LiveFeed({ app }: { app: string }) {
 
       <section>
         <div className="livecontrols">
-          {(["request", "outbound", "error", "lifecycle", "metric"] as const).map((k) => (
+          {(["request", "outbound", "error", "lifecycle", "block", "metric"] as const).map((k) => (
             <label key={k}>
               <input type="checkbox" checked={kinds[k]} onChange={(ev) => setKinds({ ...kinds, [k]: ev.target.checked })} />
-              {k === "request" ? "Requests" : k === "outbound" ? "Outbound" : k === "error" ? "Errors" : k === "lifecycle" ? "Lifecycle" : "Metrics"}
+              {KIND_TEXT[k]}
             </label>
           ))}
           <label>

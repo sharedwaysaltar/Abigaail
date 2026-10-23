@@ -16,13 +16,24 @@ export const NORMAL_MS = {
 export const DEPENDENCY_MS = [15, 25];
 /** /search with slowSearch on. */
 export const SLOW_SEARCH_MS = 1200;
+/** /docs with blockDocs on: synchronous work that blocks the event loop this long. */
+export const BLOCK_DOCS_MS = 300;
+/** Largest leak per /search request, KB. */
+export const MAX_LEAK_KB = 8192;
 
-export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0 });
+/**
+ * leakPerRequest: KB each /search request keeps for good (a leak).
+ * oomKillMb: with a leak, the process kills itself (SIGKILL) once its heap
+ * passes this, as a container's OOM killer would; 0 = off. A real V8
+ * out-of-memory abort is not used: it can write a core dump on the machine.
+ */
+export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, blockDocs: false, oomKillMb: 0 });
 
-const KEYS = ["dependency", "slowSearch", "userErrorShare"];
+const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "blockDocs", "oomKillMb"];
+const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare } }`, or undefined if malformed. */
+/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, blockDocs, oomKillMb } }`, or undefined if malformed. */
 export function parseFaults(msg) {
   if (!isObject(msg) || msg.type !== "faults" || Object.keys(msg).length !== 2 || !isObject(msg.faults)) return undefined;
   const f = msg.faults;
@@ -30,7 +41,15 @@ export function parseFaults(msg) {
   if (f.dependency !== "ok" && f.dependency !== "failing") return undefined;
   if (typeof f.slowSearch !== "boolean") return undefined;
   if (typeof f.userErrorShare !== "number" || !(f.userErrorShare >= 0 && f.userErrorShare <= 1)) return undefined;
-  return Object.freeze({ dependency: f.dependency, slowSearch: f.slowSearch, userErrorShare: f.userErrorShare });
+  if (!isInt(f.leakPerRequest, 0, MAX_LEAK_KB) || typeof f.blockDocs !== "boolean" || !isInt(f.oomKillMb, 0, 65536)) return undefined;
+  return Object.freeze({
+    dependency: f.dependency,
+    slowSearch: f.slowSearch,
+    userErrorShare: f.userErrorShare,
+    leakPerRequest: f.leakPerRequest,
+    blockDocs: f.blockDocs,
+    oomKillMb: f.oomKillMb,
+  });
 }
 
 /**
@@ -50,4 +69,22 @@ export function faultControl(proc = process) {
     });
   }
   return { enabled, get: () => faults };
+}
+
+/**
+ * Keeps `kb` KB of real heap for good in `kept`: one 8192-element array of
+ * small integers (8 bytes each, 64 KB) per 64 KB. Not a string: V8 builds
+ * "x".repeat(n) as a rope, which retained about 0.6 MB for 40 MB intended
+ * (owner's measurement); a live test checks the heap really grows.
+ */
+export function rememberSearch(kept, kb) {
+  for (let i = 0; i < kb / 64; i++) kept.push(new Array(8192).fill(kept.length));
+}
+
+/** Synchronous work that blocks the event loop for `ms` (a live test measures the lag). */
+export function renderDocs(ms) {
+  const until = performance.now() + ms;
+  let x = 0;
+  while (performance.now() < until) x += Math.sqrt(x + 1);
+  return x;
 }

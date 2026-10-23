@@ -56,3 +56,32 @@ export function humanDuration(ms: number): string {
   const h = Math.floor(m / 60);
   return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
 }
+
+/**
+ * Mann-Kendall trend test: z for "these values rise over time" (one-sided;
+ * z > 2.326 is p < 0.01). It looks only at the order of pairs, so a sawtooth or
+ * one outlier cannot fake a trend. Ties count as neither up nor down.
+ */
+export function mannKendallZ(values: readonly number[]): number {
+  const n = values.length;
+  if (n < 3) return 0;
+  let s = 0;
+  for (let i = 0; i < n - 1; i++) {
+    for (let j = i + 1; j < n; j++) s += Math.sign(values[j]! - values[i]!);
+  }
+  const variance = (n * (n - 1) * (2 * n + 5)) / 18;
+  if (s === 0) return 0;
+  return (s - Math.sign(s)) / Math.sqrt(variance);
+}
+
+/** Theil-Sen slope: the median of all pairwise slopes, robust to outliers. */
+export function theilSen(points: readonly { x: number; y: number }[]): number | undefined {
+  const slopes: number[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      const dx = points[j]!.x - points[i]!.x;
+      if (dx !== 0) slopes.push((points[j]!.y - points[i]!.y) / dx);
+    }
+  }
+  return median(slopes);
+}

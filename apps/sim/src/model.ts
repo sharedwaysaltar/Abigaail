@@ -10,9 +10,15 @@ export interface Faults {
   dependency: "ok" | "failing";
   slowSearch: boolean;
   userErrorShare: number;
+  /** KB each /search request keeps for good. */
+  leakPerRequest: number;
+  /** /docs blocks the event loop for BLOCK_DOCS_MS. */
+  blockDocs: boolean;
+  /** With a leak, the process is killed (SIGKILL) when its heap passes this many MB; 0 = off. */
+  oomKillMb: number;
 }
 
-export const NORMAL_FAULTS: Faults = { dependency: "ok", slowSearch: false, userErrorShare: 0 };
+export const NORMAL_FAULTS: Faults = { dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, blockDocs: false, oomKillMb: 0 };
 
 /** Mirrors NORMAL_MS, DEPENDENCY_MS and SLOW_SEARCH_MS in apps/demo-node/faults.mjs. */
 export const NODE_MS: Record<string, readonly [number, number]> = {
@@ -24,6 +30,7 @@ export const NODE_MS: Record<string, readonly [number, number]> = {
 };
 export const DEPENDENCY_MS: readonly [number, number] = [15, 25];
 export const SLOW_SEARCH_MS = 1200;
+export const BLOCK_DOCS_MS = 300;
 /** The host demo-node's /checkout calls. */
 export const DEPENDENCY_HOST = "localhost";
 
@@ -65,6 +72,8 @@ export function outcome(r: Rng, app: AppKind, path: string, faults: Faults): Out
       return r() < faults.userErrorShare ? { route, status: 500, duration: own, error: "RangeError" } : { route, status: 200, duration: own };
     case "/search":
       return { route, status: 200, duration: faults.slowSearch ? SLOW_SEARCH_MS : own };
+    case "/docs":
+      return { route, status: 200, duration: faults.blockDocs ? BLOCK_DOCS_MS + own : own };
     case "/checkout": {
       const dep = faults.dependency === "ok" ? between(r, DEPENDENCY_MS) : between(r, [1, 3]);
       const status = faults.dependency === "ok" ? 200 : 503;

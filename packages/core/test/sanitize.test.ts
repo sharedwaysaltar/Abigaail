@@ -223,3 +223,29 @@ describe("sanitizeEvent: error messages go through the scrubber (DECISIONS #101)
     expect(events.map((e) => (e as { error_code?: string }).error_code)).toEqual(["ENOTFOUND", undefined, undefined]);
   });
 });
+
+describe("sanitizeEvent: runtime_v1 lifecycle fields (DECISIONS #110, #112)", () => {
+  const ID = "6f1c1d1e-2b2a-4c3d-8e4f-5a6b7c8d9e0f";
+  const clean = (e: unknown) => sanitizeEvent(e, () => ID, () => 1);
+
+  it("keeps a 12-hex instance and drops anything else, keeping the event", () => {
+    expect(clean({ type: "lifecycle", kind: "heartbeat", instance: "0123456789ab" })).toMatchObject({ instance: "0123456789ab" });
+    for (const instance of ["web-01.example.com", "0123456789abcdef", "0123456789AB", 7]) {
+      const e = clean({ type: "lifecycle", kind: "heartbeat", instance });
+      expect(e).toMatchObject({ kind: "heartbeat" });
+      expect(e).not.toHaveProperty("instance");
+    }
+  });
+
+  it("boot never carries an instance or ready fields; ready without its boot id is dropped", () => {
+    const boot = clean({ type: "lifecycle", kind: "boot", instance: "0123456789ab", startup_ms: 5, prev_exit: { code: 1 } });
+    expect(Object.keys(boot!).sort()).toEqual(["client_ts", "event_id", "kind", "type"]);
+    expect(clean({ type: "lifecycle", kind: "ready", instance: "0123456789ab" })).toBeUndefined();
+  });
+
+  it("keeps only valid crash-record fields", () => {
+    const e = clean({ type: "lifecycle", kind: "ready", boot_id: ID, prev_exit: { code: 1, error_type: "Order for jane@example.com", frame: { file: "/home/jane/x.js", line: 1 }, heap_mb: -3, note: "x" } });
+    expect(e).toMatchObject({ prev_exit: { code: 1 } });
+    expect(Object.keys((e as { prev_exit: object }).prev_exit)).toEqual(["code"]);
+  });
+});

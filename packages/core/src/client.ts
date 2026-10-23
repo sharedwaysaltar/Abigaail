@@ -1,5 +1,6 @@
 import {
   SCHEMA_VERSION,
+  eventFeature,
   type AbigaailEvent,
   type Batch,
   type Environment,
@@ -9,7 +10,7 @@ import { CircuitBreaker, type BreakerState } from "./breaker.js";
 import { BoundedQueue } from "./queue.js";
 import { sanitizeEvent, type SanitizeContext } from "./sanitize.js";
 import { Sampler, ScrubBudget } from "./sampler.js";
-import { fetchTransport, type Transport } from "./transport.js";
+import { fetchTransport, type SendResult, type Transport } from "./transport.js";
 
 export const SDK_NAME = "@abigaail/core";
 /** Outbound hosts remembered for the scrubber's host rule. */
@@ -62,6 +63,12 @@ export interface ClientStats {
   sent: number;
   rejected: number;
   failedSends: number;
+  /**
+   * Not sent because the server has not announced the schema feature they need
+   * (DECISIONS #110). Not a loss of data the server could take, so it is not
+   * part of sdk_dropped_events.
+   */
+  unsupported: number;
   breaker: BreakerState;
 }
 
@@ -73,6 +80,11 @@ export interface AbigaailClient {
   /** Stop the timer and make one bounded final flush. Never rejects. */
   shutdown(timeoutMs?: number): Promise<void>;
   stats(): ClientStats;
+  /**
+   * The schema features the server announced in its latest 202, or undefined
+   * before the first accepted batch.
+   */
+  features(): ReadonlySet<string> | undefined;
 }
 
 function uuid(): string {
@@ -96,6 +108,7 @@ const NOOP_STATS: ClientStats = {
   sent: 0,
   rejected: 0,
   failedSends: 0,
+  unsupported: 0,
   breaker: "closed",
 };
 
@@ -106,6 +119,7 @@ export function noopClient(): AbigaailClient {
     flush: () => Promise.resolve(),
     shutdown: () => Promise.resolve(),
     stats: () => ({ ...NOOP_STATS }),
+    features: () => undefined,
   };
 }
 
@@ -146,7 +160,9 @@ class Client implements AbigaailClient {
   private timer: ReturnType<typeof setInterval> | undefined;
   private inFlight: Promise<void> | undefined;
   private closed = false;
-  private counters = { invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0 };
+  private counters = { invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0, unsupported: 0 };
+  /** Features the server announced in its latest 202; undefined until one arrives. */
+  private announced: ReadonlySet<string> | undefined;
   /** The app's outbound hosts seen so far: the only hostnames an error message may keep. */
   private readonly hosts = new Set<string>();
   private readonly sanitize: SanitizeContext;
@@ -199,6 +215,11 @@ class Client implements AbigaailClient {
         this.counters.invalid++;
         return;
       }
+      // Optional schema parts only once this server has said it takes them.
+      if (!this.supported(event)) {
+        this.counters.unsupported++;
+        return;
+      }
 
       // Only request events are sampled. Errors, metrics, outbound calls and
       // lifecycle events carry the signals agents need most and are low
@@ -231,7 +252,11 @@ class Client implements AbigaailClient {
   private async drain(): Promise<void> {
     try {
       while (this.queue.size > 0 && this.breaker.allowRequest()) {
-        const events = this.queue.take(this.batchSize);
+        // Checked again here: the server may have announced less since an event was queued.
+        const taken = this.queue.take(this.batchSize);
+        const events = taken.filter((e) => this.supported(e));
+        this.counters.unsupported += taken.length - events.length;
+        if (!events.length) continue;
         const batch: Batch = {
           schema_version: SCHEMA_VERSION,
           sdk: { name: SDK_NAME, version: SDK_VERSION },
@@ -241,8 +266,10 @@ class Client implements AbigaailClient {
           sent_at: this.now(),
           events,
         };
-        const result = await this.sendWithTimeout(batch);
+        const outcome = await this.sendWithTimeout(batch);
+        const result = typeof outcome === "string" ? outcome : outcome.result;
         if (result === "ok") {
+          this.announced = new Set(typeof outcome === "string" ? [] : (outcome.features ?? []));
           this.breaker.recordSuccess();
           this.counters.sent += events.length;
         } else if (result === "rejected") {
@@ -262,7 +289,12 @@ class Client implements AbigaailClient {
     }
   }
 
-  private async sendWithTimeout(batch: Batch): Promise<"ok" | "rejected" | "failed"> {
+  private supported(event: AbigaailEvent): boolean {
+    const feature = eventFeature(event);
+    return feature === undefined || this.announced?.has(feature) === true;
+  }
+
+  private async sendWithTimeout(batch: Batch): Promise<SendResult | { result: SendResult; features?: readonly string[] }> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<"failed">((resolve) => {
@@ -277,6 +309,7 @@ class Client implements AbigaailClient {
       const send = Promise.resolve()
         .then(() => this.transport(batch, controller.signal))
         .catch(() => "failed" as const);
+
       return await Promise.race([send, timeout]);
     } finally {
       clearTimeout(timer);
@@ -309,5 +342,9 @@ class Client implements AbigaailClient {
       ...this.counters,
       breaker: this.breaker.state,
     };
+  }
+
+  features(): ReadonlySet<string> | undefined {
+    return this.announced;
   }
 }

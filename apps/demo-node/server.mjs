@@ -3,8 +3,9 @@
 // `npm run sim` forks this file with its own environment and drives it (faults.mjs).
 
 import http from "node:http";
+import v8 from "node:v8";
 import { DEFAULT_IGNORE, init } from "@abigaail/node";
-import { DEPENDENCY_MS, faultControl, NORMAL_MS, SLOW_SEARCH_MS } from "./faults.mjs";
+import { BLOCK_DOCS_MS, DEPENDENCY_MS, faultControl, NORMAL_MS, rememberSearch, renderDocs, SLOW_SEARCH_MS } from "./faults.mjs";
 
 const abigaail = init({
   // Demo only: send every second so the Live view feels live. The SDK default stays 5 s.
@@ -21,6 +22,15 @@ const faults = faultControl();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const between = ([min, max]) => min + Math.random() * (max - min);
+
+// A leak for the simulator: each search is remembered for good (faults.mjs).
+const remembered = [];
+function leakSearch(kb) {
+  rememberSearch(remembered, kb);
+  const { oomKillMb } = faults.get();
+  // Like a container's OOM killer: SIGKILL, no shutdown, no exit handlers.
+  if (oomKillMb && v8.getHeapStatistics().used_heap_size / 1048576 > oomKillMb) process.kill(process.pid, "SIGKILL");
+}
 
 // A local dependency: /__down is always down (503); /__dep is healthy unless
 // the simulator switches it to failing.
@@ -72,10 +82,12 @@ const server = http.createServer(async (req, res) => {
       if (Math.random() < faults.get().userErrorShare) throw new RangeError("simulated failure");
       res.end(`user ${path.slice(6)}`);
     } else if (path === "/docs") {
+      if (faults.get().blockDocs) renderDocs(BLOCK_DOCS_MS);
       await sleep(between(NORMAL_MS["/docs"]));
       res.end("docs");
     } else if (path === "/search") {
       await sleep(faults.get().slowSearch ? SLOW_SEARCH_MS : between(NORMAL_MS["/search"]));
+      if (faults.get().leakPerRequest) leakSearch(faults.get().leakPerRequest);
       res.end("results");
     } else if (path === "/checkout") {
       await sleep(between(NORMAL_MS["/checkout"]));

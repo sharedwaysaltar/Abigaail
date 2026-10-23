@@ -6,7 +6,7 @@
 // before each 60 s run, and resolution after 3 clean runs (DECISIONS #40/#48).
 
 import type { Faults } from "./model.js";
-import { BOTS_BACKGROUND, BOTS_BURST, MIN, SEC, type AppKind } from "./traffic.js";
+import { BOTS_BACKGROUND, BOTS_BURST, HOUR, MIN, SEC, type AppKind } from "./traffic.js";
 import type { Severity } from "@abigaail/store";
 
 export type Action =
@@ -19,7 +19,9 @@ export type Action =
   | { kill: true }
   /** Clean stop (the app sends `shutdown`). */
   | { stop: true }
-  | { start: { release?: string } };
+  | { start: { release?: string } }
+  /** Restart the demo 2 s after it dies on its own (as systemd or pm2 would); our kill and stop are never restarted. */
+  | { supervise: boolean };
 
 export interface Expectation {
   /** agent:signal:subject, as the runner builds it. */
@@ -52,11 +54,15 @@ export interface Scenario {
 }
 
 const health = (signal: string, subject = "") => `health:${signal}:${subject}`;
+const resilience = (signal: string, subject = "") => `resilience:${signal}:${subject}`;
 
 /** May appear while the stack starts: no traffic in the window yet, or the app has not reconnected. */
 export const STARTUP_ALLOWED: readonly string[] = [health("too_little_traffic"), "watchdog:reconnecting:"];
 /** Never allowed: the run must not overload ingest or the SDK. */
 export const NEVER_ALLOWED: readonly string[] = [health("data_incomplete")];
+
+/** How long the leak scenario leaks: past the warm-up and the 3 hours a leak needs. */
+const LEAK_MS = 3 * HOUR + 45 * MIN;
 
 export const SCENARIOS: readonly Scenario[] = [
   {
@@ -128,7 +134,7 @@ export const SCENARIOS: readonly Scenario[] = [
     steps: [{ at: 0, action: { stop: true } }, { at: 2 * SEC, action: { start: { release: "sim-r2" } } }],
     faultMs: 2 * SEC,
     expect: [{ fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN }],
-    forbid: [health("restart")],
+    forbid: [resilience("restart")],
     forbidMs: 3 * MIN,
   },
   {
@@ -144,7 +150,15 @@ export const SCENARIOS: readonly Scenario[] = [
       { at: 92 * SEC, action: { start: {} } },
     ],
     faultMs: 92 * SEC,
-    expect: [{ fingerprint: health("restart"), severity: "warning", summary: ["restarted 3 times in the last 15 min without a clean shutdown"], showWithinMs: 4 * MIN, resolveWithinMs: 20 * MIN }],
+    expect: [
+      {
+        fingerprint: resilience("restart"),
+        severity: "critical",
+        summary: ["restarted 3 times in the last 15 min without a clean shutdown: a restart loop", "killed by a signal or the host"],
+        showWithinMs: 5 * MIN,
+        resolveWithinMs: 20 * MIN,
+      },
+    ],
   },
   {
     name: "outage",
@@ -155,7 +169,63 @@ export const SCENARIOS: readonly Scenario[] = [
     minStartMs: 9 * MIN,
     expect: [
       { fingerprint: "watchdog:silent:", severity: "critical", summary: ["has been silent for"], showWithinMs: 5 * MIN, resolveWithinMs: 5 * MIN },
-      { fingerprint: health("restart"), severity: "warning", summary: ["without a clean shutdown"], showWithinMs: 8 * MIN, resolveWithinMs: 20 * MIN },
+      { fingerprint: resilience("restart"), severity: "warning", summary: ["without a clean shutdown"], showWithinMs: 8 * MIN, resolveWithinMs: 20 * MIN },
+    ],
+  },
+  {
+    name: "blocking-route",
+    apps: ["node"],
+    description: "/docs runs 300 ms of synchronous work (renderDocs) on every request for 5 min, blocking the event loop.",
+    steps: [
+      { at: 0, action: { faults: { blockDocs: true } } },
+      { at: 5 * MIN, action: { faults: { blockDocs: false } } },
+    ],
+    faultMs: 5 * MIN,
+    expect: [{ fingerprint: resilience("loop_blocked", "/docs"), severity: "warning", summary: ["/docs blocked the event loop", "of the blocks in"], showWithinMs: 4 * MIN, resolveWithinMs: 20 * MIN }],
+    // The route's own slowness and the lag are folded into the finding that names it.
+    forbid: [health("latency", "/docs"), health("event_loop_lag")],
+    forbidMs: 20 * MIN,
+  },
+  {
+    name: "oom-loop",
+    apps: ["node"],
+    description: "Each /search keeps 2.5 MB for good; at 96 MB of heap the process is killed (SIGKILL, like a container's OOM killer) and a supervisor restarts it, for 16 min.",
+    steps: [
+      { at: 0, action: { supervise: true } },
+      { at: 0, action: { faults: { leakPerRequest: 2560, oomKillMb: 96 } } },
+      { at: 16 * MIN, action: { faults: { leakPerRequest: 0, oomKillMb: 0 } } },
+      { at: 16 * MIN, action: { supervise: false } },
+    ],
+    faultMs: 16 * MIN,
+    expect: [
+      {
+        fingerprint: resilience("restart"),
+        severity: "critical",
+        summary: ["a restart loop", "likely out of memory: its heap grew from"],
+        showWithinMs: 17 * MIN,
+        resolveWithinMs: 20 * MIN,
+      },
+    ],
+  },
+  {
+    name: "leak",
+    apps: ["node"],
+    description: "Each /search keeps 64 KB for good for 3 h 45 min, then a clean restart. Long: run it on its own (not part of `run all`).",
+    steps: [
+      { at: 0, action: { faults: { leakPerRequest: 64 } } },
+      { at: LEAK_MS, action: { faults: { leakPerRequest: 0 } } },
+      { at: LEAK_MS, action: { stop: true } },
+      { at: LEAK_MS + 2 * SEC, action: { start: {} } },
+    ],
+    faultMs: LEAK_MS + 2 * SEC,
+    expect: [
+      {
+        fingerprint: resilience("leak", "heap"),
+        severity: "warning",
+        summary: ["heap floor after garbage collection rose from", "since it started"],
+        showWithinMs: 3 * HOUR + 35 * MIN,
+        resolveWithinMs: 6 * MIN,
+      },
     ],
   },
   {
@@ -185,6 +255,8 @@ export const WARMUP_MS = 6 * MIN;
 /**
  * `run all`: when each scenario starts. Scenarios whose findings differ
  * overlap; restarts come one after another, then the long collapse.
+ * blocking-route, oom-loop and leak run on their own: a blocked loop slows
+ * every route, an OOM loop overlaps every restart, and a leak takes hours.
  */
 export const ALL: Record<AppKind, readonly { name: string; at: number }[]> = {
   node: [

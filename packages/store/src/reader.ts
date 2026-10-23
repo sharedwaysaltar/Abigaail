@@ -206,6 +206,37 @@ export function isRed(f: Pick<Finding, "state" | "severity" | "critical_streak">
   return f.state === "open" && f.severity === "critical" && f.critical_streak >= 2;
 }
 
+/** A lifecycle event with what runtime_v1 adds (instance, startup, crash record). */
+export interface LifecycleRow {
+  event_id: string;
+  ts: number;
+  kind: string;
+  release: string;
+  instance: string | null;
+  /** ready only: the boot it belongs to. */
+  boot_id: string | null;
+  startup_ms: number | null;
+  heap_limit_mb: number | null;
+  memory_limit_mb: number | null;
+  prev_exit: { code: number; error_type?: string; frame?: { file: string; line: number; fn?: string }; heap_mb?: number; uptime_s?: number } | null;
+}
+
+/** Event-loop blocks charged to one route in one SDK interval (route null: nothing was in flight). */
+export interface BlockRow {
+  ts: number;
+  route: string | null;
+  count: number;
+  total_ms: number;
+  max_ms: number;
+}
+
+/** An uncaught error (handled: false). */
+export interface FatalError {
+  ts: number;
+  error_type: string;
+  frame: { file: string; line: number; fn?: string } | null;
+}
+
 /** One group of errors on the App page. */
 export interface TopError {
   error_type: string;
@@ -348,6 +379,23 @@ export class StoreReader {
     return row?.release;
   }
 
+  /** Time and release of the app's last event of any type before `ts`, if any. */
+  lastEventBefore(appId: string, ts: number): { ts: number; release: string } | undefined {
+    return this.db
+      .prepare("SELECT ts, release FROM events WHERE app_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1")
+      .get(appId, ts) as { ts: number; release: string } | undefined;
+  }
+
+  /** Startup times from ready events with ts in [from, to), newest first, at most `limit`. */
+  startups(appId: string, from: number, to: number, limit: number): { ts: number; release: string; startup_ms: number }[] {
+    return this.db
+      .prepare(`SELECT ts, release, json_extract(attrs, '$.startup_ms') AS startup_ms FROM events
+                WHERE app_id = ? AND type = 'lifecycle' AND name = 'ready' AND ts >= ? AND ts < ?
+                  AND json_extract(attrs, '$.startup_ms') IS NOT NULL
+                ORDER BY ts DESC LIMIT ?`)
+      .all(appId, from, to, limit) as unknown as { ts: number; release: string; startup_ms: number }[];
+  }
+
   /** Time of the app's oldest stored raw event, if any. */
   oldestEventTs(appId: string): number | undefined {
     const row = this.db.prepare("SELECT min(ts) AS t FROM events WHERE app_id = ?").get(appId) as { t: number | null };
@@ -359,6 +407,48 @@ export class StoreReader {
     return this.db
       .prepare("SELECT ts, release FROM events WHERE app_id = ? AND type = 'lifecycle' AND name = 'boot' ORDER BY ts DESC LIMIT 1")
       .get(appId) as { ts: number; release: string } | undefined;
+  }
+
+  /** Lifecycle events with ts in [from, to), oldest first, with their runtime_v1 fields. */
+  lifecycleDetail(appId: string, from: number, to: number): LifecycleRow[] {
+    const rows = this.db
+      .prepare(`SELECT event_id, ts, name AS kind, release, attrs FROM events
+                WHERE app_id = ? AND type = 'lifecycle' AND ts >= ? AND ts < ? ORDER BY ts, event_id`)
+      .all(appId, from, to) as unknown as { event_id: string; ts: number; kind: string; release: string; attrs: string | null }[];
+    return rows.map((r) => {
+      const a = (r.attrs ? JSON.parse(r.attrs) : {}) as Record<string, unknown>;
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      return {
+        event_id: r.event_id,
+        ts: r.ts,
+        kind: r.kind,
+        release: r.release,
+        instance: typeof a.instance === "string" ? a.instance : null,
+        boot_id: typeof a.boot_id === "string" ? a.boot_id : null,
+        startup_ms: num(a.startup_ms),
+        heap_limit_mb: num(a.heap_limit_mb),
+        memory_limit_mb: num(a.memory_limit_mb),
+        prev_exit: a.prev_exit && typeof a.prev_exit === "object" ? (a.prev_exit as LifecycleRow["prev_exit"]) : null,
+      };
+    });
+  }
+
+  /** Event-loop block events with ts in [from, to), oldest first. */
+  blocks(appId: string, from: number, to: number): BlockRow[] {
+    return this.db
+      .prepare(`SELECT ts, route, CAST(coalesce(json_extract(attrs, '$.count'), 1) AS INTEGER) AS count,
+                       value AS total_ms, duration_ms AS max_ms
+                FROM events WHERE app_id = ? AND type = 'block' AND ts >= ? AND ts < ? ORDER BY ts`)
+      .all(appId, from, to) as unknown as BlockRow[];
+  }
+
+  /** Uncaught errors (handled: false) with ts in [from, to), oldest first. */
+  fatalErrors(appId: string, from: number, to: number): FatalError[] {
+    const rows = this.db
+      .prepare(`SELECT ts, name AS error_type, json_extract(attrs, '$.frames[0]') AS frame FROM events
+                WHERE app_id = ? AND type = 'error' AND json_extract(attrs, '$.handled') = 0 AND ts >= ? AND ts < ? ORDER BY ts`)
+      .all(appId, from, to) as unknown as { ts: number; error_type: string; frame: string | null }[];
+    return rows.map((r) => ({ ts: r.ts, error_type: r.error_type, frame: r.frame ? (JSON.parse(r.frame) as FatalError["frame"]) : null }));
   }
 
   /** The latest lifecycle event, if any. */
