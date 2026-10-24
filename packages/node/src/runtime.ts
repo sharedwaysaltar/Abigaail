@@ -128,6 +128,8 @@ export class RuntimeMonitor {
   private readonly recordFile: string | undefined;
   private fatal: { error_type: string; frame?: StackFrame } | undefined;
   private log: WindowLog | undefined;
+  /** Told of every block (profiler.ts starts a window after one). */
+  onBlock: ((ms: number) => void) | undefined;
   /** The profiler's own pauses (starting a CPU window), recent ones: never counted as blocks. */
   private readonly pauses: { start: number; end: number }[] = [];
   private pausedMs = 0;
@@ -301,6 +303,7 @@ export class RuntimeMonitor {
    */
   private block(end: number, ms: number): void {
     this.blocks++;
+    this.onBlock?.(ms);
     if (this.log && this.log.blocks.length < RUNTIME.maxWindowLog) this.log.blocks.push({ end, ms });
     const suspects: Inflight[] = [];
     for (const [res, entry] of this.inflight) {

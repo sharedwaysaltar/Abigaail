@@ -94,7 +94,8 @@ function leaks(ctx: AgentContext, app: App): AgentFinding[] {
       ? `; at this rate it reaches its ${mb(v.limit_mb)} limit in about ${humanDuration(v.hours_to_limit * 3_600_000)}`
       : "";
     // With profiling on, the heap profiles say where the retained memory was allocated (#120).
-    const sites = v.kind === "heap" ? growingSites(ctx.store, app.id, v.boot_ts, ctx.windowEnd).slice(0, 3) : [];
+    // Only the app's own code is named: never the SDK ("(abigaail)") or Node's internals (#124).
+    const sites = v.kind === "heap" ? growingSites(ctx.store, app.id, v.boot_ts, ctx.windowEnd).filter((s) => !s.frame.file.startsWith("(")).slice(0, 3) : [];
     const where = sites.length ? ` Retained memory grew most at ${sites[0]!.label}: +${mb(sites[0]!.growthBytes / 1048576)} of sampled heap since the start.` : "";
     return {
       signal: "leak",

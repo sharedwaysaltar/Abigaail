@@ -9,9 +9,9 @@ import type http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AbigaailClient } from "@abigaail/core";
-import { init, PROFILER_STATE, Profiler, profilingWanted, RuntimeMonitor, type AbigaailNode, type InspectorModule } from "@abigaail/node";
+import { init, isSdkUrl, PROFILER_STATE, Profiler, profileFrame, profilingWanted, RuntimeMonitor, RUNTIME, type AbigaailNode, type InspectorModule } from "@abigaail/node";
 import type { Batch, ProfileEvent } from "@abigaail/schema";
 import { validateBatch } from "@abigaail/schema/validate";
 import { leaks, pii, rng } from "../../schema/test/pii.js";
@@ -280,9 +280,9 @@ describe("overhead budget and back-off", () => {
     let t = 0;
     let calls = -1;
     const f = fakeInspector();
-    // A window reads the clock 5 times: the idle wait, before and after the start, before and after reading it.
-    // Only the start is slow (70 ms); reading takes 1 ms.
-    const s = setup({ inspector: f.inspector, now: () => (calls < 0 ? t : (t += ++calls % 5 === 3 ? 70 : 1)) });
+    // A window reads the clock 6 times: the idle wait, its start time, before and after the start,
+    // before and after reading it. Only the start is slow (70 ms); reading takes 1 ms.
+    const s = setup({ inspector: f.inspector, now: () => (calls < 0 ? t : (t += ++calls % 6 === 4 ? 70 : 1)) });
     await s.profiler.start();
     calls = 0;
     await s.profiler.cpuWindow(5);
@@ -344,6 +344,125 @@ describe("a window starts only when no request is in flight (owner's decision, #
     runtime.requestStart(({ headersSent: true, destroyed: false, writableFinished: false }) as unknown as http.ServerResponse, "/events");
     t = 10_000;
     expect(await profiler.cpuWindow(5)).toBe(true);
+  });
+});
+
+describe("a CPU window after a block (owner's fix after the 10b test)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A runtime monitor and a profiler on one fake clock; the fake inspector counts window starts. */
+  function blockSetup() {
+    vi.useFakeTimers();
+    let clock = 1_000_000;
+    const f = fakeInspector();
+    const { client } = fakeClient();
+    const runtime = new RuntimeMonitor(client, () => {}, { instanceKey: "abk_test", env: {}, peekRoute: (p) => p, now: () => clock, manualTick: true }, () => {});
+    const profiler = new Profiler(client, runtime, () => {}, () => {}, { root: ROOT, manual: true, inspector: f.inspector, now: () => clock, timing: { windowMs: 1_000, idleRetryMs: 100 } });
+    stopping.push(runtime, profiler);
+    const starts = () => f.calls.filter((c) => c === "Profiler.start").length;
+    /** Time passes with the loop free (ticks on time), timers included. */
+    const pass = async (ms: number) => {
+      for (let t = 0; t < ms; t += RUNTIME.tickMs) {
+        clock += RUNTIME.tickMs;
+        runtime.tick();
+        await vi.advanceTimersByTimeAsync(RUNTIME.tickMs);
+      }
+    };
+    /** The loop is blocked for ms. */
+    const block = async (ms: number) => {
+      clock += RUNTIME.tickMs + ms;
+      runtime.tick();
+      await vi.advanceTimersByTimeAsync(0);
+    };
+    return { runtime, profiler, starts, pass, block, at: () => clock };
+  }
+
+  it("a block starts a window at once when idle; another block soon after does not", async () => {
+    const s = blockSetup();
+    await s.profiler.start();
+    await s.pass(200);
+    expect(s.starts()).toBe(0);
+    await s.block(300);
+    await s.pass(1_500);
+    expect(s.starts()).toBe(1);
+    await s.pass(60_000);
+    await s.block(300);
+    await s.pass(1_500);
+    expect(s.starts()).toBe(1);
+  });
+
+  it("at most one extra window per 5 min: after 5 min a block starts another", async () => {
+    const s = blockSetup();
+    await s.profiler.start();
+    await s.block(300);
+    await s.pass(1_500);
+    await s.pass(5 * 60_000);
+    await s.block(250);
+    await s.pass(1_500);
+    expect(s.starts()).toBe(2);
+  });
+
+  it("no extra window when a window started in the last 5 min", async () => {
+    const s = blockSetup();
+    await s.profiler.start();
+    const regular = s.profiler.cpuWindow(1_000);
+    await s.pass(1_500);
+    await regular;
+    expect(s.starts()).toBe(1);
+    await s.pass(2 * 60_000);
+    await s.block(400);
+    await s.pass(1_500);
+    expect(s.starts()).toBe(1);
+  });
+
+  it("waits for the next idle moment: not while a request is in flight", async () => {
+    const s = blockSetup();
+    await s.profiler.start();
+    const r = { headersSent: false, destroyed: false, writableFinished: false } as unknown as http.ServerResponse;
+    s.runtime.requestStart(r, "/docs");
+    await s.block(300);
+    await s.pass(800);
+    expect(s.starts()).toBe(0);
+    s.runtime.requestFinish(r, "/docs");
+    await s.pass(500);
+    expect(s.starts()).toBe(1);
+  });
+
+  it("an extra window that never found an idle moment still counts: no second try within 5 min", async () => {
+    const s = blockSetup();
+    await s.profiler.start();
+    const r = { headersSent: false, destroyed: false, writableFinished: false } as unknown as http.ServerResponse;
+    s.runtime.requestStart(r, "/docs");
+    await s.block(300);
+    // Busy for longer than the 60 s idle wait: that window is skipped.
+    await s.pass(61_000);
+    s.runtime.requestFinish(r, "/docs");
+    await s.pass(60_000);
+    await s.block(300);
+    await s.pass(1_500);
+    expect(s.starts()).toBe(0);
+  });
+
+  it("blocks under the threshold never start one", async () => {
+    const s = blockSetup();
+    await s.profiler.start();
+    await s.block(RUNTIME.blockMinMs - 10);
+    await s.pass(1_500);
+    expect(s.starts()).toBe(0);
+  });
+});
+
+describe("the SDK's own frames are grouped as (abigaail)", () => {
+  const cf = (url: string) => ({ functionName: "sample", url, lineNumber: 41 });
+  it("this package, its siblings and any installed @abigaail package; the app's files stay as they are", () => {
+    const own = pathToFileURL(path.join(ROOT, "packages/node/src/runtime.ts")).href;
+    expect(isSdkUrl(own)).toBe(true);
+    expect(profileFrame(cf(own), ROOT)).toEqual({ file: "(abigaail)", line: 0 });
+    expect(profileFrame(cf("file:///srv/app/node_modules/@abigaail/core/dist/client.js"), "/srv/app")).toEqual({ file: "(abigaail)", line: 0 });
+    expect(profileFrame(cf("file:///srv/app/src/report.js"), "/srv/app")).toEqual({ file: "src/report.js", line: 42, fn: "sample" });
+    expect(profileFrame(cf("file:///srv/app/node_modules/express/lib/router.js"), "/srv/app")).toEqual({ file: "node_modules/express/lib/router.js", line: 42, fn: "sample" });
   });
 });
 

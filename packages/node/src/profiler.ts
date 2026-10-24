@@ -16,7 +16,7 @@
 import { performance } from "node:perf_hooks";
 import type { AbigaailClient } from "@abigaail/core";
 import { isFramePath, isIdent, LIMITS, MAX_FN_LENGTH, type ProfileEvent, type ProfileFrame, type ProfileKind } from "@abigaail/schema";
-import type { RuntimeMonitor, WindowLog } from "./runtime.js";
+import { RUNTIME, type RuntimeMonitor, type WindowLog } from "./runtime.js";
 import { relativePath } from "./stack.js";
 
 export const PROFILING = {
@@ -44,6 +44,13 @@ export const PROFILING = {
    */
   idleRetryMs: 1_000,
   idleWaitMs: 60_000,
+  /**
+   * After a block, a CPU window at the next idle moment, so the function
+   * behind a short incident is sampled (owner's fix after the 10b test): only
+   * if no window started in the last blockWindowAfterMs, and at most one such
+   * extra window per blockWindowAfterMs.
+   */
+  blockWindowAfterMs: 5 * 60_000,
   /** Main-thread work allowed per window: starting the profile (V8 records its code), then stop, parse and merge. */
   startBudgetMs: 60,
   budgetMs: 20,
@@ -100,11 +107,40 @@ interface HeapNode {
 }
 
 const IDLE = Symbol("idle");
+
+/**
+ * The SDK's own code: the directory this module was loaded from (dist/, or
+ * src/ in tests), those of @abigaail/core and @abigaail/schema, and any
+ * installed @abigaail package. Its frames are
+ * grouped as "(abigaail)", so they never crowd the app's functions or get
+ * named as a cause (owner's fix after the 10b test).
+ */
+const OWN_DIRS: readonly string[] = (() => {
+  const dirs: string[] = [];
+  try {
+    dirs.push(new URL(".", import.meta.url).href);
+    for (const m of ["@abigaail/core", "@abigaail/schema"]) {
+      try {
+        dirs.push(new URL(".", import.meta.resolve(m)).href);
+      } catch {
+        // Not resolvable here (bundled, or a test runner): the node_modules rule still applies.
+      }
+    }
+  } catch {
+    // No import.meta.url: only the node_modules rule.
+  }
+  return dirs;
+})();
+
+export function isSdkUrl(url: string): boolean {
+  return url.includes("/node_modules/@abigaail/") || OWN_DIRS.some((d) => url.startsWith(d));
+}
 const frameKey = (f: ProfileFrame) => `${f.file}:${f.line}:${f.fn ?? ""}`;
 
 /**
  * A V8 call frame as a profile frame: the stack-frame rules (relative path,
- * identifier), or a fixed placeholder. Nothing else of the frame is kept.
+ * identifier), or a fixed placeholder ("(abigaail)" for the SDK's own code).
+ * Nothing else of the frame is kept.
  */
 export function profileFrame(cf: CallFrame, root: string): ProfileFrame | typeof IDLE | undefined {
   const name = cf.functionName;
@@ -112,6 +148,7 @@ export function profileFrame(cf: CallFrame, root: string): ProfileFrame | typeof
   if (name === "(idle)") return IDLE;
   if (name === "(program)") return { file: "(program)", line: 0 };
   if (name === "(garbage collector)") return { file: "(gc)", line: 0 };
+  if (cf.url && isSdkUrl(cf.url)) return { file: "(abigaail)", line: 0 };
   const fn = isIdent(name, MAX_FN_LENGTH) ? name : undefined;
   let file = !cf.url ? "(native)" : cf.url.startsWith("node:") ? "(node)" : (relativePath(cf.url, root) ?? "(external)");
   if (!isFramePath(file)) file = "(external)";
@@ -203,6 +240,12 @@ export class Profiler {
   private readonly startedAt: number;
   private heapSince = 0;
   private stopped = false;
+  /** A window is running (they never overlap). */
+  private running = false;
+  private windowTimer: ReturnType<typeof setTimeout> | undefined;
+  /** When the last window started, and the last block-triggered one was asked for. */
+  private lastWindowAt = Number.NEGATIVE_INFINITY;
+  private lastExtraAt = Number.NEGATIVE_INFINITY;
   private warned = false;
   private readonly now: () => number;
 
@@ -218,6 +261,20 @@ export class Profiler {
     this.windowMs = opts.timing?.windowMs ?? PROFILING.windowMs;
     this.everyMs = opts.timing?.everyMs ?? PROFILING.everyMs;
     this.gapMs = this.everyMs;
+    runtime.onBlock = (ms) => this.afterBlock(ms);
+  }
+
+  /**
+   * A block of ms just ended: unless a window started recently, or an extra
+   * one already ran recently, take a window at the next idle moment (the same
+   * idle-only start, budgets and auto-off as any window).
+   */
+  private afterBlock(ms: number): void {
+    if (ms < RUNTIME.blockMinMs || !this.session || this.stopped || this.running || this.state === PROFILER_STATE.disabled) return;
+    const now = this.now();
+    if (now - this.lastWindowAt < PROFILING.blockWindowAfterMs || now - this.lastExtraAt < PROFILING.blockWindowAfterMs) return;
+    this.lastExtraAt = now;
+    this.guard(() => this.cpuWindow(this.windowMs).then(() => undefined));
   }
 
   private readonly windowMs: number;
@@ -263,6 +320,7 @@ export class Profiler {
 
   private clearTimers(): void {
     if (this.timer) clearTimeout(this.timer);
+    if (this.windowTimer) clearTimeout(this.windowTimer);
     if (this.heapTimer) clearTimeout(this.heapTimer);
     if (this.sendTimer) clearInterval(this.sendTimer);
     this.timer = this.heapTimer = this.sendTimer = undefined;
@@ -324,13 +382,23 @@ export class Profiler {
    * (then the gap to the next one doubles). Returns whether it ran.
    */
   async cpuWindow(ms: number = PROFILING.windowMs): Promise<boolean> {
-    if (!this.session || this.state === PROFILER_STATE.disabled) return false;
+    if (!this.session || this.state === PROFILER_STATE.disabled || this.running) return false;
+    this.running = true;
+    try {
+      return await this.runWindow(ms);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private async runWindow(ms: number): Promise<boolean> {
     const busy = !this.opts.timing?.ignoreLoad && (this.load.lagMs > PROFILING.lagLimitMs || this.load.cpuPercent > PROFILING.cpuLimitPercent);
     if (busy || this.client.stats().breaker !== "closed") {
       this.backOff();
       return false;
     }
     if (!(await this.idle())) return false;
+    this.lastWindowAt = this.now();
     this.runtime.startLog();
     const t0 = this.runtime.clock();
     const s0 = this.now();
@@ -340,8 +408,8 @@ export class Profiler {
     this.runtime.notePause(t0, this.runtime.clock());
     this.opts.onPause?.(startMs);
     await new Promise<void>((resolve) => {
-      this.timer = setTimeout(resolve, ms);
-      this.timer.unref();
+      this.windowTimer = setTimeout(resolve, ms);
+      this.windowTimer.unref();
     });
     if (!this.session) return false;
     const w0 = this.now();
@@ -373,8 +441,8 @@ export class Profiler {
       if (this.runtime.busyRequests() === 0) return true;
       if (this.now() >= until || !this.session || this.stopped) return false;
       await new Promise<void>((resolve) => {
-        this.timer = setTimeout(resolve, retry);
-        this.timer.unref();
+        this.windowTimer = setTimeout(resolve, retry);
+        this.windowTimer.unref();
       });
     }
   }

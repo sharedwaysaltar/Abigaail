@@ -39,6 +39,12 @@ export const PROFILE_VIEW = {
 
 const keyOf = (f: Frame) => `${f.file}:${f.line}:${f.fn ?? ""}`;
 
+/** The SDK's own files, as an SDK that did not group them yet sent them (#124). */
+const SDK_FILE_RE = /(^|\/)node_modules\/@abigaail\/|^packages\/(node|core|schema|next)\/(dist|src)\//;
+const SDK_FRAME: Frame = { file: "(abigaail)", line: 0 };
+/** The SDK's own frames as one "(abigaail)" frame. */
+const grouped = (f: Frame): Frame => (SDK_FILE_RE.test(f.file) ? SDK_FRAME : f);
+
 /** "renderDocs (src/docs.ts:88)", "(gc)", "(anonymous) (src/x.ts:4)". */
 export function frameLabel(f: Frame): string {
   if (f.file.startsWith("(")) return f.fn ? `${f.fn} ${f.file}` : f.file;
@@ -52,13 +58,15 @@ export function merge(rows: readonly ProfileRow[]): Merged {
     m.concurrent += r.samples_concurrent ?? 0;
     m.idle += r.samples_idle ?? 0;
     m.windowMs += r.window_ms;
-    const keys = r.frames.map((f) => {
+    const keys = r.frames.map((raw) => {
+      const f = grouped(raw);
       const k = keyOf(f);
       if (!m.frames.has(k)) m.frames.set(k, { file: f.file, line: f.line, ...(f.fn ? { fn: f.fn } : {}) });
       return k;
     });
     for (const s of r.stacks) {
-      const sk = s.frames.map((i) => keys[i]!);
+      // Consecutive SDK frames are one.
+      const sk = s.frames.map((i) => keys[i]!).filter((k, i, all) => i === 0 || k !== all[i - 1] || !isPlaceholder(k));
       const id = sk.join("|");
       const cur = m.stacks.get(id);
       if (cur) cur.weight += s.weight;
@@ -153,7 +161,7 @@ export interface HeapSite {
 function bytesBySite(row: ProfileRow): Map<string, { frame: Frame; bytes: number }> {
   const out = new Map<string, { frame: Frame; bytes: number }>();
   for (const s of row.stacks) {
-    const f = row.frames[s.frames.at(-1)!]!;
+    const f = grouped(row.frames[s.frames.at(-1)!]!);
     const k = keyOf(f);
     const cur = out.get(k);
     if (cur) cur.bytes += s.weight;

@@ -368,6 +368,18 @@ describe("profiles name the function (#120)", () => {
     expect(f!.action).toContain("rememberSearch");
   });
 
+  it("a leak never names the SDK's own code; the app's growing site is named", () => {
+    fx.start(fx.now - 5 * HOUR_MS, { instance: A });
+    for (let t = fx.now - 5 * HOUR_MS; t < fx.now; t += 5 * MIN) fx.metric(t, "heap_floor_mb", 120 + 25 * ((t - (fx.now - 5 * HOUR_MS)) / HOUR_MS));
+    const SDK = { file: "(abigaail)", line: 0 };
+    const SITE = { file: "src/cache.ts", line: 7, fn: "remember" };
+    fx.profile(fx.now - 4 * HOUR_MS, "heap", [{ frames: [SDK], weight: 1 * 1048576 }, { frames: [HANDLER, SITE], weight: 1 * 1048576 }]);
+    fx.profile(fx.now - 10 * MIN, "heap", [{ frames: [SDK], weight: 90 * 1048576 }, { frames: [HANDLER, SITE], weight: 21 * 1048576 }]);
+    const [f] = only("leak");
+    expect(f!.summary).toContain("Retained memory grew most at remember (src/cache.ts:7): +20 MB");
+    expect(f!.summary).not.toContain("abigaail");
+  });
+
   it("an out-of-memory restart names where the dead process's heap went", () => {
     fx.start(fx.now - 13 * MIN, { instance: A });
     for (let i = 0; i < 5; i++) fx.metric(fx.now - 12 * MIN + i * 30_000, "memory_heap_used_mb", 20 + i * 18);

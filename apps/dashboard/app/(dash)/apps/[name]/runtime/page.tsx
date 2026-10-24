@@ -215,7 +215,7 @@ export default async function RuntimePage({ params, searchParams }: { params: Pr
               {v.profilerPauses
                 ? ` Last 24 hours: ${v.profilerPauses.count} pause${v.profilerPauses.count === 1 ? "" : "s"}, longest ${ms(v.profilerPauses.maxMs)}; kept out of the blocks and the lag above.`
                 : ""}{" "}
-              Only function names, project files and line numbers are sent: never values, strings or source.
+              "(abigaail)" is the monitoring SDK's own code, "(node)" and "(native)" are Node's and V8's. Only function names, project files and line numbers are sent: never values, strings or source.
             </p>
           </>
         ) : (

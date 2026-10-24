@@ -384,6 +384,28 @@ describe("profileView", () => {
     expect(r.cpu).toMatchObject({ samples: 70, profiles: 1 });
   });
 
+  it("the SDK's own frames (from an SDK that did not group them) are one (abigaail) row, never named behind blocks", () => {
+    const sdk = (file: string) => ({ file, line: 10, fn: "tick" });
+    put([{
+      ts: NOW - 10 * 60_000,
+      event: {
+        type: "profile", event_id: id(), client_ts: 1, kind: "block", window_ms: 10_000, samples: 100,
+        frames: [A, sdk("packages/node/dist/runtime.js"), sdk("node_modules/@abigaail/core/dist/client.js")],
+        stacks: [{ frames: [0, 1, 2], weight: 70 }, { frames: [0, 1], weight: 30 }],
+      },
+    }]);
+    profile(NOW - 10 * 60_000, "cpu", [{ frames: [0], weight: 10 }]);
+    put([{
+      ts: NOW - 9 * 60_000,
+      event: { type: "profile", event_id: id(), client_ts: 1, kind: "cpu", window_ms: 10_000, samples: 50, frames: [sdk("packages/node/dist/profiler.js"), sdk("node_modules/@abigaail/schema/dist/x.js")], stacks: [{ frames: [0], weight: 30 }, { frames: [1], weight: 20 }] },
+    }]);
+    const v = profileView(store, app.id, NOW, { windowMs: HOUR_MS, route: null });
+    // Blocked inside the SDK's code under handle(): the app's handle() is what is named.
+    expect(v.block[0]).toMatchObject({ label: "handle (src/a.ts:3)", selfShare: 1 });
+    expect(v.cpu!.top.filter((f) => f.label === "(abigaail)")).toEqual([expect.objectContaining({ self: 50 })]);
+    expect(v.cpu!.top.some((f) => f.label.includes("tick"))).toBe(false);
+  });
+
   it("heap sites growing since the start, and the functions behind blocks", () => {
     put([{ ts: NOW - 2 * HOUR_MS, event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "boot" } }]);
     profile(NOW - 100 * 60_000, "heap", [{ frames: [0, 1], weight: 1 * 1048576 }, { frames: [0], weight: 4 * 1048576 }]);
