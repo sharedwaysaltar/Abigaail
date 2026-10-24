@@ -51,6 +51,12 @@ export interface ReplayOptions {
   maxMs?: number;
   /** Outbound calls and errors carry the request's parent_id (default true; Node 22's SDK default is false). */
   linkOutbound?: boolean;
+  /**
+   * When the demo's 30 s metrics intervals end, relative to each boot (default
+   * 30 s after it). A live process's intervals fall anywhere; block events are
+   * stamped at an interval's end, so up to 30 s after the requests they explain.
+   */
+  metricsPhaseMs?: number;
 }
 
 export interface ReplayResult {
@@ -103,7 +109,8 @@ export function replay(o: ReplayOptions): ReplayResult {
     buffer.push(lifecycleItem(r, now, "boot", "LON1", { event_id: bootId }));
     ready = { at: now + M.readyAfterMs, bootId };
     lastBeat = now;
-    lastMetrics = now;
+    // The first interval ends metricsPhaseMs after the boot.
+    lastMetrics = now - M.metricsMs + (o.metricsPhaseMs ?? M.metricsMs);
     heapMb = M.baseHeapMb;
     docsBlocks = 0;
     bootAt = lastProfileSend = lastHeap = now;

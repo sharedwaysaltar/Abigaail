@@ -401,6 +401,16 @@ describe("Health folds the slowness of a blocking route into it", () => {
     expect(only("loop_blocked")).toEqual([]);
   });
 
+  it("an app sending runtime signals is judged only up to its latest runtime interval; one without is judged as before (#125)", () => {
+    // Slow /report requests only in the last 30 s of the window.
+    fx.requests(E() - 30_000, E() - 1_000, 30, { route: "/report", duration: 2_500 });
+    const latency = () => fx.run(health).filter((f) => f.signal === "latency").map((f) => f.subject);
+    expect(latency()).toEqual(["/report"]);
+    // Its latest runtime interval ended 40 s before the window's end: those requests wait for the next one.
+    fx.metric(E() - 40_000, "event_loop_blocks", 0);
+    expect(latency()).toEqual([]);
+  });
+
   it("short blocks do not explain a much higher p95", () => {
     fx.requests(E() - 4 * MIN, E() - 1_000, 30, { route: "/report", duration: 2_000 });
     fx.block(E() - 60_000, "/report", 2, 240, 120);

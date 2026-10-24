@@ -105,6 +105,8 @@ export const HEALTH = {
   slowestRoutes: 3,
   /** A route's latency is its own blocking when a block charged to it in the window is this long relative to its p95. */
   blockExplainsShare: 0.8,
+  /** An app with a runtime interval this recent is judged up to its latest one (#125). */
+  runtimeIntervalMaxMs: 2 * MINUTE,
 
   // Dependencies (per outbound host, 5-minute window).
   minCalls: 5,
