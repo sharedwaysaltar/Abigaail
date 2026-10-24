@@ -18,7 +18,7 @@ describe("accepting batches", () => {
   it("stores a valid batch and answers 202 with counts", async () => {
     const res = await post(s, batch([requestEvent(), requestEvent({ status: 500 })]), { key });
     expect(res.status).toBe(202);
-    expect(res.json).toEqual({ accepted: 2, duplicates: 0, features: ["runtime_v1"] });
+    expect(res.json).toEqual({ accepted: 2, duplicates: 0, features: ["runtime_v1", "profile_v1"] });
     expect(s.store.countEvents(appId)).toBe(2);
     expect(s.store.deploys(appId).map((d) => d.release)).toEqual(["abc123"]);
   });
@@ -28,7 +28,7 @@ describe("accepting batches", () => {
     await post(s, b, { key });
     const again = await post(s, b, { key });
     expect(again.status).toBe(202);
-    expect(again.json).toEqual({ accepted: 0, duplicates: 2, features: ["runtime_v1"] });
+    expect(again.json).toEqual({ accepted: 0, duplicates: 2, features: ["runtime_v1", "profile_v1"] });
     expect(s.store.countEvents(appId)).toBe(2);
   });
 

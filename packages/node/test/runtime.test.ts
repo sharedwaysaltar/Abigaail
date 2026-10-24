@@ -197,6 +197,34 @@ describe("block attribution", () => {
   });
 });
 
+describe("the profiler's own pause (#121)", () => {
+  it("is not a block, and is reported as profiler_pause_ms", () => {
+    const s = setup();
+    s.advance(100);
+    const from = s.now();
+    s.at(from + RUNTIME.tickMs + 250);
+    // The profiler started a CPU window: V8 paused the app 250 ms.
+    s.m.notePause(from + 20, from + 270);
+    s.m.tick();
+    s.advance(s.now() + 200);
+    const { blocks, metrics } = s.sample();
+    expect(blocks).toEqual([]);
+    expect(metrics).toContainEqual(["event_loop_blocks", 0]);
+    expect(metrics).toContainEqual(["profiler_pause_ms", 250]);
+  });
+
+  it("only the pause is taken out: real blocking around it is still a block", () => {
+    const s = setup();
+    s.advance(100);
+    const from = s.now();
+    s.at(from + RUNTIME.tickMs + 450);
+    s.m.notePause(from + 20, from + 270);
+    s.m.tick();
+    s.advance(s.now() + 200);
+    expect(s.sample().blocks).toEqual([expect.objectContaining({ count: 1, total_ms: 200 })]);
+  });
+});
+
 describe("the in-flight table is bounded", () => {
   it("a table full of aborted requests recovers at the next sweep", () => {
     const s = setup();

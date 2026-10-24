@@ -5,6 +5,7 @@ export interface Faults {
   readonly slowSearch: boolean;
   readonly userErrorShare: number;
   readonly leakPerRequest: number;
+  readonly leakPerSecond: number;
   readonly blockDocs: boolean;
   readonly oomKillMb: number;
 }

@@ -15,6 +15,7 @@ import {
   responseSeries,
   retentionView,
   routesThatChanged,
+  profileView,
   runtimeView,
   SCHEDULE,
   servers,
@@ -314,7 +315,7 @@ describe("retention on the dashboard", () => {
     const job = new Retention({ store, days: { ...loadRetention({}), events: 14 }, now: () => NOW, log: () => {} });
     await job.runOnce();
     const rows = retentionView(store);
-    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "alerts", "sessions"]);
+    expect(rows.map((r) => r.name)).toEqual(["events", "rollups", "daily_uniques", "findings", "agent_runs", "ingest_rejections", "db_size_samples", "audit_log", "alerts", "profiles", "sessions"]);
     expect(rows[0]).toMatchObject({ keepDays: 14, lastRunAt: NOW, lastDeleted: 0 });
     expect(rows.at(-1)).toMatchObject({ name: "sessions", keepDays: 0 });
     expect(appRetention(store, app.id)).toEqual({ eventsDays: 14, rollupsDays: 400, oldestEvent: NOW - HOUR_MS });
@@ -344,9 +345,75 @@ describe("runtimeView", () => {
     const v = runtimeView(store, app.id, NOW);
     expect(v.signals).toBe(true);
     expect(v.memory.find((p) => p.heapFloor !== null)?.heapFloor).toBe(80);
+    // A short history starts at its first reading, not 24 h back.
+    expect(v.memory[0]!.heapFloor).toBe(80);
+    expect(v.memory[0]!.t).toBeGreaterThanOrEqual(NOW - 2 * HOUR_MS - 15 * MIN);
+    expect(v.memory.length).toBeLessThanOrEqual(10);
     expect(v.blocks24h).toEqual([{ route: "/report", blocks: 4, blocked_ms: 1200, max_ms: 400 }]);
     expect(v.startups).toEqual([{ ts: NOW - 3 * HOUR_MS + 1000, release: "r1", startup_ms: 820 }]);
     expect(v.heapLimitMb).toBe(4096);
-    expect(v.boots).toEqual([NOW - 3 * HOUR_MS]);
+    // The boot is before the first reading, so it is outside the chart.
+    expect(v.boots).toEqual([]);
+  });
+});
+
+describe("profileView", () => {
+  const A = { file: "src/a.ts", line: 3, fn: "handle" };
+  const B = { file: "src/b.ts", line: 9, fn: "render" };
+  const GC = { file: "(gc)", line: 0 };
+  const profile = (ts: number, kind: "cpu" | "block" | "heap", stacks: { frames: number[]; weight: number }[], o: { route?: string; concurrent?: number; idle?: number } = {}) =>
+    put([{
+      ts,
+      event: {
+        type: "profile", event_id: id(), client_ts: 1, kind, window_ms: 10_000, samples: stacks.reduce((a, b) => a + b.weight, 0), frames: [A, B, GC], stacks,
+        ...(o.route ? { route: o.route } : {}), ...(o.concurrent !== undefined ? { samples_concurrent: o.concurrent, samples_idle: o.idle ?? 0 } : {}),
+      },
+    }]);
+
+  it("merges profiles: top functions by self time, a flame tree, routes, and the concurrent/idle share", () => {
+    profile(NOW - 30 * 60_000, "cpu", [{ frames: [0, 1], weight: 60 }, { frames: [0], weight: 30 }, { frames: [2], weight: 10 }], { concurrent: 20, idle: 5 });
+    profile(NOW - 20 * 60_000, "cpu", [{ frames: [0, 1], weight: 40 }], { concurrent: 0, idle: 0 });
+    profile(NOW - 20 * 60_000, "cpu", [{ frames: [0, 1], weight: 70 }], { route: "/report" });
+    const v = profileView(store, app.id, NOW, { windowMs: HOUR_MS, route: null });
+    expect(v.cpu).toMatchObject({ samples: 140, concurrent: 20, idle: 5, profiles: 2 });
+    expect(v.cpu!.top[0]).toMatchObject({ label: "render (src/b.ts:9)", self: 100, total: 100 });
+    expect(v.cpu!.top.find((f) => f.label === "handle (src/a.ts:3)")).toMatchObject({ self: 30, total: 130 });
+    expect(v.cpu!.flame.children[0]).toMatchObject({ label: "handle (src/a.ts:3)", value: 130, children: [{ label: "render (src/b.ts:9)", value: 100 }] });
+    expect(v.routes).toEqual([{ route: "/report", samples: 70 }]);
+    const r = profileView(store, app.id, NOW, { windowMs: HOUR_MS, route: "/report" });
+    expect(r.cpu).toMatchObject({ samples: 70, profiles: 1 });
+  });
+
+  it("the SDK's own frames (from an SDK that did not group them) are one (abigaail) row, never named behind blocks", () => {
+    const sdk = (file: string) => ({ file, line: 10, fn: "tick" });
+    put([{
+      ts: NOW - 10 * 60_000,
+      event: {
+        type: "profile", event_id: id(), client_ts: 1, kind: "block", window_ms: 10_000, samples: 100,
+        frames: [A, sdk("packages/node/dist/runtime.js"), sdk("node_modules/@abigaail/core/dist/client.js")],
+        stacks: [{ frames: [0, 1, 2], weight: 70 }, { frames: [0, 1], weight: 30 }],
+      },
+    }]);
+    profile(NOW - 10 * 60_000, "cpu", [{ frames: [0], weight: 10 }]);
+    put([{
+      ts: NOW - 9 * 60_000,
+      event: { type: "profile", event_id: id(), client_ts: 1, kind: "cpu", window_ms: 10_000, samples: 50, frames: [sdk("packages/node/dist/profiler.js"), sdk("node_modules/@abigaail/schema/dist/x.js")], stacks: [{ frames: [0], weight: 30 }, { frames: [1], weight: 20 }] },
+    }]);
+    const v = profileView(store, app.id, NOW, { windowMs: HOUR_MS, route: null });
+    // Blocked inside the SDK's code under handle(): the app's handle() is what is named.
+    expect(v.block[0]).toMatchObject({ label: "handle (src/a.ts:3)", selfShare: 1 });
+    expect(v.cpu!.top.filter((f) => f.label === "(abigaail)")).toEqual([expect.objectContaining({ self: 50 })]);
+    expect(v.cpu!.top.some((f) => f.label.includes("tick"))).toBe(false);
+  });
+
+  it("heap sites growing since the start, and the functions behind blocks", () => {
+    put([{ ts: NOW - 2 * HOUR_MS, event: { type: "lifecycle", event_id: id(), client_ts: 1, kind: "boot" } }]);
+    profile(NOW - 100 * 60_000, "heap", [{ frames: [0, 1], weight: 1 * 1048576 }, { frames: [0], weight: 4 * 1048576 }]);
+    profile(NOW - 10 * 60_000, "heap", [{ frames: [0, 1], weight: 41 * 1048576 }, { frames: [0], weight: 4 * 1048576 }]);
+    profile(NOW - 10 * 60_000, "block", [{ frames: [0, 1], weight: 30 }]);
+    const v = profileView(store, app.id, NOW, { windowMs: HOUR_MS, route: null });
+    expect(v.heapGrowing).toEqual([expect.objectContaining({ label: "render (src/b.ts:9)", firstBytes: 1048576, lastBytes: 41 * 1048576 })]);
+    expect(v.block[0]).toMatchObject({ label: "render (src/b.ts:9)", selfShare: 1 });
+    expect(v.cpu).toBeNull();
   });
 });

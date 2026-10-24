@@ -99,14 +99,14 @@ const STAT_KINDS: readonly StatKind[] = ["route", "host", "referrer", "error", "
 const DAY_MS = 86_400_000;
 
 /** Tables with an app_id whose old rows retention deletes one app_id at a time. */
-export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "alert_state" | "scrub_mismatches";
+export type ScopedTable = "events" | "hourly_route_stats" | "rollup_hours" | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "alert_state" | "scrub_mismatches" | "profiles";
 const SCOPED_TABLES: readonly ScopedTable[] = [
-  "events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log", "alert_state", "scrub_mismatches",
+  "events", "hourly_route_stats", "rollup_hours", "daily_uniques", "findings", "ingest_rejections", "audit_log", "alert_state", "scrub_mismatches", "profiles",
 ];
 
 /** What deleteExpired removes; events and rollups have their own methods (roll before delete, tables kept in step). */
 export type ExpiringTable =
-  | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples" | "alert_deliveries" | "alert_state" | "scrub_mismatches";
+  | "daily_uniques" | "findings" | "ingest_rejections" | "audit_log" | "agent_runs" | "db_size_samples" | "alert_deliveries" | "alert_state" | "scrub_mismatches" | "profiles";
 
 /**
  * One bounded batch per statement. App tables take (scope, cutoff, limit) or,
@@ -145,6 +145,10 @@ const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
   },
   db_size_samples: {
     none: "DELETE FROM db_size_samples WHERE ts IN (SELECT ts FROM db_size_samples WHERE ts < ? ORDER BY ts LIMIT ?)",
+  },
+  profiles: {
+    app: `DELETE FROM profiles WHERE app_id = ? AND event_id IN (
+            SELECT event_id FROM profiles WHERE app_id = ? AND ts < ? ORDER BY ts LIMIT ?)`,
   },
   scrub_mismatches: {
     app: `DELETE FROM scrub_mismatches WHERE app_id = ? AND minute IN (
@@ -308,11 +312,26 @@ export class Store extends StoreReader {
         route, method, status, duration_ms, host, name, value, sample_rate,
         visitor_hash, browser, bot_class, attrs, parent_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const insertProfile = this.db.prepare(`
+      INSERT OR IGNORE INTO profiles (app_id, event_id, ts, release, kind, route, window_ms, samples, data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     return this.tx(() => {
       let inserted = 0;
       const rows: EventRow[] = [];
       let latestBoot: { ts: number; region: string | null } | undefined;
       for (const { event, derived } of batch.events) {
+        if (event.type === "profile") {
+          // Profiles have their own table: larger, never live, shorter retention.
+          const data = JSON.stringify({
+            frames: event.frames.map((f) => ({ file: f.file, line: f.line, fn: f.fn })),
+            stacks: event.stacks.map((s) => ({ frames: s.frames, weight: s.weight })),
+            samples_concurrent: event.samples_concurrent,
+            samples_idle: event.samples_idle,
+          });
+          const { changes } = insertProfile.run(appId, event.event_id, derived.ts, batch.release, event.kind, event.route ?? null, Math.round(event.window_ms), event.samples, data);
+          inserted += Number(changes);
+          continue;
+        }
         const r = toRow(event, derived);
         const { changes } = insert.run(
           appId, r.event_id, r.ts, batch.receivedAt, r.client_ts, r.type, batch.release, batch.environment,

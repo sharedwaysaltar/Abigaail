@@ -103,6 +103,10 @@ export const HEALTH = {
   /** Samples needed in the 15-minute window for RSS and CPU. */
   minResourceSamples: 3,
   slowestRoutes: 3,
+  /** A route's latency is its own blocking when a block charged to it in the window is this long relative to its p95. */
+  blockExplainsShare: 0.8,
+  /** An app with a runtime interval this recent is judged up to its latest one (#125). */
+  runtimeIntervalMaxMs: 2 * MINUTE,
 
   // Dependencies (per outbound host, 5-minute window).
   minCalls: 5,
@@ -173,6 +177,8 @@ export const RETENTION = {
     audit_log: { env: "AUDIT", days: 400, minDays: 90 },
     /** Alert messages (and which findings each carried) and alert states that owe nothing. */
     alerts: { env: "ALERTS", days: 90, minDays: 7 },
+    /** Profiles (function names, files and lines): debugging data, kept a week. */
+    profiles: { env: "PROFILES", days: 7, minDays: 2 },
   },
   maxDays: 3650,
   /** Rows per delete transaction: ingest waits at most one batch. */

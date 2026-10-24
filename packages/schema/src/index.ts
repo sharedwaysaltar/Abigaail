@@ -30,6 +30,12 @@ export const LIMITS = {
   /** Scrubbed error messages (SCRUB_LIMITS.outputMax). */
   maxMessageLength: 200,
   maxCodeLength: 40,
+  /** Profiles (profile_v1). */
+  maxProfileFrames: 100,
+  maxProfileStacks: 150,
+  maxProfileDepth: 24,
+  /** One profile event, as JSON. */
+  maxProfileBytes: 16 * 1024,
 } as const;
 
 /** Route placeholders used when a real pattern is unknown or a cap is hit. */
@@ -68,10 +74,18 @@ export type RequestFlag = (typeof REQUEST_FLAGS)[number];
  * server it talks to has announced it, so a newer SDK never loses batches to an
  * older server (DECISIONS #110).
  */
-export const FEATURES = ["runtime_v1"] as const;
+export const FEATURES = ["runtime_v1", "profile_v1"] as const;
 export type Feature = (typeof FEATURES)[number];
 export const FEATURE_RE = /^[a-z][a-z0-9_]{0,31}$/;
 export const MAX_FEATURES = 16;
+
+/**
+ * Metrics covered by `profile_v1`. profiler_state: 0 off, 1 on, 2 backing off,
+ * 3 disabled for this process (over budget). profiler_pause_ms: how long the
+ * profiler itself paused the app in the interval (starting a CPU window), kept
+ * out of block detection and the lag metrics (DECISIONS #121).
+ */
+export const PROFILE_METRIC_NAMES = ["profiler_state", "profiler_pause_ms"] as const;
 
 /** Metrics covered by `runtime_v1`: post-GC heap floor, GC work, off-heap memory, event-loop blocks. */
 export const RUNTIME_METRIC_NAMES = [
@@ -92,6 +106,7 @@ export const METRIC_NAMES = [
   "sdk_queue_size",
   "sdk_dropped_events",
   ...RUNTIME_METRIC_NAMES,
+  ...PROFILE_METRIC_NAMES,
 ] as const;
 export type MetricName = (typeof METRIC_NAMES)[number];
 
@@ -238,7 +253,44 @@ export interface BlockEvent extends BaseEvent {
   max_ms: number;
 }
 
-export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent | BlockEvent;
+/**
+ * What a profile's samples are (profile_v1, DECISIONS #118): CPU time (whole
+ * app, or one route), CPU time while the event loop was blocked, or live heap
+ * by the site that allocated it (sampled bytes).
+ */
+export const PROFILE_KINDS = ["cpu", "block", "heap"] as const;
+export type ProfileKind = (typeof PROFILE_KINDS)[number];
+
+/** One function in a profile: the same rules as a stack frame (relative path, identifier), or a placeholder. */
+export interface ProfileFrame {
+  /** Project-relative path, or a placeholder: "(node)", "(native)", "(external)", "(gc)", "(program)". */
+  file: string;
+  line: number;
+  fn?: string;
+}
+
+/**
+ * Sampled stacks merged over an interval. No values, strings or source ever:
+ * only where the time or memory went. Stacks run from the outermost frame to
+ * the leaf, as indexes into `frames`; weights are samples (cpu, block) or bytes (heap).
+ */
+export interface ProfileEvent extends BaseEvent {
+  type: "profile";
+  kind: ProfileKind;
+  /** cpu only: the route all of these samples ran in; absent for the whole app. */
+  route?: string;
+  /** How long the samples cover (cpu, block: time profiled; heap: since sampling started). */
+  window_ms: number;
+  /** All samples (cpu, block) or sampled bytes (heap), including those not in `stacks`. */
+  samples: number;
+  /** Whole-app cpu only: samples that ran while several requests were in flight, or none. */
+  samples_concurrent?: number;
+  samples_idle?: number;
+  frames: ProfileFrame[];
+  stacks: { frames: number[]; weight: number }[];
+}
+
+export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent | BlockEvent | ProfileEvent;
 export type EventType = AbigaailEvent["type"];
 
 /** Event as handed to the SDK: the SDK fills in event_id and client_ts. */
@@ -306,6 +358,8 @@ export const MAX_FN_LENGTH = 100;
 
 /** The feature an event needs the server to have announced, or undefined for the base schema. */
 export function eventFeature(e: { type: string; name?: unknown; kind?: unknown; instance?: unknown }): Feature | undefined {
+  if (e.type === "profile") return "profile_v1";
+  if (e.type === "metric" && (PROFILE_METRIC_NAMES as readonly unknown[]).includes(e.name)) return "profile_v1";
   if (e.type === "block") return "runtime_v1";
   if (e.type === "metric") return (RUNTIME_METRIC_NAMES as readonly unknown[]).includes(e.name) ? "runtime_v1" : undefined;
   if (e.type === "lifecycle") return e.kind === "ready" || e.instance !== undefined ? "runtime_v1" : undefined;

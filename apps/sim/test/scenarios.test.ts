@@ -118,6 +118,20 @@ for (const app of ["node", "next"] as const) {
         expect(results).toEqual([]);
       }, 120_000);
 
+      it("blocking-route at the busy hour, block events arriving up to 30 s after their requests: loop_blocked and no health:latency for /docs (#125)", () => {
+        // The demo's metrics intervals end 20 or 25 s into each 30 s: the phases that showed the race.
+        for (const metricsPhaseMs of [20_000, 25_000]) {
+          const s = seededStore(app, BUSY);
+          try {
+            const r = replay({ store: s.store, appId: s.appId, app, plan: plan(app, ["blocking-route"]), start: BUSY, metricsPhaseMs });
+            expect(r.problems).toEqual([]);
+            expect(r.tracker.results(r.endedAt).map((x) => [x.fingerprint, x.status])).toEqual([["resilience:loop_blocked:/docs", "pass"]]);
+          } finally {
+            s.close();
+          }
+        }
+      }, 300_000);
+
       it("error-burst across an hour boundary: the rollup of its own hour does not make it old news", () => {
         // Starts at 03:45, so the fault (03:51-03:56) is rolled up at 04:00 while still in the window.
         const { results, problems } = run(app, ["error-burst"], QUIET + 15 * 60_000);

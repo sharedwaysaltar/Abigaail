@@ -4,6 +4,7 @@
 // Every function reads only through StoreReader, scoped by app.
 
 import type { LifecycleRow, StoreReader } from "@abigaail/store";
+import { topHeapSite } from "./profiles.js";
 import { mad, mannKendallZ, median, theilSen, wilsonLower } from "./stats.js";
 import { RESILIENCE as R } from "./thresholds.js";
 
@@ -22,9 +23,9 @@ export type CrashCause =
   | { kind: "exit"; code: number }
   /** An uncaught error event arrived just before the process went quiet. */
   | { kind: "fatal_error"; error_type: string; frame?: Frame }
-  | { kind: "oom"; heap_mb: number; limit_mb: number }
+  | { kind: "oom"; heap_mb: number; limit_mb: number; site?: string }
   /** No record and no error, but the heap grew steadily until the process stopped. */
-  | { kind: "oom_trend"; from_mb: number; to_mb: number }
+  | { kind: "oom_trend"; from_mb: number; to_mb: number; site?: string }
   | { kind: "container_oom"; rss_mb: number; limit_mb: number }
   | { kind: "unknown" };
 
@@ -51,6 +52,8 @@ export interface RestartVerdict {
 
 const at = (f?: Frame) => (f ? ` at ${f.file}:${f.line}` : "");
 
+const siteText = (site?: string) => (site ? `; most of its sampled heap was allocated in ${site}` : "");
+
 /** A crash's cause in words. */
 export function causeText(c: CrashCause): string {
   switch (c.kind) {
@@ -61,9 +64,9 @@ export function causeText(c: CrashCause): string {
     case "fatal_error":
       return `uncaught ${c.error_type}${at(c.frame)}`;
     case "oom":
-      return `likely out of memory (heap ${Math.round(c.heap_mb)} of ${Math.round(c.limit_mb)} MB)`;
+      return `likely out of memory (heap ${Math.round(c.heap_mb)} of ${Math.round(c.limit_mb)} MB)${siteText(c.site)}`;
     case "oom_trend":
-      return `likely out of memory: its heap grew from ${Math.round(c.from_mb)} to ${Math.round(c.to_mb)} MB until it stopped`;
+      return `likely out of memory: its heap grew from ${Math.round(c.from_mb)} to ${Math.round(c.to_mb)} MB until it stopped${siteText(c.site)}`;
     case "container_oom":
       return `likely killed by the container memory limit (${Math.round(c.rss_mb)} of ${Math.round(c.limit_mb)} MB)`;
     case "unknown":
@@ -108,7 +111,10 @@ export function crashCause(store: StoreReader, appId: string, boot: LifecycleRow
   if (fatal) return { kind: "fatal_error", error_type: fatal.error_type, ...(fatal.frame ? { frame: fatal.frame } : {}) };
   const heapLimit = latestReady(rows, boot.ts, (r) => r.heap_limit_mb) ?? ready?.heap_limit_mb ?? undefined;
   const heap = projectedAt(store, appId, "memory_heap_used_mb", since, quiet);
-  if (heap !== undefined && heapLimit && heap >= R.oomShare * heapLimit) return { kind: "oom", heap_mb: round1(Math.min(heap, heapLimit)), limit_mb: heapLimit };
+  // With profiling on, the previous process's last heap profile names where its memory went (#120).
+  const top = topHeapSite(store, appId, since, quiet + 1);
+  const site = top && top.share >= 0.3 ? { site: top.label } : {};
+  if (heap !== undefined && heapLimit && heap >= R.oomShare * heapLimit) return { kind: "oom", heap_mb: round1(Math.min(heap, heapLimit)), limit_mb: heapLimit, ...site };
   const memLimit = latestReady(rows, boot.ts, (r) => r.memory_limit_mb) ?? ready?.memory_limit_mb ?? undefined;
   const rss = projectedAt(store, appId, "memory_rss_mb", since, quiet);
   if (rss !== undefined && memLimit && rss >= R.oomShare * memLimit) return { kind: "container_oom", rss_mb: round1(Math.min(rss, memLimit)), limit_mb: memLimit };
@@ -122,7 +128,7 @@ export function crashCause(store: StoreReader, appId: string, boot: LifecycleRow
     tail.every((v, i) => i === 0 || v > tail[i - 1]!) &&
     tail.at(-1)! - low >= Math.max(R.oomRiseMb, R.oomRiseShare * low)
   ) {
-    return { kind: "oom_trend", from_mb: round1(low), to_mb: round1(tail.at(-1)!) };
+    return { kind: "oom_trend", from_mb: round1(low), to_mb: round1(tail.at(-1)!), ...site };
   }
   return { kind: "unknown" };
 }

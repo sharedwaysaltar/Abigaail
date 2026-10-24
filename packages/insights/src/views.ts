@@ -503,6 +503,7 @@ export const RETENTION_LABEL: Record<RetentionName, string> = {
   db_size_samples: "Database size samples",
   audit_log: "Admin and sign-in audit logs",
   alerts: "Alert messages sent and their delivery",
+  profiles: "Profiles (functions, files and lines; no data)",
   sessions: "Dashboard sessions",
 };
 
@@ -590,7 +591,10 @@ export interface MemoryPoint {
 export interface RuntimeView {
   /** Whether the app's SDK sends runtime signals (a heap floor, a ready event). */
   signals: boolean;
-  /** Memory over the last day, per RUNTIME_BUCKET_MS. */
+  /**
+   * Memory per RUNTIME_BUCKET_MS over the last day, starting at the first
+   * bucket with a reading (a short history is not squeezed into the right edge).
+   */
   memory: MemoryPoint[];
   /** Starts in the same day, for markers. */
   boots: number[];
@@ -607,6 +611,8 @@ export interface RuntimeView {
   usualStartupMs: number | null;
   /** Open Resilience findings, worst first. */
   findings: Finding[];
+  /** The profiler's own start pauses over the last day (profiler_pause_ms), or null without any. */
+  profilerPauses: { count: number; maxMs: number; totalMs: number } | null;
 }
 
 const RUNTIME_BUCKET_MS = 15 * MIN;
@@ -627,7 +633,9 @@ export function runtimeView(store: StoreReader, appId: string, now: number): Run
   fill("heap_floor_mb", "heapFloor");
   fill("memory_rss_mb", "rss");
   fill("memory_external_mb", "external");
-  const memory = [...buckets.values()];
+  const all = [...buckets.values()];
+  const first = all.findIndex((p) => p.heapFloor !== null || p.rss !== null || p.external !== null);
+  const memory = first < 0 ? all : all.slice(first);
   const life = store.lifecycleDetail(appId, from, now + 1);
   const ready = life.filter((r) => r.kind === "ready");
   const latestReady = ready.at(-1);
@@ -640,11 +648,12 @@ export function runtimeView(store: StoreReader, appId: string, now: number): Run
     perRoute.set(b.route, a);
   }
   const startups = store.startups(appId, from, now + 1, RESILIENCE.startupHistory);
+  const pauses = store.metricSeries(appId, "profiler_pause_ms", now - DAY_MS, now + 1).map((p) => p.value);
   const before = store.startups(appId, now - 30 * DAY_MS, now + 1, RESILIENCE.startupHistory).map((s) => s.startup_ms);
   return {
     signals: memory.some((p) => p.heapFloor !== null) || ready.length > 0,
     memory,
-    boots: life.filter((r) => r.kind === "boot").map((r) => r.ts),
+    boots: life.filter((r) => r.kind === "boot" && r.ts >= memory[0]!.t).map((r) => r.ts),
     heapLimitMb: latestReady?.heap_limit_mb ?? null,
     memoryLimitMb: latestReady?.memory_limit_mb ?? null,
     leaks: leakVerdicts(store, appId, end),
@@ -657,5 +666,6 @@ export function runtimeView(store: StoreReader, appId: string, now: number): Run
     startups,
     usualStartupMs: before.length >= RESILIENCE.startupMinHistory ? median(before)! : null,
     findings: store.openFindings(appId).filter((f) => f.agent === "resilience").sort(worstFirst),
+    profilerPauses: pauses.length ? { count: pauses.length, maxMs: Math.max(...pauses), totalMs: pauses.reduce((a, b) => a + b, 0) } : null,
   };
 }

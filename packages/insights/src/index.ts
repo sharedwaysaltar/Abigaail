@@ -53,3 +53,5 @@ export type {
   Server,
   UsageNumbers,
 } from "./views.js";
+export { blockFunctions, flameTree, frameLabel, growingSites, merge as mergeProfiles, PROFILE_VIEW, profileView, topFunctions, topHeapSite } from "./profiles.js";
+export type { FlameNode, HeapSite, ProfileView, TopFunction } from "./profiles.js";

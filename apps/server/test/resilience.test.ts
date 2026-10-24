@@ -320,7 +320,103 @@ describe("the route that blocks the event loop", () => {
   });
 });
 
+describe("profiles name the function (#120)", () => {
+  const RENDER = { file: "src/docs.ts", line: 88, fn: "renderDocs" };
+  const HANDLER = { file: "src/server.ts", line: 12, fn: "handle" };
+  const interval = (ts: number, route: string) => {
+    fx.metric(ts, "event_loop_blocks", 1);
+    fx.block(ts, route, 1, 400, 400);
+  };
+
+  it("loop_blocked names the function the samples inside the blocks ran in", () => {
+    for (let i = 0; i < 6; i++) interval(E() - 12 * MIN + i * MIN, "/docs");
+    fx.profile(E() - 2 * MIN, "block", [{ frames: [HANDLER, RENDER], weight: 71 }, { frames: [HANDLER], weight: 29 }]);
+    const [f] = only("loop_blocked");
+    expect(f!.summary).toContain("Mostly in renderDocs (src/docs.ts:88), 71% of the samples taken while the loop was blocked.");
+    expect(f!.cause).toBe("Synchronous work in renderDocs (src/docs.ts:88), called from /docs.");
+  });
+
+  it("time inside Node's or V8's own code (a regex, a string method) counts for the project function that called it", () => {
+    for (let i = 0; i < 6; i++) interval(E() - 12 * MIN + i * MIN, "/docs");
+    const NATIVE = { file: "(native)", line: 0, fn: "replace" };
+    fx.profile(E() - 2 * MIN, "block", [{ frames: [HANDLER, RENDER, NATIVE], weight: 60 }, { frames: [HANDLER, RENDER], weight: 15 }, { frames: [HANDLER], weight: 25 }]);
+    expect(only("loop_blocked")[0]!.summary).toContain("Mostly in renderDocs (src/docs.ts:88), 75% of the samples taken while the loop was blocked.");
+  });
+
+  it("with two routes blocking, the samples cannot be told apart: no function is named", () => {
+    // Both in flight through every block, so each is charged for all of them.
+    for (let i = 0; i < 6; i++) {
+      const ts = E() - 12 * MIN + i * MIN;
+      fx.metric(ts, "event_loop_blocks", 1);
+      fx.block(ts, "/docs", 1, 200, 400);
+      fx.block(ts, "/export", 1, 200, 400);
+    }
+    fx.profile(E() - 2 * MIN, "block", [{ frames: [HANDLER, RENDER], weight: 71 }]);
+    const found = only("loop_blocked");
+    expect(found.map((f) => f.subject).sort()).toEqual(["/docs", "/export"]);
+    for (const f of found) expect(f.summary).not.toContain("Mostly in");
+  });
+
+  it("a heap leak names the site whose retained memory grew", () => {
+    fx.start(fx.now - 5 * HOUR_MS, { instance: A });
+    for (let t = fx.now - 5 * HOUR_MS; t < fx.now; t += 5 * MIN) fx.metric(t, "heap_floor_mb", 120 + 25 * ((t - (fx.now - 5 * HOUR_MS)) / HOUR_MS));
+    const SITE = { file: "src/search.ts", line: 42, fn: "rememberSearch" };
+    fx.profile(fx.now - 4 * HOUR_MS, "heap", [{ frames: [HANDLER, SITE], weight: 5 * 1048576 }, { frames: [HANDLER], weight: 8 * 1048576 }]);
+    fx.profile(fx.now - 10 * MIN, "heap", [{ frames: [HANDLER, SITE], weight: 105 * 1048576 }, { frames: [HANDLER], weight: 9 * 1048576 }]);
+    const [f] = only("leak");
+    expect(f!.summary).toContain("Retained memory grew most at rememberSearch (src/search.ts:42): +100 MB of sampled heap since the start.");
+    expect(f!.action).toContain("rememberSearch");
+  });
+
+  it("a leak never names the SDK's own code; the app's growing site is named", () => {
+    fx.start(fx.now - 5 * HOUR_MS, { instance: A });
+    for (let t = fx.now - 5 * HOUR_MS; t < fx.now; t += 5 * MIN) fx.metric(t, "heap_floor_mb", 120 + 25 * ((t - (fx.now - 5 * HOUR_MS)) / HOUR_MS));
+    const SDK = { file: "(abigaail)", line: 0 };
+    const SITE = { file: "src/cache.ts", line: 7, fn: "remember" };
+    fx.profile(fx.now - 4 * HOUR_MS, "heap", [{ frames: [SDK], weight: 1 * 1048576 }, { frames: [HANDLER, SITE], weight: 1 * 1048576 }]);
+    fx.profile(fx.now - 10 * MIN, "heap", [{ frames: [SDK], weight: 90 * 1048576 }, { frames: [HANDLER, SITE], weight: 21 * 1048576 }]);
+    const [f] = only("leak");
+    expect(f!.summary).toContain("Retained memory grew most at remember (src/cache.ts:7): +20 MB");
+    expect(f!.summary).not.toContain("abigaail");
+  });
+
+  it("an out-of-memory restart names where the dead process's heap went", () => {
+    fx.start(fx.now - 13 * MIN, { instance: A });
+    for (let i = 0; i < 5; i++) fx.metric(fx.now - 12 * MIN + i * 30_000, "memory_heap_used_mb", 20 + i * 18);
+    fx.profile(fx.now - 10 * MIN - 30_000, "heap", [{ frames: [HANDLER, { file: "src/search.ts", line: 42, fn: "rememberSearch" }], weight: 60 * 1048576 }, { frames: [HANDLER], weight: 10 * 1048576 }]);
+    beats(fx.now - 12 * MIN, fx.now - 10 * MIN, A);
+    fx.start(fx.now - 9 * MIN, { instance: A });
+    expect(only("restart")[0]!.summary).toContain("until it stopped; most of its sampled heap was allocated in rememberSearch (src/search.ts:42)");
+  });
+});
+
 describe("Health folds the slowness of a blocking route into it", () => {
+  it("folds already when the first blocks are as long as the route's p95, before Resilience has its 5 blocks", () => {
+    // Without a baseline, 2 s is the latency floor.
+    fx.requests(E() - 4 * MIN, E() - 1_000, 30, { route: "/report", duration: 2_500 });
+    const latency = () => fx.run(health).filter((f) => f.signal === "latency").map((f) => f.subject);
+    expect(latency()).toEqual(["/report"]);
+    fx.block(E() - 60_000, "/report", 2, 4_800, 2_400);
+    expect(latency()).toEqual([]);
+    expect(only("loop_blocked")).toEqual([]);
+  });
+
+  it("an app sending runtime signals is judged only up to its latest runtime interval; one without is judged as before (#125)", () => {
+    // Slow /report requests only in the last 30 s of the window.
+    fx.requests(E() - 30_000, E() - 1_000, 30, { route: "/report", duration: 2_500 });
+    const latency = () => fx.run(health).filter((f) => f.signal === "latency").map((f) => f.subject);
+    expect(latency()).toEqual(["/report"]);
+    // Its latest runtime interval ended 40 s before the window's end: those requests wait for the next one.
+    fx.metric(E() - 40_000, "event_loop_blocks", 0);
+    expect(latency()).toEqual([]);
+  });
+
+  it("short blocks do not explain a much higher p95", () => {
+    fx.requests(E() - 4 * MIN, E() - 1_000, 30, { route: "/report", duration: 2_000 });
+    fx.block(E() - 60_000, "/report", 2, 240, 120);
+    expect(fx.run(health).filter((f) => f.signal === "latency").map((f) => f.subject)).toEqual(["/report"]);
+  });
+
   it("no latency finding for the route that blocks; other slow routes keep theirs", () => {
     const interval = (ts: number) => {
       fx.metric(ts, "event_loop_blocks", 1);

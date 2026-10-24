@@ -188,6 +188,17 @@ section.first { border-top: 0; }
 .chart .series2 { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 6 4; stroke-linejoin: round; }
 .chart .series3 { fill: none; stroke: var(--faint); stroke-width: 1.5; stroke-dasharray: 2 3; stroke-linejoin: round; }
 .chart .boot { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .dot.series { fill: var(--ink); stroke: none; }
+.flame { width: 100%; height: auto; display: block; min-width: 640px; }
+.flame .fbox { fill: var(--band); stroke: var(--bg); stroke-width: 1; }
+.flame .fbox:hover { fill: var(--faint); }
+.flame .fbox.other { fill: var(--surface); }
+.flame .flabel { fill: var(--ink); font-size: 11px; font-family: var(--mono); pointer-events: none; }
+.pick { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; margin: 0 0 14px; }
+.pick a { color: var(--muted); }
+.pick a[aria-current="true"] { color: var(--ink); font-weight: 600; }
+.chart .dot.series2 { fill: var(--muted); stroke: none; }
+.chart .dot.series3 { fill: var(--faint); stroke: none; }
 .chart .limit { stroke: var(--red); stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.7; }
 .chartscroll { overflow-x: auto; }
 /* The SVG scales with its box; on narrow screens keep axis text readable (viewBox units). */

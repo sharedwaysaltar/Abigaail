@@ -65,7 +65,7 @@ describe("toLiveEvent", () => {
 
 describe("every read of app data is scoped by app_id", () => {
   // Tables holding monitored-app data. Reading any of them needs `app_id = ?`.
-  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "alert_state", "alert_items", "scrub_mismatches"];
+  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "alert_state", "alert_items", "scrub_mismatches", "profiles"];
   const src = readFileSync(fileURLToPath(new URL("../src/reader.ts", import.meta.url)), "utf8");
   const sql = [...src.matchAll(/`([^`]*)`|"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1] ?? m[2] ?? "").filter((q) => /\b(FROM|JOIN)\s+\w+/i.test(q));
 

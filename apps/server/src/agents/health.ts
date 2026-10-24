@@ -293,14 +293,31 @@ function dependencyFinding(dep: Dependency, linked: { route: string | null; call
   };
 }
 
+/**
+ * Where route latency and lag are judged up to (#125). An app that sends
+ * runtime signals reports blocks once per metrics interval, stamped at the
+ * interval's end, while its requests arrive every flush: judged up to the
+ * window end, the requests a block slowed could be seen before the block that
+ * explains them. So for such an app (a runtime interval ending in the
+ * runtimeIntervalMaxMs before the window's end) the end is that of its latest
+ * interval ending by then, at most one interval earlier; any other app is
+ * judged as before.
+ */
+function runtimeEnd(ctx: AgentContext, app: App, end: number): number {
+  // The latest interval ending by the window's end: its blocks cover every request up to it.
+  const last = ctx.store.metricSeries(app.id, "event_loop_blocks", end - H.runtimeIntervalMaxMs, end + 1).at(-1);
+  return last ? last.ts : end;
+}
+
 // ---- 4. saturation ---------------------------------------------------------------
 
-function saturation(ctx: AgentContext, app: App, w: Windows, slots: Slots, blocking: ReadonlySet<string>): AgentFinding[] {
+function saturation(ctx: AgentContext, app: App, w: Windows, slots: Slots, blocking: ReadonlySet<string>, lagEnd: number): AgentFinding[] {
   const out: AgentFinding[] = [];
-  const series = (name: string, windowMs: number) =>
-    ctx.store.metricSeries(app.id, name, w.end - windowMs, w.end).map((s) => s.value);
+  const series = (name: string, windowMs: number, until = w.end) =>
+    ctx.store.metricSeries(app.id, name, until - windowMs, until).map((s) => s.value);
 
-  const lag = series("event_loop_lag_p99_ms", 5 * MIN);
+  // Lag is judged over the same period as the blocks that could explain it (#125).
+  const lag = series("event_loop_lag_p99_ms", 5 * MIN, lagEnd);
   const lagLevel = median(lag);
   // When the SDK names the route that blocks the loop, Resilience reports that route instead (#113).
   if (lag.length >= H.minLagSamples && lagLevel !== undefined && lagLevel >= H.lagWarnMs && blocking.size === 0) {
@@ -556,9 +573,19 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   }
 
   // Routes the SDK caught blocking the event loop: their slowness is the Resilience agent's finding (#113).
+  // Also before Resilience has its evidence: blocks charged to the route in the same 5 minutes
+  // that are as long as its p95 are its slowness (#122). Blocks arrive once per runtime interval,
+  // stamped at its end, so latency is judged only up to the latest interval received (#125).
   const blocking = new Set(blockingRoutes(ctx.store, app.id, end).map((b) => b.route));
-  for (const { route, finding } of routeLatency(w, slots, routeBase)) {
+  const latEnd = runtimeEnd(ctx, app, end);
+  const wLat: Windows = latEnd === end ? w : { end: latEnd, routes5: byKey(ctx.store.statsFor(app.id, "route", latEnd - 5 * MIN, latEnd)), routes15: w.routes15 };
+  const longestBlock = new Map<string, number>();
+  for (const b of ctx.store.blocks(app.id, latEnd - 5 * MIN, latEnd + 1)) {
+    if (b.route !== null) longestBlock.set(b.route, Math.max(longestBlock.get(b.route) ?? 0, b.max_ms));
+  }
+  for (const { route, finding } of routeLatency(wLat, slots, routeBase)) {
     if (blocking.has(route)) continue;
+    if ((longestBlock.get(route) ?? 0) >= H.blockExplainsShare * Number(finding.evidence.p95)) continue;
     // A slow dependency this route calls is the likely cause (AGENTS.md example).
     const called = linked.filter((l) => l.route === route && slowHosts.has(l.host)).map((l) => slowHosts.get(l.host)!);
     if (called.length) {
@@ -574,7 +601,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
 
   out.push(
     ...authFailures(w, slots, routeBase),
-    ...saturation(ctx, app, w, slots, blocking),
+    ...saturation(ctx, app, w, slots, blocking, latEnd),
     ...trafficCollapse(ctx, app, w, slots),
     ...errorBursts(ctx, app, w, slots),
     ...dataTrust(ctx, app, w),

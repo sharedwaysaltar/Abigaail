@@ -31,6 +31,11 @@ function leakSearch(kb) {
   // Like a container's OOM killer: SIGKILL, no shutdown, no exit handlers.
   if (oomKillMb && v8.getHeapStatistics().used_heap_size / 1048576 > oomKillMb) process.kill(process.pid, "SIGKILL");
 }
+// The same leak at a steady rate, whatever the traffic.
+setInterval(() => {
+  const { leakPerSecond } = faults.get();
+  if (leakPerSecond) leakSearch(leakPerSecond);
+}, 1000).unref();
 
 // A local dependency: /__down is always down (503); /__dep is healthy unless
 // the simulator switches it to failing.

@@ -13,6 +13,7 @@ import {
   MAX_UA_LENGTH,
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
+  PROFILE_KINDS,
   REQUEST_FLAGS,
   ROUTE_OTHER,
   SCRUB_VERSION,
@@ -30,6 +31,8 @@ import {
   type LifecycleEvent,
   type OutboundEvent,
   type PrevExit,
+  type ProfileEvent,
+  type ProfileFrame,
   type RequestEvent,
   type RequestFlag,
   type StackFrame,
@@ -133,6 +136,39 @@ export function cleanPrevExit(p: unknown): PrevExit | undefined {
   if (isMegabytes(raw.heap_mb)) out.heap_mb = raw.heap_mb;
   if (isInt(raw.uptime_s, 0, 10 * 365 * 86_400)) out.uptime_s = raw.uptime_s;
   return out;
+}
+
+/**
+ * A profile with every frame checked like a stack frame (no column) and every
+ * stack pointing at a kept frame; undefined if anything is off or it is too
+ * large. The profiler builds valid ones; this keeps one bad profile from
+ * losing a batch (#19).
+ */
+function cleanProfile(e: Raw, base: { event_id: string; client_ts: number }): ProfileEvent | undefined {
+  if (!has(PROFILE_KINDS, e.kind) || !isDuration(e.window_ms) || !isInt(e.samples, 0)) return undefined;
+  if (!Array.isArray(e.frames) || !Array.isArray(e.stacks)) return undefined;
+  if (e.frames.length > LIMITS.maxProfileFrames || e.stacks.length > LIMITS.maxProfileStacks) return undefined;
+  const frames: ProfileFrame[] = [];
+  for (const f of e.frames) {
+    const raw = (f ?? {}) as Raw;
+    if (!isFramePath(raw.file) || !isInt(raw.line, 0)) return undefined;
+    frames.push({ file: raw.file, line: raw.line, ...(isIdent(raw.fn, MAX_FN_LENGTH) ? { fn: raw.fn } : {}) });
+  }
+  const stacks: ProfileEvent["stacks"] = [];
+  for (const s of e.stacks) {
+    const raw = (s ?? {}) as Raw;
+    const idx = raw.frames;
+    if (!Array.isArray(idx) || !idx.length || idx.length > LIMITS.maxProfileDepth || !isInt(raw.weight, 0)) return undefined;
+    if (!idx.every((i) => isInt(i, 0, frames.length - 1))) return undefined;
+    stacks.push({ frames: idx as number[], weight: raw.weight });
+  }
+  const out: ProfileEvent = { type: "profile", ...base, kind: e.kind, window_ms: e.window_ms, samples: e.samples, frames, stacks };
+  if (e.kind === "cpu" && e.route !== undefined) out.route = isRoute(e.route) ? e.route : ROUTE_OTHER;
+  if (e.kind === "cpu" && out.route === undefined) {
+    if (isInt(e.samples_concurrent, 0)) out.samples_concurrent = e.samples_concurrent;
+    if (isInt(e.samples_idle, 0)) out.samples_idle = e.samples_idle;
+  }
+  return JSON.stringify(out).length <= LIMITS.maxProfileBytes ? out : undefined;
 }
 
 function cleanLifecycle(e: Raw, base: { event_id: string; client_ts: number }): LifecycleEvent | undefined {
@@ -247,6 +283,8 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
       return { type: "metric", ...base, name: e.name, value: e.value };
     case "lifecycle":
       return cleanLifecycle(e, base);
+    case "profile":
+      return cleanProfile(e, base);
     case "block": {
       if (!isInt(e.count, 1, 1_000_000) || !isDuration(e.total_ms) || !isDuration(e.max_ms)) return undefined;
       const out: BlockEvent = { type: "block", ...base, count: e.count, total_ms: e.total_ms, max_ms: e.max_ms };

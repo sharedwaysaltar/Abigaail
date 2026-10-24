@@ -23,6 +23,7 @@ import {
 } from "@abigaail/schema";
 import { requestFlags } from "./flags.js";
 import { clientIp, isLocalAddress } from "./proxy.js";
+import { Profiler, profilingWanted, type InspectorModule } from "./profiler.js";
 import { RuntimeMonitor } from "./runtime.js";
 import { errorCodeOf, errorDetail, errorType, parseStack } from "./stack.js";
 
@@ -73,6 +74,19 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
    * class and frame, heap), and the next boot reports and deletes them.
    */
   crashRecordDir?: string;
+  /**
+   * Continuous profiling (opt-in, DECISIONS #118): low-rate CPU sampling per
+   * route and of event-loop blocks, and a sampling heap profiler. Default
+   * ABIGAAIL_PROFILING=1; ABIGAAIL_PROFILING=off turns it off whatever this says.
+   * Needs runtimeSignals.
+   */
+  profiling?: boolean;
+  /** Tests: a stand-in for node:inspector. */
+  inspector?: InspectorModule;
+  /** Benchmarks: each profiling window's main-thread work. */
+  onProfilerWindow?: (info: { workMs: number; startMs?: number; samples: number }) => void;
+  /** Benchmarks: other window timing (see PROFILING). */
+  profilerTiming?: { windowMs?: number; everyMs?: number; ignoreLoad?: boolean; idleRetryMs?: number; idleWaitMs?: number; startBudgetMs?: number };
 }
 
 /** Linking is on by default only where AsyncLocalStorage is cheap (Node >= 24). */
@@ -309,6 +323,10 @@ class NodeAdapter implements AbigaailNode {
   private readonly loopDelay = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
   /** Runtime signals (runtime.ts); undefined with runtimeSignals: false or if it could not start. */
   private readonly runtime: RuntimeMonitor | undefined;
+  /** Profiling (profiler.ts); undefined unless opted in. */
+  private readonly profiler: Profiler | undefined;
+  /** The profiler just paused the app and the lag histogram still holds that pause. */
+  private pausePending = false;
   private cpuPrev = process.cpuUsage();
   private wallPrev = performance.now();
   private warnedProxy = false;
@@ -348,6 +366,33 @@ class NodeAdapter implements AbigaailNode {
         );
       } catch (err) {
         report(err);
+      }
+    }
+
+    if (profilingWanted(opts.profiling, identity.env)) {
+      if (!this.runtime) {
+        report(new AbigaailWarning("profiling needs runtime signals (runtimeSignals: false); it is off"));
+      } else {
+        try {
+          this.profiler = new Profiler(client, this.runtime, report, (msg) => report(new AbigaailWarning(msg)), {
+            root: this.root,
+            inspector: opts.inspector,
+            onWindow: opts.onProfilerWindow,
+            timing: opts.profilerTiming,
+            // The pause is ours: the histogram's next reading would be it, so drop what it holds
+            // then; an interval sampled before that reports no lag at all (#121).
+            onPause: () => {
+              this.pausePending = true;
+              setTimeout(() => {
+                this.loopDelay.reset();
+                this.pausePending = false;
+              }, 3 * LOOP_RESOLUTION_MS).unref();
+            },
+          });
+          void this.profiler.start();
+        } catch (err) {
+          report(err);
+        }
       }
     }
 
@@ -590,11 +635,16 @@ class NodeAdapter implements AbigaailNode {
     metric("memory_heap_used_mb", mem.heapUsed / 1048576);
     // Process CPU time over wall time: can exceed 100 with several cores busy.
     if (wallMs > 0) metric("cpu_percent", ((cpu.user + cpu.system) / 1000 / wallMs) * 100);
-    if (this.loopDelay.count > 0) {
+    let lagP99 = 0;
+    if (this.loopDelay.count > 0 && !this.pausePending) {
       // Readings are timer intervals, so the resolution itself is not lag.
       const lag = (p: number) => Math.max(0, this.loopDelay.percentile(p) / 1e6 - LOOP_RESOLUTION_MS);
       metric("event_loop_lag_p50_ms", lag(50));
-      metric("event_loop_lag_p99_ms", lag(99));
+      metric("event_loop_lag_p99_ms", (lagP99 = lag(99)));
+    }
+    if (this.profiler) {
+      this.profiler.setLoad(lagP99, wallMs > 0 ? ((cpu.user + cpu.system) / 1000 / wallMs) * 100 : 0);
+      metric("profiler_state", this.profiler.current);
     }
     this.loopDelay.reset();
     metric("sdk_queue_size", stats.queued);
@@ -613,6 +663,7 @@ class NodeAdapter implements AbigaailNode {
       this.stopped = true;
       // A clean shutdown leaves no crash record.
       this.runtime?.stop();
+      this.profiler?.stop();
       for (const t of this.timers) clearInterval(t);
       for (const u of this.unsubscribers) u();
       this.loopDelay.disable();

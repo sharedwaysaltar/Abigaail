@@ -47,6 +47,8 @@ export const RUNTIME = {
   /** Orphaned crash records (another instance's, e.g. a replaced cluster worker) are removed after this long. */
   orphanRecordMs: 7 * 86_400_000,
   maxOrphanScan: 200,
+  /** Requests and blocks a profiling window keeps for attributing its samples. */
+  maxWindowLog: 5_000,
 } as const;
 
 const FEATURE = "runtime_v1";
@@ -60,6 +62,12 @@ interface Inflight {
   /** Final route and end time, set when the response finishes. */
   route?: string;
   end?: number;
+}
+
+/** What happened during a profiling window (profiler.ts): request intervals and blocks. */
+export interface WindowLog {
+  requests: { start: number; end: number; route: string }[];
+  blocks: { end: number; ms: number }[];
 }
 
 interface PendingBlock {
@@ -119,6 +127,12 @@ export class RuntimeMonitor {
   private readySent = false;
   private readonly recordFile: string | undefined;
   private fatal: { error_type: string; frame?: StackFrame } | undefined;
+  private log: WindowLog | undefined;
+  /** Told of every block (profiler.ts starts a window after one). */
+  onBlock: ((ms: number) => void) | undefined;
+  /** The profiler's own pauses (starting a CPU window), recent ones: never counted as blocks. */
+  private readonly pauses: { start: number; end: number }[] = [];
+  private pausedMs = 0;
   private readonly onExit = (code: unknown) => this.writeRecord(code);
   private stopped = false;
 
@@ -199,6 +213,33 @@ export class RuntimeMonitor {
     entry.end = this.now();
     if (this.recent.length >= RUNTIME.maxRecent) this.recent.shift();
     this.recent.push(entry);
+    if (this.log && this.log.requests.length < RUNTIME.maxWindowLog) this.log.requests.push({ start: entry.start, end: entry.end, route });
+  }
+
+  /** The clock this monitor uses (performance.now unless a test injects one). */
+  clock(): number {
+    return this.now();
+  }
+
+  /** Start keeping request intervals and blocks for a profiling window. */
+  startLog(): void {
+    this.log = { requests: [], blocks: [] };
+  }
+
+  /**
+   * End the window: what finished during it, plus what is still in flight
+   * (long-open streams left out, as for blocks).
+   */
+  stopLog(): WindowLog {
+    const log = this.log ?? { requests: [], blocks: [] };
+    this.log = undefined;
+    const now = this.now();
+    for (const [res, entry] of this.inflight) {
+      if (log.requests.length >= RUNTIME.maxWindowLog) break;
+      if (res.headersSent && now - entry.start > RUNTIME.streamingMs) continue;
+      log.requests.push({ start: entry.start, end: now, route: this.opts.peekRoute(entry.path) });
+    }
+    return log;
   }
 
   /** Entries still tracked (tests). */
@@ -206,11 +247,41 @@ export class RuntimeMonitor {
     return this.inflight.size;
   }
 
+  /** Requests in flight now, apart from long-open streams: the profiler starts a window only at zero. */
+  busyRequests(): number {
+    const now = this.now();
+    let n = 0;
+    for (const [res, entry] of this.inflight) {
+      if (res.destroyed || res.writableFinished) continue;
+      if (res.headersSent && now - entry.start > RUNTIME.streamingMs) continue;
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * The profiler paused the app from `start` to `end` (this monitor's clock):
+   * that time is not a block, and it is reported as profiler_pause_ms instead.
+   */
+  notePause(start: number, end: number): void {
+    if (this.pauses.length >= 8) this.pauses.shift();
+    this.pauses.push({ start, end });
+    this.pausedMs += Math.max(0, end - start);
+  }
+
+  /** How much of [from, to] the profiler's own pauses cover. */
+  private pausedWithin(from: number, to: number): number {
+    let ms = 0;
+    for (const p of this.pauses) ms += Math.max(0, Math.min(to, p.end) - Math.max(from, p.start));
+    return ms;
+  }
+
   /** One drift-timer tick (every RUNTIME.tickMs). */
   tick(): void {
     const now = this.now();
     const due = this.lastTick + RUNTIME.tickMs;
-    const late = now - due;
+    // The profiler's own pause is reported apart, never as the app blocking its loop.
+    const late = now - due - this.pausedWithin(this.lastTick, now);
     this.lastTick = now;
     if (late >= RUNTIME.blockMinMs) this.block(now, late);
     this.settle(now);
@@ -232,6 +303,8 @@ export class RuntimeMonitor {
    */
   private block(end: number, ms: number): void {
     this.blocks++;
+    this.onBlock?.(ms);
+    if (this.log && this.log.blocks.length < RUNTIME.maxWindowLog) this.log.blocks.push({ end, ms });
     const suspects: Inflight[] = [];
     for (const [res, entry] of this.inflight) {
       if (res.headersSent && end - entry.start > RUNTIME.streamingMs) continue;
@@ -293,6 +366,8 @@ export class RuntimeMonitor {
     const pause = this.pauseMs;
     const blocks = this.blocks;
     this.blocks = 0;
+    const paused = this.pausedMs;
+    this.pausedMs = 0;
     this.floor = undefined;
     this.majors = 0;
     this.pauseMs = 0;
@@ -303,6 +378,7 @@ export class RuntimeMonitor {
     metric("gc_major_count", majors);
     metric("gc_pause_ms", pause);
     metric("event_loop_blocks", blocks);
+    if (paused > 0) metric("profiler_pause_ms", paused);
     metric("memory_external_mb", mem.external / MB);
     metric("memory_array_buffers_mb", mem.arrayBuffers / MB);
     const none = charged.find(([route]) => route === "");

@@ -199,6 +199,8 @@ export class NodeDemo implements Demo {
       ABIGAAIL_ENVIRONMENT: "development",
       ABIGAAIL_REGION: REGION,
       ABIGAAIL_DEMO_SIM: "1",
+      // Profiling on, so findings can name renderDocs and rememberSearch (DECISIONS #120).
+      ABIGAAIL_PROFILING: "1",
       PORT: String(PORTS.node),
     };
     const child = track(fork(DEMO_NODE_MAIN, [], { env, silent: true, execArgv: [] }));
@@ -299,7 +301,7 @@ export class NextDemo implements Demo {
   }
 
   async setFaults(f: Faults): Promise<void> {
-    if (f.dependency !== "ok" || f.slowSearch || f.userErrorShare > 0 || f.leakPerRequest > 0 || f.blockDocs || f.oomKillMb > 0) {
+    if (f.dependency !== "ok" || f.slowSearch || f.userErrorShare > 0 || f.leakPerRequest > 0 || f.leakPerSecond > 0 || f.blockDocs || f.oomKillMb > 0) {
       throw new Error("demo-next has no fault switches");
     }
   }

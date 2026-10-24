@@ -22,18 +22,19 @@ export const BLOCK_DOCS_MS = 300;
 export const MAX_LEAK_KB = 8192;
 
 /**
- * leakPerRequest: KB each /search request keeps for good (a leak).
+ * leakPerRequest: KB each /search request keeps for good (a leak that follows traffic).
+ * leakPerSecond: KB kept for good every second while it is on (a leak that does not).
  * oomKillMb: with a leak, the process kills itself (SIGKILL) once its heap
  * passes this, as a container's OOM killer would; 0 = off. A real V8
  * out-of-memory abort is not used: it can write a core dump on the machine.
  */
-export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, blockDocs: false, oomKillMb: 0 });
+export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0 });
 
-const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "blockDocs", "oomKillMb"];
+const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "leakPerSecond", "blockDocs", "oomKillMb"];
 const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, blockDocs, oomKillMb } }`, or undefined if malformed. */
+/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, leakPerSecond, blockDocs, oomKillMb } }`, or undefined if malformed. */
 export function parseFaults(msg) {
   if (!isObject(msg) || msg.type !== "faults" || Object.keys(msg).length !== 2 || !isObject(msg.faults)) return undefined;
   const f = msg.faults;
@@ -41,12 +42,13 @@ export function parseFaults(msg) {
   if (f.dependency !== "ok" && f.dependency !== "failing") return undefined;
   if (typeof f.slowSearch !== "boolean") return undefined;
   if (typeof f.userErrorShare !== "number" || !(f.userErrorShare >= 0 && f.userErrorShare <= 1)) return undefined;
-  if (!isInt(f.leakPerRequest, 0, MAX_LEAK_KB) || typeof f.blockDocs !== "boolean" || !isInt(f.oomKillMb, 0, 65536)) return undefined;
+  if (!isInt(f.leakPerRequest, 0, MAX_LEAK_KB) || !isInt(f.leakPerSecond, 0, MAX_LEAK_KB) || typeof f.blockDocs !== "boolean" || !isInt(f.oomKillMb, 0, 65536)) return undefined;
   return Object.freeze({
     dependency: f.dependency,
     slowSearch: f.slowSearch,
     userErrorShare: f.userErrorShare,
     leakPerRequest: f.leakPerRequest,
+    leakPerSecond: f.leakPerSecond,
     blockDocs: f.blockDocs,
     oomKillMb: f.oomKillMb,
   });
@@ -81,10 +83,35 @@ export function rememberSearch(kept, kb) {
   for (let i = 0; i < kb / 64; i++) kept.push(new Array(8192).fill(kept.length));
 }
 
-/** Synchronous work that blocks the event loop for `ms` (a live test measures the lag). */
+const DOC_SECTIONS = Array.from({ length: 40 }, (_, i) => ({
+  title: `Section ${i + 1}`,
+  paragraphs: Array.from({ length: 6 }, (_, k) => `Paragraph ${k + 1} of section ${i + 1}: how the API behaves, with <examples> & "notes".`),
+  code: `const x${i} = await client.get("/items/${i}");`,
+}));
+
+/**
+ * Synchronous work that blocks the event loop for `ms`: renders the docs page
+ * to HTML again and again, as a server-side renderer would (a live test
+ * measures the lag). Real rendering, not a three-line spin: V8 inlines small
+ * functions into their caller, and a CPU profile then names the caller instead
+ * (DECISIONS #123); a function this size is not inlined.
+ */
 export function renderDocs(ms) {
   const until = performance.now() + ms;
-  let x = 0;
-  while (performance.now() < until) x += Math.sqrt(x + 1);
-  return x;
+  let html = "";
+  let pages = 0;
+  while (performance.now() < until) {
+    const parts = ["<!doctype html><html><head><title>Docs</title></head><body><nav><ul>"];
+    for (const s of DOC_SECTIONS) parts.push(`<li><a href="#${s.title.toLowerCase().replace(/\s+/g, "-")}">${s.title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</a></li>`);
+    parts.push("</ul></nav><main>");
+    for (const s of DOC_SECTIONS) {
+      parts.push(`<section id="${s.title.toLowerCase().replace(/\s+/g, "-")}"><h2>${s.title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</h2>`);
+      for (const p of s.paragraphs) parts.push(`<p>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</p>`);
+      parts.push(`<pre><code>${s.code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</code></pre></section>`);
+    }
+    parts.push(`</main><footer>${pages} renders</footer></body></html>`);
+    html = parts.join("");
+    pages++;
+  }
+  return html.length + pages;
 }
