@@ -39,7 +39,7 @@ export const SLOW_SEARCH_MS = 1200;
  */
 export const DEMO_FRAMES = {
   handler: { file: "apps/demo-node/server.mjs", line: 70 },
-  renderDocs: { file: "apps/demo-node/faults.mjs", line: 87, fn: "renderDocs" },
+  renderDocs: { file: "apps/demo-node/faults.mjs", line: 99, fn: "renderDocs" },
   rememberSearch: { file: "apps/demo-node/faults.mjs", line: 82, fn: "rememberSearch" },
 } as const;
 export const BLOCK_DOCS_MS = 300;

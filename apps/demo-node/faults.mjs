@@ -83,10 +83,35 @@ export function rememberSearch(kept, kb) {
   for (let i = 0; i < kb / 64; i++) kept.push(new Array(8192).fill(kept.length));
 }
 
-/** Synchronous work that blocks the event loop for `ms` (a live test measures the lag). */
+const DOC_SECTIONS = Array.from({ length: 40 }, (_, i) => ({
+  title: `Section ${i + 1}`,
+  paragraphs: Array.from({ length: 6 }, (_, k) => `Paragraph ${k + 1} of section ${i + 1}: how the API behaves, with <examples> & "notes".`),
+  code: `const x${i} = await client.get("/items/${i}");`,
+}));
+
+/**
+ * Synchronous work that blocks the event loop for `ms`: renders the docs page
+ * to HTML again and again, as a server-side renderer would (a live test
+ * measures the lag). Real rendering, not a three-line spin: V8 inlines small
+ * functions into their caller, and a CPU profile then names the caller instead
+ * (DECISIONS #123); a function this size is not inlined.
+ */
 export function renderDocs(ms) {
   const until = performance.now() + ms;
-  let x = 0;
-  while (performance.now() < until) x += Math.sqrt(x + 1);
-  return x;
+  let html = "";
+  let pages = 0;
+  while (performance.now() < until) {
+    const parts = ["<!doctype html><html><head><title>Docs</title></head><body><nav><ul>"];
+    for (const s of DOC_SECTIONS) parts.push(`<li><a href="#${s.title.toLowerCase().replace(/\s+/g, "-")}">${s.title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</a></li>`);
+    parts.push("</ul></nav><main>");
+    for (const s of DOC_SECTIONS) {
+      parts.push(`<section id="${s.title.toLowerCase().replace(/\s+/g, "-")}"><h2>${s.title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</h2>`);
+      for (const p of s.paragraphs) parts.push(`<p>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</p>`);
+      parts.push(`<pre><code>${s.code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</code></pre></section>`);
+    }
+    parts.push(`</main><footer>${pages} renders</footer></body></html>`);
+    html = parts.join("");
+    pages++;
+  }
+  return html.length + pages;
 }

@@ -171,7 +171,8 @@ It uses `node:inspector` in-process, so leave it off if another profiler or APM 
 is attached. **Its cost, plainly:** when on, profiling pauses the app about 20-75 ms once
 every 5 minutes (measured: V8 records the app's code when a CPU profile starts), only
 when no request is in flight, and turns itself off if it gets worse. That pause is shown
-on the Runtime tab and never counted as the app blocking its event loop.
+on the Runtime tab and never counted as the app blocking its event loop. One limit of
+V8's profiler: a small function that V8 has inlined into its caller shows as the caller.
 
 ## 3. Connect a Next.js app
 

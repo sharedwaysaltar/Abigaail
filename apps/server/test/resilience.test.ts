@@ -336,6 +336,13 @@ describe("profiles name the function (#120)", () => {
     expect(f!.cause).toBe("Synchronous work in renderDocs (src/docs.ts:88), called from /docs.");
   });
 
+  it("time inside Node's or V8's own code (a regex, a string method) counts for the project function that called it", () => {
+    for (let i = 0; i < 6; i++) interval(E() - 12 * MIN + i * MIN, "/docs");
+    const NATIVE = { file: "(native)", line: 0, fn: "replace" };
+    fx.profile(E() - 2 * MIN, "block", [{ frames: [HANDLER, RENDER, NATIVE], weight: 60 }, { frames: [HANDLER, RENDER], weight: 15 }, { frames: [HANDLER], weight: 25 }]);
+    expect(only("loop_blocked")[0]!.summary).toContain("Mostly in renderDocs (src/docs.ts:88), 75% of the samples taken while the loop was blocked.");
+  });
+
   it("with two routes blocking, the samples cannot be told apart: no function is named", () => {
     // Both in flight through every block, so each is charged for all of them.
     for (let i = 0; i < 6; i++) {

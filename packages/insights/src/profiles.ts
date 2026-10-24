@@ -78,12 +78,19 @@ export interface TopFunction {
   totalShare: number;
 }
 
-/** Functions by self time (or self bytes), with their share of all samples. */
-export function topFunctions(m: Merged, n: number = PROFILE_VIEW.topFunctions): TopFunction[] {
+const isPlaceholder = (key: string) => key.startsWith("(");
+
+/**
+ * Functions by self time (or self bytes), with their share of all samples.
+ * `project`: time in Node's or V8's own code (placeholders such as "(native)",
+ * a regex or string method) counts for the nearest project function that
+ * called it, which is the one to change (DECISIONS #123).
+ */
+export function topFunctions(m: Merged, n: number = PROFILE_VIEW.topFunctions, opts: { project?: boolean } = {}): TopFunction[] {
   const self = new Map<string, number>();
   const total = new Map<string, number>();
   for (const s of m.stacks.values()) {
-    const leaf = s.keys.at(-1)!;
+    const leaf = opts.project ? (s.keys.findLast((k) => !isPlaceholder(k)) ?? s.keys.at(-1)!) : s.keys.at(-1)!;
     self.set(leaf, (self.get(leaf) ?? 0) + s.weight);
     for (const k of new Set(s.keys)) total.set(k, (total.get(k) ?? 0) + s.weight);
   }
@@ -179,10 +186,13 @@ export function topHeapSite(store: StoreReader, appId: string, from: number, to:
   return top && !top.frame.file.startsWith("(") ? { frame: top.frame, label: frameLabel(top.frame), share: top.bytes / row.samples } : undefined;
 }
 
-/** The functions that ran while the event loop was blocked in [from, to), by self samples. */
+/**
+ * The project functions that ran while the event loop was blocked in [from, to),
+ * by self samples (time in Node's or V8's code counted for their caller).
+ */
 export function blockFunctions(store: StoreReader, appId: string, from: number, to: number): TopFunction[] {
   const rows = store.profiles(appId, "block", from, to, PROFILE_VIEW.maxRows);
-  return rows.length ? topFunctions(merge(rows), 5) : [];
+  return rows.length ? topFunctions(merge(rows), 5, { project: true }) : [];
 }
 
 export interface ProfileView {
