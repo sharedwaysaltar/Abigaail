@@ -13,10 +13,12 @@ import {
   parseFaults,
   SLOW_SEARCH_MS as DEMO_SLOW,
 } from "../../demo-node/faults.mjs";
-import { BLOCK_DOCS_MS, DEPENDENCY_MS, NODE_MS, NORMAL_FAULTS, SLOW_SEARCH_MS } from "@abigaail/sim";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { BLOCK_DOCS_MS, DEMO_FRAMES, DEPENDENCY_MS, NODE_MS, NORMAL_FAULTS, REPO_ROOT, SLOW_SEARCH_MS } from "@abigaail/sim";
 
-const ok = { dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, blockDocs: false, oomKillMb: 0 };
-const failing = { type: "faults", faults: { dependency: "failing", slowSearch: true, userErrorShare: 0.5, leakPerRequest: 2560, blockDocs: true, oomKillMb: 96 } };
+const ok = { dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0 };
+const failing = { type: "faults", faults: { dependency: "failing", slowSearch: true, userErrorShare: 0.5, leakPerRequest: 2560, leakPerSecond: 448, blockDocs: true, oomKillMb: 96 } };
 
 function proc(opts: { ipc: boolean; env?: Record<string, string> }) {
   const e = new EventEmitter();
@@ -53,6 +55,8 @@ describe("fault control", () => {
     { type: "faults", faults: { ...ok, leakPerRequest: -1 } },
     { type: "faults", faults: { ...ok, leakPerRequest: 1e9 } },
     { type: "faults", faults: { ...ok, leakPerRequest: 1.5 } },
+    { type: "faults", faults: { ...ok, leakPerSecond: -5 } },
+    { type: "faults", faults: { ...ok, leakPerSecond: 1e9 } },
     { type: "faults", faults: { ...ok, blockDocs: 1 } },
     { type: "faults", faults: { ...ok, oomKillMb: "96" } },
     { type: "faults", faults: { dependency: "ok", slowSearch: false, userErrorShare: 0 } },
@@ -67,6 +71,9 @@ describe("fault control", () => {
     expect(DEPENDENCY_MS).toEqual(DEMO_DEP);
     expect(SLOW_SEARCH_MS).toBe(DEMO_SLOW);
     expect(BLOCK_DOCS_MS).toBe(DEMO_BLOCK);
+    // The replay's profiles name the lines the real demo's profiles do.
+    const lines = readFileSync(join(REPO_ROOT, DEMO_FRAMES.renderDocs.file), "utf8").split("\n");
+    for (const f of [DEMO_FRAMES.renderDocs, DEMO_FRAMES.rememberSearch]) expect(lines[f.line - 1]).toContain(`export function ${f.fn}(`);
     expect(NORMAL_FAULTS).toEqual(DEMO_NORMAL);
   });
 });

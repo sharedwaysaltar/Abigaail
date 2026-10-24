@@ -124,6 +124,21 @@ export class Fx {
     return boot;
   }
 
+  /** A profile whose stacks are given as frame lists (outermost first) with weights. */
+  profile(ts: number, kind: "cpu" | "block" | "heap", stacks: { frames: { file: string; line: number; fn?: string }[]; weight: number }[], o: { route?: string; window_ms?: number } = {}): void {
+    const frames: { file: string; line: number; fn?: string }[] = [];
+    const key = (f: { file: string; line: number; fn?: string }) => `${f.file}:${f.line}:${f.fn ?? ""}`;
+    const idx = (f: { file: string; line: number; fn?: string }) => {
+      const i = frames.findIndex((x) => key(x) === key(f));
+      return i >= 0 ? i : frames.push(f) - 1;
+    };
+    const s = stacks.map((st) => ({ frames: st.frames.map(idx), weight: st.weight }));
+    this.put([{
+      event: { type: "profile", event_id: id(), client_ts: ts, kind, window_ms: o.window_ms ?? 10_000, samples: stacks.reduce((a, b) => a + b.weight, 0), frames, stacks: s, ...(o.route ? { route: o.route } : {}) },
+      derived: { ts },
+    }]);
+  }
+
   block(ts: number, route: string | undefined, count: number, total_ms: number, max_ms: number): void {
     this.put([{ event: { type: "block", event_id: id(), client_ts: ts, ...(route ? { route } : {}), count, total_ms, max_ms }, derived: { ts } }]);
   }

@@ -6,8 +6,8 @@
 
 import { evaluate, findingInputs, health, resilience, watchdog, type Agent } from "@abigaail/server";
 import { HOUR_MS, type Store } from "@abigaail/store";
-import { blockItem, lifecycleItem, metricItem, requestItems, type Item } from "./events.js";
-import { BLOCK_DOCS_MS, NORMAL_FAULTS, outcome, type Faults } from "./model.js";
+import { blockItem, lifecycleItem, metricItem, profileItem, requestItems, type Item } from "./events.js";
+import { BLOCK_DOCS_MS, DEMO_FRAMES, NORMAL_FAULTS, outcome, type Faults } from "./model.js";
 import { rng, uuid } from "./random.js";
 import type { Action, Scenario } from "./scenarios.js";
 import { FIRST_RELEASE, insertValidated } from "./seed.js";
@@ -25,11 +25,18 @@ export const RUNTIME_MODEL = {
   startupMs: 250,
   heapLimitMb: 4144,
   /** The demo's heap after start; it grows only by the leak fault. */
-  baseHeapMb: 12,
+  baseHeapMb: 19,
   rssOverHeapMb: 45,
   metricsMs: 30 * SEC,
   /** A supervisor restarts a process that died on its own after this long. */
   restartAfterMs: 2 * SEC,
+  /** Profiling (profiler.ts): a 20 s CPU window every 5 min at 10 ms, sent every 5 min; heap profiles at 2, 4, 6, 8, 10 min, then every 5. */
+  profiledShare: 20 / 300,
+  sampleMs: 10,
+  profileSendMs: 5 * MIN,
+  heapEarlyMs: 2 * MIN,
+  heapEarlyForMs: 10 * MIN,
+  heapEveryMs: 5 * MIN,
 } as const;
 
 export interface ReplayOptions {
@@ -73,6 +80,10 @@ export function replay(o: ReplayOptions): ReplayResult {
   let ready: { at: number; bootId: string } | undefined;
   let lastMetrics = o.start;
   let docsBlocks = 0;
+  let bootAt = o.start;
+  let blockSamples = 0;
+  let lastProfileSend = o.start;
+  let lastHeap = o.start;
   let faults: Faults = { ...NORMAL_FAULTS };
   let mode: Mode = { ...NORMAL_MODE };
   let buffer: Item[] = [];
@@ -95,6 +106,28 @@ export function replay(o: ReplayOptions): ReplayResult {
     lastMetrics = now;
     heapMb = M.baseHeapMb;
     docsBlocks = 0;
+    bootAt = lastProfileSend = lastHeap = now;
+    blockSamples = 0;
+  };
+  /** The demo's profiles: CPU samples inside blocks (renderDocs) and the live heap by site (rememberSearch). */
+  const profiles = (now: number) => {
+    if (now - lastProfileSend >= M.profileSendMs) {
+      if (blockSamples >= 1) {
+        buffer.push(profileItem(r, now, "block", M.profileSendMs * M.profiledShare, [{ frames: [DEMO_FRAMES.handler, DEMO_FRAMES.renderDocs], weight: blockSamples }]));
+      }
+      blockSamples = 0;
+      lastProfileSend = now;
+    }
+    const heapEvery = now - bootAt < M.heapEarlyForMs ? M.heapEarlyMs : M.heapEveryMs;
+    if (now - lastHeap >= heapEvery) {
+      buffer.push(
+        profileItem(r, now, "heap", now - bootAt, [
+          { frames: [DEMO_FRAMES.handler], weight: M.baseHeapMb * 1048576 },
+          { frames: [DEMO_FRAMES.handler, DEMO_FRAMES.rememberSearch], weight: (heapMb - M.baseHeapMb) * 1048576 },
+        ]),
+      );
+      lastHeap = now;
+    }
   };
   /** Killed (by us, or by the OOM killer): no shutdown, queued events are lost. */
   const die = (now: number, unexpected: boolean) => {
@@ -113,6 +146,7 @@ export function replay(o: ReplayOptions): ReplayResult {
       metricItem(r, now, "event_loop_blocks", docsBlocks),
     );
     if (docsBlocks) buffer.push(blockItem(r, now, "/docs", docsBlocks, docsBlocks * BLOCK_DOCS_MS, BLOCK_DOCS_MS));
+    blockSamples += docsBlocks * (BLOCK_DOCS_MS / M.sampleMs) * M.profiledShare;
     docsBlocks = 0;
     lastMetrics = now;
   };
@@ -165,8 +199,13 @@ export function replay(o: ReplayOptions): ReplayResult {
         }
       }
     }
+    if (up && faults.leakPerSecond) {
+      heapMb += faults.leakPerSecond / 1024;
+      if (faults.oomKillMb && heapMb > faults.oomKillMb) die(now, true);
+    }
     if (up) {
       if (now - lastMetrics >= M.metricsMs) metrics(now);
+      profiles(now);
       if (now - lastBeat >= MIN) {
         buffer.push(lifecycleItem(r, now, "heartbeat", undefined, instance));
         lastBeat = now;

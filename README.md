@@ -159,6 +159,20 @@ timer and a GC observer, and are sent only once your Abigaail server says it acc
 them, so upgrading the SDK before the server loses nothing. The app's **Runtime** tab
 shows them; the Resilience agent judges them.
 
+**Profiling** (opt-in: `ABIGAAIL_PROFILING=1`, or `profiling: true`;
+`ABIGAAIL_PROFILING=off` always turns it off): a low-rate CPU profile (a 20 s window every
+5 minutes, one sample every 10 ms) and a sampling heap profiler. The Runtime tab then shows where
+the time goes, per route, a flame graph and the functions that ran while the event loop
+was blocked, and Resilience's findings name the function and line behind a blocking
+route, a leak or an out-of-memory restart. Only function names, project-relative files
+and line numbers leave the app, never values. It measures its own work and backs off
+when the app is busy; over its budget three times, it turns itself off for the process.
+It uses `node:inspector` in-process, so leave it off if another profiler or APM agent
+is attached. **Its cost, plainly:** when on, profiling pauses the app about 20-75 ms once
+every 5 minutes (measured: V8 records the app's code when a CPU profile starts), only
+when no request is in flight, and turns itself off if it gets worse. That pause is shown
+on the Runtime tab and never counted as the app blocking its event loop.
+
 ## 3. Connect a Next.js app
 
 Written against Next 16 (App Router). The steps are the Node ones with two differences.
@@ -346,7 +360,8 @@ npm run sim -- run slow-route       # one scenario (about 20 min)
 npm run sim -- run all              # every scenario (about 55 min)
 npm run sim -- run all --app next   # demo-next (build it first: npm run build -w @abigaail/demo-next)
 npm run sim -- run blocking-route   # runtime scenarios, each on its own: blocking-route, oom-loop,
-npm run sim -- run leak             # and leak (about 4 h)
+npm run sim -- run leak             # and leak (about 4 h); the demo runs with profiling on
+npm run bench:profiling             # profiling overhead (not part of npm run check)
 npm run sim -- reset                # delete the simulator's data
 ```
 

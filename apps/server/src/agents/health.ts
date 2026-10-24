@@ -556,9 +556,16 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   }
 
   // Routes the SDK caught blocking the event loop: their slowness is the Resilience agent's finding (#113).
+  // Also before Resilience has its evidence: blocks charged to the route in the same 5 minutes
+  // that are as long as its p95 are its slowness (#122).
   const blocking = new Set(blockingRoutes(ctx.store, app.id, end).map((b) => b.route));
+  const longestBlock = new Map<string, number>();
+  for (const b of ctx.store.blocks(app.id, end - 5 * MIN, end)) {
+    if (b.route !== null) longestBlock.set(b.route, Math.max(longestBlock.get(b.route) ?? 0, b.max_ms));
+  }
   for (const { route, finding } of routeLatency(w, slots, routeBase)) {
     if (blocking.has(route)) continue;
+    if ((longestBlock.get(route) ?? 0) >= H.blockExplainsShare * Number(finding.evidence.p95)) continue;
     // A slow dependency this route calls is the likely cause (AGENTS.md example).
     const called = linked.filter((l) => l.route === route && slowHosts.has(l.host)).map((l) => slowHosts.get(l.host)!);
     if (called.length) {

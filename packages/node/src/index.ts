@@ -6,3 +6,5 @@ export { errorCodeOf, errorDetail, errorType, parseStack, relativePath } from ".
 export type { ErrorDetail } from "./stack.js";
 export { instanceId, RUNTIME, RuntimeMonitor } from "./runtime.js";
 export type { RuntimeOptions } from "./runtime.js";
+export { PROFILER_STATE, PROFILING, Profiler, profileFrame, profilingWanted } from "./profiler.js";
+export type { InspectorModule, InspectorSession, ProfilerOptions, ProfilerState } from "./profiler.js";

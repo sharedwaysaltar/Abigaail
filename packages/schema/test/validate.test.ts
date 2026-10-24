@@ -280,3 +280,40 @@ describe("validateBatch: runtime_v1 (DECISIONS #110-#114)", () => {
     expect(ok({ type: "metric", event_id: ID, client_ts: 1, name: "heap_snapshot_mb", value: 1 })).toBe(false);
   });
 });
+
+describe("validateBatch: profiles (profile_v1, DECISIONS #118)", () => {
+  const profile = (o: Record<string, unknown> = {}) => ({
+    type: "profile", event_id: ID, client_ts: 1, kind: "cpu", window_ms: 20_000, samples: 100,
+    frames: [{ file: "src/a.ts", line: 3, fn: "handle" }, { file: "(node)", line: 0 }], stacks: [{ frames: [1, 0], weight: 100 }], ...o,
+  });
+  const ok = (e: unknown) => validateBatch(batch([e])).ok;
+
+  it("accepts cpu (whole app and per route), block and heap profiles", () => {
+    expect(ok(profile({ samples_concurrent: 5, samples_idle: 2 }))).toBe(true);
+    expect(ok(profile({ route: "/user/[id]" }))).toBe(true);
+    expect(ok(profile({ kind: "block" }))).toBe(true);
+    expect(ok(profile({ kind: "heap", samples: 50 * 1048576 }))).toBe(true);
+  });
+
+  it("refuses absolute paths, non-identifier names, columns and unknown fields in frames", () => {
+    expect(ok(profile({ frames: [{ file: "/home/jane/app/a.ts", line: 3 }], stacks: [] }))).toBe(false);
+    expect(ok(profile({ frames: [{ file: "src/a.ts", line: 3, fn: "jane@example.com" }], stacks: [] }))).toBe(false);
+    expect(ok(profile({ frames: [{ file: "src/a.ts", line: 3, col: 4 }], stacks: [] }))).toBe(false);
+    expect(ok(profile({ frames: [{ file: "src/a.ts", line: 3, source: "x" }], stacks: [] }))).toBe(false);
+  });
+
+  it("refuses a stack pointing at a missing frame, too deep, too many, or an oversized profile", () => {
+    expect(ok(profile({ stacks: [{ frames: [2], weight: 1 }] }))).toBe(false);
+    expect(ok(profile({ stacks: [{ frames: Array(25).fill(0), weight: 1 }] }))).toBe(false);
+    expect(ok(profile({ stacks: Array(151).fill({ frames: [0], weight: 1 }) }))).toBe(false);
+    // 100 frames of 190-character paths and 90-character names: within each frame's limits, over 16 KiB together.
+    const frames = Array.from({ length: 100 }, (_, i) => ({ file: `src/${"d".repeat(180)}/${i}.ts`, line: i, fn: `f${"n".repeat(85)}${i}` }));
+    expect(ok(profile({ frames, stacks: frames.map((_, i) => ({ frames: [i], weight: 1 })) }))).toBe(false);
+  });
+
+  it("route only on cpu profiles; concurrent and idle only on the whole-app cpu profile", () => {
+    expect(ok(profile({ kind: "heap", route: "/a" }))).toBe(false);
+    expect(ok(profile({ route: "/a", samples_idle: 1 }))).toBe(false);
+    expect(ok(profile({ kind: "block", samples_concurrent: 1 }))).toBe(false);
+  });
+});

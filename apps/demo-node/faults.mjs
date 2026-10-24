@@ -22,18 +22,19 @@ export const BLOCK_DOCS_MS = 300;
 export const MAX_LEAK_KB = 8192;
 
 /**
- * leakPerRequest: KB each /search request keeps for good (a leak).
+ * leakPerRequest: KB each /search request keeps for good (a leak that follows traffic).
+ * leakPerSecond: KB kept for good every second while it is on (a leak that does not).
  * oomKillMb: with a leak, the process kills itself (SIGKILL) once its heap
  * passes this, as a container's OOM killer would; 0 = off. A real V8
  * out-of-memory abort is not used: it can write a core dump on the machine.
  */
-export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, blockDocs: false, oomKillMb: 0 });
+export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0 });
 
-const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "blockDocs", "oomKillMb"];
+const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "leakPerSecond", "blockDocs", "oomKillMb"];
 const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, blockDocs, oomKillMb } }`, or undefined if malformed. */
+/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, leakPerSecond, blockDocs, oomKillMb } }`, or undefined if malformed. */
 export function parseFaults(msg) {
   if (!isObject(msg) || msg.type !== "faults" || Object.keys(msg).length !== 2 || !isObject(msg.faults)) return undefined;
   const f = msg.faults;
@@ -41,12 +42,13 @@ export function parseFaults(msg) {
   if (f.dependency !== "ok" && f.dependency !== "failing") return undefined;
   if (typeof f.slowSearch !== "boolean") return undefined;
   if (typeof f.userErrorShare !== "number" || !(f.userErrorShare >= 0 && f.userErrorShare <= 1)) return undefined;
-  if (!isInt(f.leakPerRequest, 0, MAX_LEAK_KB) || typeof f.blockDocs !== "boolean" || !isInt(f.oomKillMb, 0, 65536)) return undefined;
+  if (!isInt(f.leakPerRequest, 0, MAX_LEAK_KB) || !isInt(f.leakPerSecond, 0, MAX_LEAK_KB) || typeof f.blockDocs !== "boolean" || !isInt(f.oomKillMb, 0, 65536)) return undefined;
   return Object.freeze({
     dependency: f.dependency,
     slowSearch: f.slowSearch,
     userErrorShare: f.userErrorShare,
     leakPerRequest: f.leakPerRequest,
+    leakPerSecond: f.leakPerSecond,
     blockDocs: f.blockDocs,
     oomKillMb: f.oomKillMb,
   });

@@ -77,7 +77,7 @@ const runs = () => store.recentRuns("retention", 100);
 describe("periods from the environment", () => {
   it("defaults, and the minimums baselines need", () => {
     expect(defaults()).toEqual({
-      events: 30, rollups: 400, daily_uniques: 400, findings: 180, agent_runs: 30, ingest_rejections: 30, db_size_samples: 90, audit_log: 400, alerts: 90,
+      events: 30, rollups: 400, daily_uniques: 400, findings: 180, agent_runs: 30, ingest_rejections: 30, db_size_samples: 90, audit_log: 400, alerts: 90, profiles: 7,
     });
     // Baselines read the same hour-of-week over BASELINE.weeks; one more week covers the week judged.
     expect(RETENTION.periods.rollups.minDays).toBe((BASELINE.weeks + 1) * 7);
@@ -141,6 +141,18 @@ describe("a run", () => {
     expect(policy.get("events")).toMatchObject({ keep_days: 30, min_days: 7, last_run_at: T0, last_deleted: 40 });
     expect(policy.get("rollups")).toMatchObject({ keep_days: 400, min_days: 35 });
     expect(policy.get("sessions")).toMatchObject({ keep_days: 0 });
+  });
+
+  it("deletes profiles past their 7 days, per app (DECISIONS #119)", async () => {
+    const a = store.createApp("a", "test").app.id;
+    const profile = (ts: number) => ({
+      event: { type: "profile" as const, event_id: id(), client_ts: ts, kind: "cpu" as const, window_ms: 20_000, samples: 1, frames: [{ file: "src/a.ts", line: 1 }], stacks: [{ frames: [0], weight: 1 }] },
+      derived: { ts },
+    });
+    store.insertBatch(a, { receivedAt: T0, release: "r1", environment: "test", events: [profile(T0 - 8 * DAY), profile(T0 - 6 * DAY)] });
+    const report = await job().runOnce();
+    expect(report.deleted).toMatchObject({ profiles: 1 });
+    expect(store.profiles(a, "cpu", 0, T0, 10).map((p) => p.ts)).toEqual([T0 - 6 * DAY]);
   });
 
   it("leaves baselines and the uniques comparison unchanged with every period at its minimum", async () => {

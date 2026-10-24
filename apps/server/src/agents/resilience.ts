@@ -7,13 +7,16 @@
 import type { App } from "@abigaail/store";
 import {
   baselineSlots,
+  blockFunctions,
   blockingRoutes,
+  growingSites,
   humanDuration,
   leakVerdicts,
   restartVerdict,
   rowsByKey,
   startupVerdict,
   typicalP95,
+  PROFILE_VIEW,
   type Crash,
   type LeakVerdict,
 } from "@abigaail/insights";
@@ -90,16 +93,21 @@ function leaks(ctx: AgentContext, app: App): AgentFinding[] {
     const limit = v.limit_mb !== null && v.hours_to_limit !== null
       ? `; at this rate it reaches its ${mb(v.limit_mb)} limit in about ${humanDuration(v.hours_to_limit * 3_600_000)}`
       : "";
+    // With profiling on, the heap profiles say where the retained memory was allocated (#120).
+    const sites = v.kind === "heap" ? growingSites(ctx.store, app.id, v.boot_ts, ctx.windowEnd).slice(0, 3) : [];
+    const where = sites.length ? ` Retained memory grew most at ${sites[0]!.label}: +${mb(sites[0]!.growthBytes / 1048576)} of sampled heap since the start.` : "";
     return {
       signal: "leak",
       subject: v.kind,
       severity: v.severity,
       summary:
         `${app.name}'s ${LEAK_WHAT[v.kind]} rose from ${mb(v.first_mb)} to ${mb(v.last_mb)} over ${humanDuration(v.span_ms)} ` +
-        `since it started at ${hhmm(v.boot_ts)} (+${v.mb_per_hour} MB/h)${limit}.`,
-      cause: LEAK_CAUSE[v.kind],
-      action: "Look for what grows per request or per hour (caches, maps, listeners, buffers); a restart only resets it. The Runtime tab shows the floor since the start.",
-      evidence: { ...v },
+        `since it started at ${hhmm(v.boot_ts)} (+${v.mb_per_hour} MB/h)${limit}.${where}`,
+      cause: sites.length ? `Memory allocated in ${sites[0]!.label} stays reachable. ${LEAK_CAUSE[v.kind]}` : LEAK_CAUSE[v.kind],
+      action: sites.length
+        ? `Look at what ${sites[0]!.frame.fn ?? "that code"} keeps (a cache, a map, listeners); a restart only resets it.`
+        : "Look for what grows per request or per hour (caches, maps, listeners, buffers); a restart only resets it. The Runtime tab shows the floor since the start. Turning on profiling (ABIGAAIL_PROFILING=1) shows where it is allocated.",
+      evidence: { ...v, ...(sites.length ? { growing_sites: sites.map((s) => ({ ...s.frame, first_bytes: s.firstBytes, last_bytes: s.lastBytes })) } : {}) },
     };
   });
 }
@@ -107,16 +115,26 @@ function leaks(ctx: AgentContext, app: App): AgentFinding[] {
 // ---- event-loop blocks -------------------------------------------------------------
 
 function blocks(ctx: AgentContext, app: App): AgentFinding[] {
-  return blockingRoutes(ctx.store, app.id, ctx.windowEnd).map((b) => ({
+  const routes = blockingRoutes(ctx.store, app.id, ctx.windowEnd);
+  // CPU samples taken inside the blocks name the function (#120). They are not
+  // tied to a route, so they are named only when one route is blocking.
+  const fns = routes.length === 1 ? blockFunctions(ctx.store, app.id, ctx.windowEnd - R.blockWindowMs, ctx.windowEnd) : [];
+  const top = fns[0] && fns[0].selfShare >= PROFILE_VIEW.blockFnMinShare && !fns[0].frame.file.startsWith("(") ? fns[0] : undefined;
+  return routes.map((b) => ({
     signal: "loop_blocked",
     subject: b.route,
     severity: b.severity,
     summary:
       `${b.route} blocked the event loop ${b.blocks} times in 15 min (max ${ms(b.max_ms)}, ${ms(b.blocked_ms)} in all): ` +
-      `${Math.round(b.share * 100)}% of the blocks in ${app.name}. Every other request waits while it runs.`,
-    cause: `Synchronous work in ${b.route}'s handler (CPU-heavy code, sync I/O, a large JSON.parse or stringify, a slow regex).`,
-    action: "Move the heavy work to a worker thread, stream or paginate it, or make it asynchronous.",
-    evidence: { window_ms: R.blockWindowMs, ...b },
+      `${Math.round(b.share * 100)}% of the blocks in ${app.name}. Every other request waits while it runs.` +
+      (top ? ` Mostly in ${top.label}, ${Math.round(top.selfShare * 100)}% of the samples taken while the loop was blocked.` : ""),
+    cause: top
+      ? `Synchronous work in ${top.label}, called from ${b.route}.`
+      : `Synchronous work in ${b.route}'s handler (CPU-heavy code, sync I/O, a large JSON.parse or stringify, a slow regex).`,
+    action: top
+      ? `Move ${top.frame.fn ?? "that work"} to a worker thread, split it into smaller steps, or make it asynchronous.`
+      : "Move the heavy work to a worker thread, stream or paginate it, or make it asynchronous.",
+    evidence: { window_ms: R.blockWindowMs, ...b, ...(fns.length ? { functions: fns.map((f) => ({ ...f.frame, share: Math.round(f.selfShare * 100) / 100 })) } : {}) },
   }));
 }
 

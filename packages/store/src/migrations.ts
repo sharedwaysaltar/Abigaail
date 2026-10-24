@@ -312,6 +312,24 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (app_id, minute)
   );
   `,
+  // 12: profiles (profile_v1, DECISIONS #119): merged sampled stacks, function
+  // names, relative files and lines only. Kept apart from events: they are
+  // larger, never live, and have their own, shorter retention.
+  `
+  CREATE TABLE profiles (
+    app_id    TEXT NOT NULL,
+    event_id  TEXT NOT NULL,
+    ts        INTEGER NOT NULL,
+    release   TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    route     TEXT,
+    window_ms INTEGER NOT NULL,
+    samples   INTEGER NOT NULL,
+    data      TEXT NOT NULL,
+    PRIMARY KEY (app_id, event_id)
+  ) WITHOUT ROWID;
+  CREATE INDEX profiles_app_ts ON profiles (app_id, ts);
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

@@ -181,7 +181,7 @@ export const SCENARIOS: readonly Scenario[] = [
       { at: 5 * MIN, action: { faults: { blockDocs: false } } },
     ],
     faultMs: 5 * MIN,
-    expect: [{ fingerprint: resilience("loop_blocked", "/docs"), severity: "warning", summary: ["/docs blocked the event loop", "of the blocks in"], showWithinMs: 4 * MIN, resolveWithinMs: 20 * MIN }],
+    expect: [{ fingerprint: resilience("loop_blocked", "/docs"), severity: "warning", summary: ["/docs blocked the event loop", "of the blocks in", "Mostly in renderDocs"], showWithinMs: 4 * MIN, resolveWithinMs: 20 * MIN }],
     // The route's own slowness and the lag are folded into the finding that names it.
     forbid: [health("latency", "/docs"), health("event_loop_lag")],
     forbidMs: 20 * MIN,
@@ -189,11 +189,11 @@ export const SCENARIOS: readonly Scenario[] = [
   {
     name: "oom-loop",
     apps: ["node"],
-    description: "Each /search keeps 2.5 MB for good; at 96 MB of heap the process is killed (SIGKILL, like a container's OOM killer) and a supervisor restarts it, for 16 min.",
+    description: "The demo keeps 448 KB for good every second (about 3 min to 96 MB, whatever the traffic); at 96 MB of heap the process is killed (SIGKILL, like a container's OOM killer) and a supervisor restarts it, for 16 min.",
     steps: [
       { at: 0, action: { supervise: true } },
-      { at: 0, action: { faults: { leakPerRequest: 2560, oomKillMb: 96 } } },
-      { at: 16 * MIN, action: { faults: { leakPerRequest: 0, oomKillMb: 0 } } },
+      { at: 0, action: { faults: { leakPerSecond: 448, oomKillMb: 96 } } },
+      { at: 16 * MIN, action: { faults: { leakPerSecond: 0, oomKillMb: 0 } } },
       { at: 16 * MIN, action: { supervise: false } },
     ],
     faultMs: 16 * MIN,
@@ -201,8 +201,8 @@ export const SCENARIOS: readonly Scenario[] = [
       {
         fingerprint: resilience("restart"),
         severity: "critical",
-        summary: ["a restart loop", "likely out of memory: its heap grew from"],
-        showWithinMs: 17 * MIN,
+        summary: ["a restart loop", "likely out of memory: its heap grew from", "allocated in rememberSearch"],
+        showWithinMs: 13 * MIN,
         resolveWithinMs: 20 * MIN,
       },
     ],
@@ -222,7 +222,7 @@ export const SCENARIOS: readonly Scenario[] = [
       {
         fingerprint: resilience("leak", "heap"),
         severity: "warning",
-        summary: ["heap floor after garbage collection rose from", "since it started"],
+        summary: ["heap floor after garbage collection rose from", "since it started", "Retained memory grew most at rememberSearch"],
         showWithinMs: 3 * HOUR + 35 * MIN,
         resolveWithinMs: 6 * MIN,
       },

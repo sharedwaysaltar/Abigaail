@@ -264,7 +264,7 @@ describe("other tables", () => {
 });
 
 describe("every retention delete is scoped by app_id", () => {
-  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "audit_log", "alert_state", "alert_items", "scrub_mismatches"];
+  const APP_TABLES = ["events", "findings", "hourly_route_stats", "rollup_hours", "daily_uniques", "deploys", "ingest_rejections", "audit_log", "alert_state", "alert_items", "scrub_mismatches", "profiles"];
   const src = readFileSync(fileURLToPath(new URL("../src/store.ts", import.meta.url)), "utf8");
   const deletes = [...src.matchAll(/`([^`]*)`|"((?:[^"\\]|\\.)*)"/g)]
     .map((m) => m[1] ?? m[2] ?? "")

@@ -249,3 +249,40 @@ describe("migrations", () => {
     expect(store.countEvents(app.id)).toBe(1);
   });
 });
+
+describe("profiles (DECISIONS #119)", () => {
+  const profile = (ts: number, o: { route?: string; kind?: "cpu" | "block" | "heap"; event_id?: string } = {}): { event: AbigaailEvent; derived: { ts: number } } => ({
+    event: {
+      type: "profile", event_id: o.event_id ?? id(), client_ts: 1, kind: o.kind ?? "cpu", window_ms: 10_000, samples: 100,
+      frames: [{ file: "src/a.ts", line: 3, fn: "a" }, { file: "(node)", line: 0 }], stacks: [{ frames: [1, 0], weight: 100 }],
+      ...(o.route ? { route: o.route } : {}),
+    },
+    derived: { ts },
+  });
+  const put = (appId: string, events: ReturnType<typeof profile>[]) =>
+    store.insertBatch(appId, { receivedAt: t, release: "r1", environment: "test", events });
+
+  it("go to their own table, are idempotent, never become events or live rows, and read back per app and route", () => {
+    const a = store.createApp("a", "test").app.id;
+    const b = store.createApp("b", "test").app.id;
+    const same = id();
+    const res = put(a, [profile(100, { event_id: same }), profile(200, { route: "/x" }), profile(300, { kind: "heap" })]);
+    expect(res).toMatchObject({ inserted: 3, duplicates: 0, rows: [] });
+    expect(put(a, [profile(100, { event_id: same })])).toMatchObject({ inserted: 0, duplicates: 1 });
+    put(b, [profile(150)]);
+    expect(raw<{ n: number }>("SELECT count(*) AS n FROM events")[0]!.n).toBe(0);
+    expect(store.profiles(a, "cpu", 0, 1000, 10).map((p) => p.ts)).toEqual([200, 100]);
+    expect(store.profiles(a, "cpu", 0, 1000, 10, null).map((p) => p.ts)).toEqual([100]);
+    expect(store.profiles(a, "cpu", 0, 1000, 10, "/x")[0]).toMatchObject({ route: "/x", frames: [{ file: "src/a.ts", line: 3, fn: "a" }, { file: "(node)", line: 0 }], stacks: [{ frames: [1, 0], weight: 100 }] });
+    expect(store.profiles(b, "cpu", 0, 1000, 10)).toHaveLength(1);
+  });
+
+  it("expire per app, in bounded batches", () => {
+    const a = store.createApp("a", "test").app.id;
+    put(a, [profile(100), profile(200), profile(300)]);
+    expect(store.retentionScopes("profiles")).toEqual([a]);
+    expect(store.deleteExpired("profiles", a, 250, 1)).toBe(1);
+    expect(store.deleteExpired("profiles", a, 250, 10)).toBe(1);
+    expect(store.profiles(a, "cpu", 0, 1000, 10).map((p) => p.ts)).toEqual([300]);
+  });
+});

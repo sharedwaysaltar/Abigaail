@@ -30,7 +30,7 @@ function ticks(max: number): number[] {
 }
 
 /**
- * Memory over the last day, lowest reading per 15 minutes: a leak is a floor
+ * Memory over the last day (or since the first reading, if later), lowest reading per 15 minutes: a leak is a floor
  * that keeps rising, not a high value. Starts are marked; buckets without data
  * are gaps, never zero. The table below carries every value.
  */
@@ -51,6 +51,8 @@ export function MemoryChart({ points, boots, limitMb }: { points: MemoryChartPoi
   const yt = ticks(showLimit ? Math.max(highest, limitMb!) : highest);
   const top = yt[yt.length - 1]!;
   const cell = (W - PAD.l - PAD.r) / n;
+  // About six time labels, whatever the span (the view starts at the first reading).
+  const labelEvery = Math.max(1, Math.round(n / 6));
   const x = (i: number) => PAD.l + (i + 0.5) * cell;
   const y = (v: number) => PAD.t + (1 - v / top) * (H - PAD.t - PAD.b);
   const first = points[0]?.t ?? 0;
@@ -67,7 +69,11 @@ export function MemoryChart({ points, boots, limitMb }: { points: MemoryChartPoi
       } else cur.push(`${cur.length ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`);
     });
     if (cur.length) segs.push(cur.join(" "));
-    return { ...s, segs };
+    // A reading with no neighbour is a dot, so it is not invisible.
+    const lone = points.flatMap((p, i) =>
+      p[s.key] !== null && points[i - 1]?.[s.key] == null && points[i + 1]?.[s.key] == null ? [{ cx: x(i), cy: y(p[s.key]!) }] : [],
+    );
+    return { ...s, segs, lone };
   });
 
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -89,7 +95,7 @@ export function MemoryChart({ points, boots, limitMb }: { points: MemoryChartPoi
               {t > 0 ? <text className="axis" x={W - PAD.r} y={y(t) - 6} textAnchor="end">{fmtMb(t)}</text> : null}
             </g>
           ))}
-          {points.map((p, i) => (i % 16 === 0 ? <text key={`x${i}`} className="axis" x={x(i)} y={H - 8} textAnchor="middle">{hhmm(p.t)}</text> : null))}
+          {points.map((p, i) => (i % labelEvery === 0 ? <text key={`x${i}`} className="axis" x={x(i)} y={H - 8} textAnchor="middle">{hhmm(p.t)}</text> : null))}
           {showLimit ? (
             <g>
               <line className="limit" x1={PAD.l} x2={W - PAD.r} y1={y(limitMb!)} y2={y(limitMb!)} />
@@ -102,6 +108,7 @@ export function MemoryChart({ points, boots, limitMb }: { points: MemoryChartPoi
             </line>
           ))}
           {paths.map((s) => s.segs.map((d, i) => <path key={`${s.key}${i}`} className={s.cls} d={d} />))}
+          {paths.map((s) => s.lone.map((c, i) => <circle key={`${s.key}d${i}`} className={`dot ${s.cls}`} cx={c.cx} cy={c.cy} r={3} />))}
           {hp ? <line className="cross" x1={x(hover!)} x2={x(hover!)} y1={PAD.t} y2={H - PAD.b} /> : null}
           <rect x={PAD.l} y={0} width={W - PAD.l - PAD.r} height={H} fill="transparent" />
         </svg>

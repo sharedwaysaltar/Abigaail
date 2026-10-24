@@ -4,7 +4,7 @@
 // produce them.
 
 import { createHash } from "node:crypto";
-import type { AbigaailEvent, Batch, Environment, LifecycleEvent, MetricName } from "@abigaail/schema";
+import type { AbigaailEvent, Batch, Environment, LifecycleEvent, MetricName, ProfileFrame, ProfileKind } from "@abigaail/schema";
 import { requestFlags } from "@abigaail/node";
 import { classifyUserAgent } from "@abigaail/server";
 import type { Derived } from "@abigaail/store";
@@ -69,6 +69,20 @@ export function lifecycleItem(r: Rng, ts: number, kind: LifecycleEvent["kind"], 
 
 export function metricItem(r: Rng, ts: number, name: MetricName, value: number): Item {
   return { event: { type: "metric", event_id: uuid(r), client_ts: ts, name, value: Math.round(value * 100) / 100 }, derived: { ts } };
+}
+
+/** A profile from stacks given as frame lists (outermost first), as the SDK sends it. */
+export function profileItem(r: Rng, ts: number, kind: ProfileKind, windowMs: number, stacks: { frames: readonly ProfileFrame[]; weight: number }[]): Item {
+  const frames: ProfileFrame[] = [];
+  const at = (f: ProfileFrame) => {
+    const i = frames.findIndex((x) => x.file === f.file && x.line === f.line && x.fn === f.fn);
+    return i >= 0 ? i : frames.push({ ...f }) - 1;
+  };
+  const s = stacks.filter((x) => x.weight > 0).map((x) => ({ frames: x.frames.map(at), weight: Math.round(x.weight) }));
+  return {
+    event: { type: "profile", event_id: uuid(r), client_ts: ts, kind, window_ms: Math.round(windowMs), samples: s.reduce((a, b) => a + b.weight, 0), frames, stacks: s },
+    derived: { ts },
+  };
 }
 
 export function blockItem(r: Rng, ts: number, route: string, count: number, total_ms: number, max_ms: number): Item {

@@ -126,7 +126,7 @@ export const HOUR_MS = 3_600_000;
 
 /** What retention deletes, by policy name (DECISIONS #87). "rollups" = hourly_route_stats + rollup_hours. */
 export type RetentionName =
-  | "events" | "rollups" | "daily_uniques" | "findings" | "agent_runs" | "ingest_rejections" | "db_size_samples" | "audit_log" | "alerts" | "sessions";
+  | "events" | "rollups" | "daily_uniques" | "findings" | "agent_runs" | "ingest_rejections" | "db_size_samples" | "audit_log" | "alerts" | "profiles" | "sessions";
 
 export interface RetentionPolicyRow {
   name: RetentionName;
@@ -228,6 +228,20 @@ export interface BlockRow {
   count: number;
   total_ms: number;
   max_ms: number;
+}
+
+/** A stored profile (profile_v1): merged stacks, function names, relative files and lines only. */
+export interface ProfileRow {
+  ts: number;
+  release: string;
+  kind: "cpu" | "block" | "heap";
+  route: string | null;
+  window_ms: number;
+  samples: number;
+  samples_concurrent: number | null;
+  samples_idle: number | null;
+  frames: { file: string; line: number; fn?: string }[];
+  stacks: { frames: number[]; weight: number }[];
 }
 
 /** An uncaught error (handled: false). */
@@ -440,6 +454,23 @@ export class StoreReader {
                        value AS total_ms, duration_ms AS max_ms
                 FROM events WHERE app_id = ? AND type = 'block' AND ts >= ? AND ts < ? ORDER BY ts`)
       .all(appId, from, to) as unknown as BlockRow[];
+  }
+
+  /**
+   * Profiles of one kind with ts in [from, to), newest first, at most `limit`.
+   * `route`: undefined = any, null = the whole-app profile only, a string = that route's.
+   */
+  profiles(appId: string, kind: ProfileRow["kind"], from: number, to: number, limit: number, route?: string | null): ProfileRow[] {
+    const byRoute = route === undefined ? "" : route === null ? " AND route IS NULL" : " AND route = ?";
+    const args: (string | number)[] = [appId, kind, from, to, ...(typeof route === "string" ? [route] : []), limit];
+    const rows = this.db
+      .prepare(`SELECT ts, release, kind, route, window_ms, samples, data FROM profiles
+                WHERE app_id = ? AND kind = ? AND ts >= ? AND ts < ?${byRoute} ORDER BY ts DESC LIMIT ?`)
+      .all(...args) as unknown as { ts: number; release: string; kind: ProfileRow["kind"]; route: string | null; window_ms: number; samples: number; data: string }[];
+    return rows.map(({ data, ...r }) => {
+      const d = JSON.parse(data) as { frames: ProfileRow["frames"]; stacks: ProfileRow["stacks"]; samples_concurrent?: number; samples_idle?: number };
+      return { ...r, frames: d.frames, stacks: d.stacks, samples_concurrent: d.samples_concurrent ?? null, samples_idle: d.samples_idle ?? null };
+    });
   }
 
   /** Uncaught errors (handled: false) with ts in [from, to), oldest first. */

@@ -249,3 +249,32 @@ describe("sanitizeEvent: runtime_v1 lifecycle fields (DECISIONS #110, #112)", ()
     expect(Object.keys((e as { prev_exit: object }).prev_exit)).toEqual(["code"]);
   });
 });
+
+describe("sanitizeEvent: profiles (DECISIONS #118)", () => {
+  const ID = "6f1c1d1e-2b2a-4c3d-8e4f-5a6b7c8d9e0f";
+  const clean = (e: Record<string, unknown>) =>
+    sanitizeEvent({ type: "profile", kind: "cpu", window_ms: 1000, samples: 10, frames: [{ file: "src/a.ts", line: 1, fn: "a" }], stacks: [{ frames: [0], weight: 10 }], ...e }, () => ID, () => 1);
+
+  it("keeps a valid profile, without unknown fields or columns", () => {
+    const p = clean({ extra: "x", frames: [{ file: "src/a.ts", line: 1, col: 3, fn: "a", source: "secret" }] });
+    expect(p).toMatchObject({ frames: [{ file: "src/a.ts", line: 1, fn: "a" }] });
+    expect(JSON.stringify(p)).not.toMatch(/secret|extra|col/);
+  });
+
+  it("drops the name of a frame that is not an identifier, but a frame with an absolute path drops the profile", () => {
+    expect(clean({ frames: [{ file: "src/a.ts", line: 1, fn: "jane@example.com" }] })).toMatchObject({ frames: [{ file: "src/a.ts", line: 1 }] });
+    expect(clean({ frames: [{ file: "/home/jane/a.ts", line: 1 }] })).toBeUndefined();
+  });
+
+  it("drops a profile with a stack pointing at a missing frame, or over the limits", () => {
+    expect(clean({ stacks: [{ frames: [3], weight: 1 }] })).toBeUndefined();
+    expect(clean({ stacks: Array(151).fill({ frames: [0], weight: 1 }) })).toBeUndefined();
+    expect(clean({ kind: "flame" })).toBeUndefined();
+  });
+
+  it("keeps a route on cpu profiles only, and the concurrent/idle counts on the whole-app one only", () => {
+    expect(clean({ kind: "heap", route: "/a" })).not.toHaveProperty("route");
+    expect(clean({ route: "/a", samples_idle: 3 })).not.toHaveProperty("samples_idle");
+    expect(clean({ samples_idle: 3 })).toMatchObject({ samples_idle: 3 });
+  });
+});

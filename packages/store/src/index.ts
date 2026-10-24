@@ -19,6 +19,7 @@ export type {
   FindingState,
   HourlyStat,
   LifecycleRow,
+  ProfileRow,
   RetentionName,
   RetentionPolicyRow,
   RunOutcome,

@@ -193,6 +193,8 @@ export class Retention {
       this.drainScopes(this.store.retentionScopes("scrub_mismatches"), (s) => this.store.deleteExpired("scrub_mismatches", s, Math.floor(cut("ingest_rejections") / MINUTE_MS) * MINUTE_MS, this.batchRows), (n) => add("ingest_rejections", n)));
     await step("audit log", () =>
       this.drainScopes([...this.store.retentionScopes("audit_log"), null], (s) => this.store.deleteExpired("audit_log", s, cut("audit_log"), this.batchRows), (n) => add("audit_log", n)));
+    await step("profiles", () =>
+      this.drainScopes(this.store.retentionScopes("profiles"), (s) => this.store.deleteExpired("profiles", s, cut("profiles"), this.batchRows), (n) => add("profiles", n)));
     await step("alerts", async () => {
       const before = cut("alerts");
       const messages = await this.drain(() => this.store.deleteExpired("alert_deliveries", null, before, this.batchRows), (n) => add("alerts", n));

@@ -22,6 +22,7 @@ import {
   MAX_UA_LENGTH,
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
+  PROFILE_KINDS,
   REGION_RE,
   RELEASE_RE,
   REQUEST_FLAGS,
@@ -175,6 +176,39 @@ export const blockEventSchema = z.strictObject({
   max_ms: durationMs,
 });
 
+/** A profile frame: the stack-frame rules (relative path or placeholder, identifier), no column. */
+const profileFrame = z.strictObject({
+  file: z.string().max(LIMITS.maxFramePathLength).regex(FRAME_PATH_RE, "must be a relative path"),
+  line: z.number().int().nonnegative(),
+  fn: z.string().max(MAX_FN_LENGTH).regex(IDENT_RE).optional(),
+});
+const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
+export const profileEventSchema = z
+  .strictObject({
+    type: z.literal("profile"),
+    event_id: eventId,
+    client_ts: clientTs,
+    kind: z.enum(PROFILE_KINDS),
+    route: route.optional(),
+    window_ms: durationMs,
+    samples: count,
+    samples_concurrent: count.optional(),
+    samples_idle: count.optional(),
+    frames: z.array(profileFrame).max(LIMITS.maxProfileFrames),
+    stacks: z
+      .array(z.strictObject({ frames: z.array(z.number().int().nonnegative()).min(1).max(LIMITS.maxProfileDepth), weight: count }))
+      .max(LIMITS.maxProfileStacks),
+  })
+  .superRefine((e, ctx) => {
+    if (e.stacks.some((s) => s.frames.some((i) => i >= e.frames.length))) ctx.addIssue({ code: "custom", message: "stack refers to a missing frame", path: ["stacks"] });
+    if (e.route !== undefined && e.kind !== "cpu") ctx.addIssue({ code: "custom", message: "route is sent on cpu profiles only", path: ["route"] });
+    if ((e.samples_concurrent !== undefined || e.samples_idle !== undefined) && (e.kind !== "cpu" || e.route !== undefined)) {
+      ctx.addIssue({ code: "custom", message: "concurrent and idle samples are sent on the whole-app cpu profile only", path: ["samples_concurrent"] });
+    }
+    if (JSON.stringify(e).length > LIMITS.maxProfileBytes) ctx.addIssue({ code: "custom", message: "profile too large", path: [] });
+  });
+
 export const eventSchema = z.discriminatedUnion("type", [
   requestEventSchema,
   errorEventSchema,
@@ -182,6 +216,7 @@ export const eventSchema = z.discriminatedUnion("type", [
   metricEventSchema,
   lifecycleEventSchema,
   blockEventSchema,
+  profileEventSchema,
 ]);
 
 export const batchSchema = z.strictObject({

@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "check": "npm run typecheck && npm test",
     "bench": "npm run build --silent && node bench/linking.mjs",
+    "bench:profiling": "npm run build --silent && node --expose-gc bench/profiling.mjs",
     "dev:server": "npm run build --silent && node --env-file-if-exists=apps/server/.env apps/server/dist/main.js",
     "alerts:test": "npm run build --silent && node --env-file-if-exists=apps/server/.env apps/server/dist/alerts/cli.js",
     "dashboard": "npm run build --silent && npm run build -w @abigaail/dashboard && NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 node --env-file-if-exists=apps/dashboard/.env apps/dashboard/server.mjs",
