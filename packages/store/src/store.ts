@@ -7,7 +7,7 @@ import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
 import { APP_COLUMNS, HOUR_MS, StoreReader, type AlertState, type App, type DeliveryStatus, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
 import { toRow, type Derived, type EventRow } from "./rows.js";
-import { checkpointTruncate, convertToIncremental, incrementalVacuum, type VacuumConversion } from "./vacuum.js";
+import { checkpointTruncate, convertToIncremental, incrementalVacuum, vacuumInPlace, type VacuumConversion } from "./vacuum.js";
 
 export interface AuditEntry {
   id: number;
@@ -166,6 +166,64 @@ const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
   },
 };
 
+/**
+ * Every table with an app_id column and what app:purge does with it (DECISIONS #126),
+ * in purge order: raw events first (they hold the visitor hash). audit_log is
+ * kept: it records admin actions, holds nothing about the app's users and
+ * expires with the audit period. A test lists the schema's app_id tables and
+ * fails on any missing here, so a new table cannot be forgotten.
+ */
+export const PURGE_TABLES = {
+  events: "delete",
+  profiles: "delete",
+  hourly_route_stats: "delete",
+  rollup_hours: "delete",
+  daily_uniques: "delete",
+  findings: "delete",
+  deploys: "delete",
+  alert_items: "delete",
+  alert_state: "delete",
+  ingest_rejections: "delete",
+  scrub_mismatches: "delete",
+  audit_log: "keep",
+} as const satisfies Record<string, "delete" | "keep">;
+
+/** Tables app:purge empties for an app. */
+export type PurgeTable = { [T in keyof typeof PURGE_TABLES]: (typeof PURGE_TABLES)[T] extends "delete" ? T : never }[keyof typeof PURGE_TABLES];
+export const PURGE_DELETE: readonly PurgeTable[] = (Object.keys(PURGE_TABLES) as (keyof typeof PURGE_TABLES)[])
+  .filter((t): t is PurgeTable => PURGE_TABLES[t] === "delete");
+
+/** Rows per table app:purge deletes (or did), plus alert messages and Abigaail's findings that name the app. */
+export interface PurgeCounts {
+  tables: Record<PurgeTable, number>;
+  /** Messages carrying only this app: deleted. */
+  deliveries_deleted: number;
+  /** Messages that also carried other apps: kept, without this app's items. */
+  deliveries_rewritten: number;
+  /** Abigaail's own findings and alert states that name the app. */
+  system_rows: number;
+}
+
+/**
+ * One bounded batch per table (alert_items go through purgeAlerts, which also
+ * fixes the messages). Each (app_id, limit), with the app_id given twice.
+ */
+const PURGE_SQL: Record<Exclude<PurgeTable, "alert_items">, string> = {
+  events: "DELETE FROM events WHERE app_id = ? AND event_id IN (SELECT event_id FROM events WHERE app_id = ? LIMIT ?)",
+  profiles: "DELETE FROM profiles WHERE app_id = ? AND event_id IN (SELECT event_id FROM profiles WHERE app_id = ? LIMIT ?)",
+  hourly_route_stats: "DELETE FROM hourly_route_stats WHERE app_id = ? AND rowid IN (SELECT rowid FROM hourly_route_stats WHERE app_id = ? LIMIT ?)",
+  rollup_hours: "DELETE FROM rollup_hours WHERE app_id = ? AND rowid IN (SELECT rowid FROM rollup_hours WHERE app_id = ? LIMIT ?)",
+  daily_uniques: "DELETE FROM daily_uniques WHERE app_id = ? AND rowid IN (SELECT rowid FROM daily_uniques WHERE app_id = ? LIMIT ?)",
+  findings: "DELETE FROM findings WHERE app_id = ? AND id IN (SELECT id FROM findings WHERE app_id = ? LIMIT ?)",
+  deploys: "DELETE FROM deploys WHERE app_id = ? AND rowid IN (SELECT rowid FROM deploys WHERE app_id = ? LIMIT ?)",
+  alert_state: "DELETE FROM alert_state WHERE app_id = ? AND rowid IN (SELECT rowid FROM alert_state WHERE app_id = ? LIMIT ?)",
+  ingest_rejections: "DELETE FROM ingest_rejections WHERE app_id = ? AND rowid IN (SELECT rowid FROM ingest_rejections WHERE app_id = ? LIMIT ?)",
+  scrub_mismatches: "DELETE FROM scrub_mismatches WHERE app_id = ? AND rowid IN (SELECT rowid FROM scrub_mismatches WHERE app_id = ? LIMIT ?)",
+};
+
+/** True when the app_id has an apps row: writes for a purged app are dropped (DECISIONS #126). */
+const APP_EXISTS = "SELECT 1 FROM apps WHERE id = ?";
+
 export function openStore(path: string, opts: StoreOptions = {}): Store {
   return new Store(path, opts);
 }
@@ -303,7 +361,8 @@ export class Store extends StoreReader {
    * are ignored and counted. Also records the deploy and the app's last-seen
    * time, and each boot sets the app's region (NULL if it sent none).
    * `rows` holds only the rows actually inserted, so a retried batch is never
-   * reported twice (the Live view relies on this).
+   * reported twice (the Live view relies on this). Nothing is stored for an
+   * app that no longer exists (purged while the batch was in flight).
    */
   insertBatch(appId: string, batch: IngestBatch): { inserted: number; duplicates: number; rows: EventRow[] } {
     const insert = this.db.prepare(`
@@ -316,6 +375,7 @@ export class Store extends StoreReader {
       INSERT OR IGNORE INTO profiles (app_id, event_id, ts, release, kind, route, window_ms, samples, data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     return this.tx(() => {
+      if (!this.db.prepare(APP_EXISTS).get(appId)) return { inserted: 0, duplicates: 0, rows: [] };
       let inserted = 0;
       const rows: EventRow[] = [];
       let latestBoot: { ts: number; region: string | null } | undefined;
@@ -373,7 +433,8 @@ export class Store extends StoreReader {
    * null = Abigaail itself), and resolves after `resolveAfter` such runs, or
    * after the first one if it is a fact (FindingInput.fact). Runs
    * that failed, timed out or were skipped change no finding, so an agent that
-   * cannot see an app never "recovers" it.
+   * cannot see an app never "recovers" it. Findings for an app that no longer
+   * exists (purged while the agent ran) are dropped; the others are kept.
    */
   recordRun(run: RunInput, findings: readonly FindingInput[], evaluated: readonly (string | null)[], opts: RecordRunOptions = {}): void {
     const cooldownMs = opts.cooldownMs ?? 30 * 60_000;
@@ -388,8 +449,9 @@ export class Store extends StoreReader {
       if (run.outcome !== "ok") return;
 
       // One finding per (scope, fingerprint) per run: the last one wins.
+      const exists = this.db.prepare(APP_EXISTS);
       const emitted = new Map<string, FindingInput>();
-      for (const f of findings) emitted.set(`${f.app_id ?? ""}\n${f.fingerprint}`, f);
+      for (const f of findings) if (f.app_id === null || exists.get(f.app_id)) emitted.set(`${f.app_id ?? ""}\n${f.fingerprint}`, f);
 
       const findOpen = this.db.prepare(
         "SELECT id FROM findings WHERE coalesce(app_id, '') = ? AND fingerprint = ? AND state = 'open'");
@@ -469,12 +531,14 @@ export class Store extends StoreReader {
    * Never rolls an hour down: events are append-only, so fewer events than the
    * hour was rolled with means retention deleted them. The rolled hour is then
    * kept as it is (returns false), so baselines never lose it. For the same
-   * reason a day's unique humans only ever grow.
+   * reason a day's unique humans only ever grow. An app that no longer exists
+   * is not rolled (returns false).
    */
   rollupHour(appId: string, hour: number): boolean {
     if (hour % HOUR_MS !== 0) throw new Error("hour must be the start of a UTC hour");
     const end = hour + HOUR_MS;
     return this.tx(() => {
+      if (!this.db.prepare(APP_EXISTS).get(appId)) return false;
       const events = this.countEventsBetween(appId, hour, end);
       const prev = this.db.prepare("SELECT events FROM rollup_hours WHERE app_id = ? AND hour = ?").get(appId, hour) as
         | { events: number }
@@ -521,25 +585,30 @@ export class Store extends StoreReader {
     return out;
   }
 
-  /** Add ingest refusal counts. appId '' = unknown key. */
+  /**
+   * Add ingest refusal counts. appId '' = unknown key. Counts buffered for an
+   * app that has since been purged are dropped, so the purge stays complete.
+   */
   addIngestRejections(rows: readonly { app_id: string; minute: number; status: number; n: number }[]): void {
     if (!rows.length) return;
     const upsert = this.db.prepare(`
-      INSERT INTO ingest_rejections (app_id, minute, status, n) VALUES (?, ?, ?, ?)
+      INSERT INTO ingest_rejections (app_id, minute, status, n)
+      SELECT ?, ?, ?, ? WHERE ? = '' OR EXISTS (${APP_EXISTS})
       ON CONFLICT (app_id, minute, status) DO UPDATE SET n = n + excluded.n`);
     this.tx(() => {
-      for (const r of rows) upsert.run(r.app_id, r.minute, r.status, r.n);
+      for (const r of rows) upsert.run(r.app_id, r.minute, r.status, r.n, r.app_id, r.app_id);
     });
   }
 
-  /** Add counts of text the server had to scrub again (DECISIONS #104). */
+  /** Add counts of text the server had to scrub again (DECISIONS #104). Dropped for a purged app. */
   addScrubMismatches(rows: readonly { app_id: string; minute: number; n: number }[]): void {
     if (!rows.length) return;
     const upsert = this.db.prepare(`
-      INSERT INTO scrub_mismatches (app_id, minute, n) VALUES (?, ?, ?)
+      INSERT INTO scrub_mismatches (app_id, minute, n)
+      SELECT ?, ?, ? WHERE EXISTS (${APP_EXISTS})
       ON CONFLICT (app_id, minute) DO UPDATE SET n = n + excluded.n`);
     this.tx(() => {
-      for (const r of rows) upsert.run(r.app_id, r.minute, r.n);
+      for (const r of rows) upsert.run(r.app_id, r.minute, r.n, r.app_id);
     });
   }
 
@@ -650,6 +719,140 @@ export class Store extends StoreReader {
     });
   }
 
+  // ---- app:purge (DECISIONS #126) --------------------------------------------
+
+  /**
+   * What purging the app would delete: rows per table, alert messages deleted
+   * or rewritten, and Abigaail's own findings and alert states with one of
+   * `fingerprints` (built from the app's name by the caller).
+   */
+  purgeCounts(appId: string, fingerprints: readonly string[]): PurgeCounts {
+    const tables = {} as Record<PurgeTable, number>;
+    for (const t of PURGE_DELETE) {
+      tables[t] = Number((this.db.prepare(`SELECT count(*) AS n FROM ${t} WHERE app_id = ?`).get(appId) as { n: number }).n);
+    }
+    const deliveries = this.db
+      .prepare(`SELECT d.id, EXISTS (SELECT 1 FROM alert_items o WHERE o.delivery = d.id AND o.app_id IS NOT ?) AS mixed
+                FROM alert_deliveries d WHERE d.id IN (SELECT delivery FROM alert_items WHERE app_id = ?)`)
+      .all(appId, appId) as { id: number; mixed: number }[];
+    let system_rows = 0;
+    for (const fp of fingerprints) {
+      for (const t of ["findings", "alert_state"]) {
+        system_rows += Number((this.db.prepare(`SELECT count(*) AS n FROM ${t} WHERE app_id IS NULL AND fingerprint = ?`).get(fp) as { n: number }).n);
+      }
+    }
+    return {
+      tables,
+      deliveries_deleted: deliveries.filter((d) => !d.mixed).length,
+      deliveries_rewritten: deliveries.filter((d) => d.mixed).length,
+      system_rows,
+    };
+  }
+
+  /** Start a purge: the app must exist and be disabled (so ingest cannot write). Audited with the planned counts. */
+  startPurge(appId: string, actor: string, planned: PurgeCounts): void {
+    this.tx(() => {
+      this.requireDisabled(appId);
+      this.audit(actor, "app.purge_started", appId, { rows: planned.tables });
+    });
+  }
+
+  /** A purge of the app was started (and, since the app still exists, not finished). */
+  purgeStarted(appId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM audit_log WHERE app_id = ? AND action = 'app.purge_started' LIMIT 1").get(appId);
+  }
+
+  /** Delete up to `limit` of one app's rows from one table, in one short transaction. */
+  purgeBatch(table: Exclude<PurgeTable, "alert_items">, appId: string, limit: number): number {
+    const sql = PURGE_SQL[table];
+    if (!sql) throw new RangeError("not a purge table");
+    return this.tx(() => Number(this.db.prepare(sql).run(appId, appId, limit).changes));
+  }
+
+  /**
+   * One batch of the app's alert messages (up to `limit`): a message that
+   * carried only this app is deleted with its items; one that also carried
+   * others keeps its row, loses this app's items and has its payload
+   * rewritten without them (matched by `name`). Returns what changed.
+   */
+  purgeAlerts(appId: string, name: string, limit: number): { items: number; deleted: number; rewritten: number } {
+    return this.tx(() => this.purgeAlertsIn(appId, name, limit));
+  }
+
+  private purgeAlertsIn(appId: string, name: string, limit: number): { items: number; deleted: number; rewritten: number } {
+    const out = { items: 0, deleted: 0, rewritten: 0 };
+    const ids = this.db
+      .prepare("SELECT DISTINCT delivery FROM alert_items WHERE app_id = ? LIMIT ?")
+      .all(appId, limit) as { delivery: number }[];
+    for (const { delivery } of ids) {
+      out.items += Number((this.db.prepare("SELECT count(*) AS n FROM alert_items WHERE delivery = ? AND app_id = ?").get(delivery, appId) as { n: number }).n);
+      const others = Number((this.db.prepare("SELECT count(*) AS n FROM alert_items WHERE delivery = ? AND app_id IS NOT ?").get(delivery, appId) as { n: number }).n);
+      const row = this.db.prepare("SELECT payload FROM alert_deliveries WHERE id = ?").get(delivery) as { payload: string } | undefined;
+      let message: { items?: { app?: unknown }[]; more?: number } | undefined;
+      try {
+        message = row ? (JSON.parse(row.payload) as typeof message) : undefined;
+      } catch {
+        message = undefined;
+      }
+      // A payload that cannot be read cannot be shown to be clean: it goes too.
+      if (!others || !message || !Array.isArray(message.items)) {
+        this.db.prepare("DELETE FROM alert_deliveries WHERE id = ?").run(delivery);
+        this.db.prepare("DELETE FROM alert_items WHERE app_id = ? AND delivery = ?").run(appId, delivery);
+        out.deleted++;
+        continue;
+      }
+      const items = message.items.filter((i) => i.app !== name);
+      const payload = JSON.stringify({ ...message, items, more: Math.max(0, others - items.length) });
+      this.db.prepare("UPDATE alert_deliveries SET payload = ? WHERE id = ?").run(payload, delivery);
+      this.db.prepare("DELETE FROM alert_items WHERE app_id = ? AND delivery = ?").run(appId, delivery);
+      out.rewritten++;
+    }
+    return out;
+  }
+
+  /**
+   * The last step, in one transaction: delete whatever was written for the
+   * app while the batches ran, Abigaail's own findings and alert states with
+   * one of `fingerprints`, then the apps row (the foreign keys refuse it if
+   * anything still points at it), and audit "app.purge" with the counts only.
+   * `done` adds this step's counts to the batches'. Returns the totals.
+   */
+  finishPurge(appId: string, name: string, fingerprints: readonly string[], actor: string, done: PurgeCounts): PurgeCounts {
+    return this.tx(() => {
+      this.requireDisabled(appId);
+      const total: PurgeCounts = { ...done, tables: { ...done.tables } };
+      for (const t of PURGE_DELETE) {
+        if (t === "alert_items") continue;
+        for (let n; (n = Number(this.db.prepare(PURGE_SQL[t]).run(appId, appId, 10_000).changes)); ) total.tables[t] += n;
+      }
+      for (let r; (r = this.purgeAlertsIn(appId, name, 1_000)).items; ) {
+        total.tables.alert_items += r.items;
+        total.deliveries_deleted += r.deleted;
+        total.deliveries_rewritten += r.rewritten;
+      }
+      for (const fp of fingerprints) {
+        total.system_rows += Number(this.db.prepare("DELETE FROM findings WHERE app_id IS NULL AND fingerprint = ?").run(fp).changes);
+        total.system_rows += Number(this.db.prepare("DELETE FROM alert_state WHERE app_id IS NULL AND fingerprint = ?").run(fp).changes);
+      }
+      this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
+      // Copies of its cells may remain in the unused space of live pages: a VACUUM at the next start removes them.
+      this.db.prepare("INSERT INTO maintenance (task, since) VALUES ('vacuum', ?) ON CONFLICT (task) DO NOTHING").run(this.now());
+      this.audit(actor, "app.purge", appId, {
+        rows: total.tables,
+        deliveries_deleted: total.deliveries_deleted,
+        deliveries_rewritten: total.deliveries_rewritten,
+        system_rows: total.system_rows,
+      });
+      return total;
+    });
+  }
+
+  private requireDisabled(appId: string): void {
+    const app = this.appById(appId);
+    if (!app) throw new Error("no such app");
+    if (app.disabled_at === null) throw Object.assign(new Error("the app is not disabled"), { name: "AppEnabled" });
+  }
+
   // ---- alerts (DECISIONS #95, #99) -------------------------------------------
 
   /** An admin action outside the app tables (actor "cli"), such as a test alert. */
@@ -674,7 +877,9 @@ export class Store extends StoreReader {
   /**
    * Apply one sweep in one transaction: the new alert states and the messages
    * they cause. Written before anything is sent, so a restart never sends a
-   * message again. Returns the new deliveries' row ids, in order.
+   * message again. Returns the new deliveries' row ids, in order. A sweep
+   * that read an app since purged writes nothing and throws AppGone: its
+   * messages would name the app, so the next sweep starts again without it.
    */
   applyAlerts(states: readonly AlertState[], deliveries: readonly DeliveryInput[]): number[] {
     const upsert = this.db.prepare(`
@@ -688,6 +893,11 @@ export class Store extends StoreReader {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     const item = this.db.prepare("INSERT INTO alert_items (delivery, app_id, finding_id, fingerprint, change) VALUES (?, ?, ?, ?, ?)");
     return this.tx(() => {
+      const exists = this.db.prepare(APP_EXISTS);
+      const apps = [...states.map((s) => s.app_id), ...deliveries.flatMap((d) => d.items.map((i) => i.app_id))];
+      if (apps.some((id) => id !== null && !exists.get(id))) {
+        throw Object.assign(new Error("an app in this sweep no longer exists"), { name: "AppGone" });
+      }
       for (const s of states) upsert.run(s.app_id, s.fingerprint, s.state, s.sent, s.finding_id, s.changed_at, s.fired_at, s.fired_summary, s.flaps);
       const ids: number[] = [];
       const now = this.now();
@@ -711,6 +921,16 @@ export class Store extends StoreReader {
       .prepare(`SELECT id, delivery_id, channel, kind, created_at, payload, attempts, next_attempt_at FROM alert_deliveries
                 WHERE status = 'pending' ORDER BY created_at, id`)
       .all() as unknown as PendingDelivery[];
+  }
+
+  /**
+   * The payload to send now for a queued message, read again before every
+   * attempt: undefined when the message was deleted (app:purge) or is no
+   * longer pending; the rewritten payload when a purge changed it.
+   */
+  payloadToSend(id: number): string | undefined {
+    const row = this.db.prepare("SELECT payload FROM alert_deliveries WHERE id = ? AND status = 'pending'").get(id) as { payload: string } | undefined;
+    return row?.payload;
   }
 
   /**
@@ -749,9 +969,28 @@ export class Store extends StoreReader {
     return checkpointTruncate(this.db, opts);
   }
 
-  /** One-time switch to incremental auto_vacuum when disk allows (see vacuum.ts). */
+  /** One-time switch to incremental auto_vacuum when disk allows (see vacuum.ts). Its VACUUM also pays an owed one. */
   convertToIncremental(opts: { freeBytes?: (dir: string) => number } = {}): VacuumConversion {
-    return convertToIncremental(this.db, this.path, opts);
+    const result = convertToIncremental(this.db, this.path, opts);
+    if (result.status === "converted") this.vacuumPaid();
+    return result;
+  }
+
+  /**
+   * The VACUUM app:purge left owed (DECISIONS #126), when disk allows; at
+   * startup, before ingest listens. undefined: none owed. Stays owed when
+   * there is no room (or it fails), so the next start tries again.
+   */
+  vacuumIfOwed(opts: { freeBytes?: (dir: string) => number } = {}): Exclude<VacuumConversion, { status: "already" }> | undefined {
+    if (this.erasureOwedSince() === undefined || this.path === ":memory:") return undefined;
+    const result = vacuumInPlace(this.db, this.path, opts);
+    if (result.status === "converted") this.vacuumPaid();
+    return result;
+  }
+
+  private vacuumPaid(): void {
+    this.db.prepare("DELETE FROM maintenance WHERE task = 'vacuum'").run();
+    this.checkpoint();
   }
 
   /** Return up to `pages` free pages to the filesystem; returns the free pages left. */

@@ -265,6 +265,19 @@ function salt(ctx: AgentContext): AgentFinding[] {
  * (catching up), it is a warning at most, until behindCriticalMs after that
  * first run finished.
  */
+/** Subjects of the retention findings that name an app (Abigaail's own findings). */
+const retentionSubjects = (name: string) => ({ events: `events:${name}`, findings: `findings:${name}` });
+
+/**
+ * Fingerprints of Abigaail's own findings that carry an app's name: app:purge
+ * deletes them with the app (DECISIONS #126). A test keeps them in step with
+ * what the Watchdog emits.
+ */
+export function appNamedFingerprints(name: string): string[] {
+  const s = retentionSubjects(name);
+  return [s.events, s.findings].map((subject) => `watchdog:retention_behind:${subject}`);
+}
+
 function retention(ctx: AgentContext): AgentFinding[] {
   const days = ctx.config.retention;
   if (!days) return [];
@@ -288,11 +301,32 @@ function retention(ctx: AgentContext): AgentFinding[] {
     });
   };
   for (const app of ctx.apps) {
-    check(`events:${app.name}`, `Raw events of ${app.name}`, ctx.store.oldestEventTs(app.id), days.events, "ABIGAAIL_RETAIN_EVENTS_DAYS");
-    check(`findings:${app.name}`, `Resolved findings of ${app.name}`, ctx.store.oldestResolvedAt(app.id), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
+    const subjects = retentionSubjects(app.name);
+    check(subjects.events, `Raw events of ${app.name}`, ctx.store.oldestEventTs(app.id), days.events, "ABIGAAIL_RETAIN_EVENTS_DAYS");
+    check(subjects.findings, `Resolved findings of ${app.name}`, ctx.store.oldestResolvedAt(app.id), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
   }
   check("findings:", "Resolved findings about Abigaail itself", ctx.store.oldestResolvedAt(null), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
   return out;
+}
+
+/**
+ * app:purge left a VACUUM owed (DECISIONS #126): until the server restarts,
+ * copies of the purged app's rows may remain in the unused space of pages
+ * still in use. Unreachable by any query, but in the file.
+ */
+function erasure(ctx: AgentContext): AgentFinding[] {
+  const since = ctx.store.erasureOwedSince();
+  if (since === undefined) return [];
+  return [{
+    signal: "erasure_pending",
+    subject: "",
+    severity: "warning",
+    summary: `An app was purged ${humanDuration(ctx.now - since)} ago; copies of some of its rows may remain in unused space inside Abigaail's database file until Abigaail restarts.`,
+    cause: "SQLite leaves copies of moved rows in unused space of pages still in use; only a VACUUM removes them, and it runs at startup so it never blocks ingest.",
+    action: "Restart Abigaail: the VACUUM runs at startup, before ingest listens. If the log says there was no room, free disk space first.",
+    evidence: { owed_since: since },
+    fact: true,
+  }];
 }
 
 /**
@@ -387,6 +421,7 @@ export const watchdog: Agent = {
     ...guarded(ctx, "ingest keys", unknownKeys),
     ...guarded(ctx, "retention", retention),
     ...guarded(ctx, "vacuum", vacuum),
+    ...guarded(ctx, "erasure", erasure),
     ...guarded(ctx, "alert delivery", alertDelivery),
   ],
 };

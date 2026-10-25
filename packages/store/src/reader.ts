@@ -835,6 +835,12 @@ export class StoreReader {
       .all() as unknown as RetentionPolicyRow[];
   }
 
+  /** Since when a VACUUM is owed after app:purge (DECISIONS #126); undefined when none is. */
+  erasureOwedSince(): number | undefined {
+    const row = this.db.prepare("SELECT since FROM maintenance WHERE task = 'vacuum'").get() as { since: number } | undefined;
+    return row ? Number(row.since) : undefined;
+  }
+
   /** PRAGMA auto_vacuum: 2 when freed pages can be returned to the filesystem (incremental). */
   autoVacuum(): number {
     return autoVacuumMode(this.db);

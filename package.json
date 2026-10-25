@@ -24,6 +24,7 @@
     "app:create": "npm run build --silent && node apps/server/dist/cli.js create",
     "app:disable": "npm run build --silent && node apps/server/dist/cli.js disable",
     "app:list": "npm run build --silent && node apps/server/dist/cli.js list",
+    "app:purge": "npm run build --silent && node apps/server/dist/cli.js purge",
     "user:create": "npm run build --silent && node apps/server/dist/user-cli.js create",
     "user:disable": "npm run build --silent && node apps/server/dist/user-cli.js disable",
     "user:reset-mfa": "npm run build --silent && node apps/server/dist/user-cli.js reset-mfa",

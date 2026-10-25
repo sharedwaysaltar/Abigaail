@@ -330,6 +330,16 @@ export const MIGRATIONS: readonly string[] = [
   ) WITHOUT ROWID;
   CREATE INDEX profiles_app_ts ON profiles (app_id, ts);
   `,
+  // 13: work owed at the next start. 'vacuum': app:purge deleted an app;
+  // copies of its cells left in the unused space of live pages by earlier
+  // page splits are beyond secure_delete, and only a VACUUM removes them
+  // (DECISIONS #126). since = when it was first owed.
+  `
+  CREATE TABLE maintenance (
+    task  TEXT PRIMARY KEY,
+    since INTEGER NOT NULL
+  );
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

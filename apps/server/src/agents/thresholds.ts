@@ -204,6 +204,16 @@ export const RETENTION = {
 
 export type RetentionPeriod = keyof typeof RETENTION.periods;
 
+/** app:purge (DECISIONS #126). */
+export const PURGE = {
+  /** Rows per delete transaction, as retention. */
+  batchRows: 1000,
+  /** Messages per alert batch (each may be rewritten). */
+  alertBatch: 100,
+  /** Pause between batches: the purge runs in its own process, so the server's writers need a gap to take the lock. */
+  pauseMs: 5,
+} as const;
+
 /**
  * Alerts (DECISIONS #95-#99). Only confirmed red findings notify (isRed in
  * the store); the alerter runs in the server's main thread and never waits

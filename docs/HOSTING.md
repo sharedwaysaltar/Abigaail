@@ -11,6 +11,12 @@ decided later (see DECISIONS #2); this list grows as chunks land.
       `ABIGAAIL_RETAIN_EVENTS_DAYS` (default 30) and erases them from the database file
       (DECISIONS #89); a backup kept longer still holds them. Keep backups of `data/` for at
       most that many days.
+- [ ] **A restore re-applies every purge.** When backups exist, restoring one must be followed
+      by `npm run app:purge` for every `app.purge` entry in the audit log newer than the backup
+      (DECISIONS #127), so a restore never brings a purged app back. Restart after purging
+      (the VACUUM that finishes erasure runs at startup).
+- [ ] **Free disk of at least 2.2 × the database** for the VACUUM at the first start after an
+      `app:purge` (DECISIONS #127); without it erasure waits and the Watchdog reports `erasure_pending`.
 - [ ] **Free disk of at least 2.2 × the database once**, at the first start after upgrading to
       chunk 7: the server converts the file to incremental vacuum (a one-time VACUUM, temp copy
       in `data/`). Without the room it skips this, keeps running and reports `vacuum_pending`;

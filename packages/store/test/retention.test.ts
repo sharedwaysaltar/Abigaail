@@ -63,7 +63,11 @@ describe("scopes", () => {
     requests(a, NOW - 40 * DAY, 2);
     requests(b, NOW - 40 * DAY, 2);
     store.disableApp("b", "test");
-    store.addIngestRejections([{ app_id: "ghost", minute: 0, status: 403, n: 1 }, { app_id: "", minute: 0, status: 401, n: 1 }]);
+    store.addIngestRejections([{ app_id: "", minute: 0, status: 401, n: 1 }]);
+    // Rows of an app_id with no apps row (from before chunk 7b dropped such writes).
+    const raw = new DatabaseSync(path);
+    raw.prepare("INSERT INTO ingest_rejections (app_id, minute, status, n) VALUES ('ghost', 0, 403, 1)").run();
+    raw.close();
     expect(store.retentionScopes("events").sort()).toEqual([a, b].sort());
     expect(store.retentionScopes("ingest_rejections")).toEqual(["", "ghost"]);
     expect(() => store.retentionScopes("apps" as never)).toThrow(RangeError);

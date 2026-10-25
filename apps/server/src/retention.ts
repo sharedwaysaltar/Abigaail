@@ -96,6 +96,22 @@ export function convertForShrinking(
   }
 }
 
+type Checkpointable = { checkpoint(opts: { noWait?: boolean }): { busy: boolean } };
+
+/**
+ * Truncate a WAL without blocking the thread: a reader holding an old
+ * snapshot (an agent mid-query, the dashboard) makes it busy, so it is tried
+ * again a little later. Still busy after RETENTION.checkpointTries: throws
+ * CheckpointBusy. Shared by retention and app:purge.
+ */
+export async function truncateWal(target: Checkpointable, what: string, retryMs: number = RETENTION.checkpointRetryMs): Promise<void> {
+  for (let i = 0; i < RETENTION.checkpointTries; i++) {
+    if (i) await sleep(retryMs);
+    if (!target.checkpoint({ noWait: true }).busy) return;
+  }
+  throw Object.assign(new Error(`${what} could not be truncated: a reader holds an old snapshot`), { name: "CheckpointBusy" });
+}
+
 export class Retention {
   private readonly store: Store;
   private readonly now: () => number;
@@ -283,18 +299,9 @@ export class Retention {
     }
   }
 
-  /**
-   * Truncate a WAL without blocking the thread: a reader holding an old
-   * snapshot (an agent mid-query, the dashboard) makes it busy, so it is tried
-   * again a little later. Still busy after RETENTION.checkpointTries: the run
-   * fails as CheckpointBusy (3 in a row raise agent_failing:retention).
-   */
-  private async truncateWal(target: { checkpoint(opts: { noWait?: boolean }): { busy: boolean } }, what: string): Promise<void> {
-    for (let i = 0; i < RETENTION.checkpointTries; i++) {
-      if (i) await sleep(this.opts.checkpointRetryMs ?? RETENTION.checkpointRetryMs);
-      if (!target.checkpoint({ noWait: true }).busy) return;
-    }
-    throw Object.assign(new Error(`${what} could not be truncated: a reader holds an old snapshot`), { name: "CheckpointBusy" });
+  /** Truncate a WAL without blocking the thread (truncateWal). Busy 3 runs in a row raises agent_failing:retention. */
+  private truncateWal(target: Checkpointable, what: string): Promise<void> {
+    return truncateWal(target, what, this.opts.checkpointRetryMs);
   }
 
   private record(startedAt: number, report: RetentionReport): void {

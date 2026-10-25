@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { evaluate, findingInputs, loadRetention, Retention, watchdog, type AgentContext } from "@abigaail/server";
-import { openStore, type App, type RunInput, type Store } from "@abigaail/store";
+import { appNamedFingerprints, evaluate, findingInputs, loadRetention, Retention, vacuumIfOwed, watchdog, type AgentContext } from "@abigaail/server";
+import { openStore, PURGE_DELETE, type App, type PurgeTable, type RunInput, type Store } from "@abigaail/store";
 
 const MIN = 60_000;
 const DAY = 86_400_000;
@@ -407,6 +407,33 @@ describe("retention", () => {
       for (let i = 1; i <= 3; i++) emit(old + i, scope, false);
     }
     expect(about(ctx({ retention })).sort()).toEqual(["retention_behind:findings::warning", "retention_behind:findings:a:warning"]);
+  });
+
+  it("after app:purge, a warning until the VACUUM at the next start has run", () => {
+    const a = appWith("a", [{ ts: now - MIN }]);
+    expect(signals().filter((s) => s.includes("erasure"))).toEqual([]);
+    store.disableApp("a", "test");
+    const tables = Object.fromEntries(PURGE_DELETE.map((t) => [t, 0])) as Record<PurgeTable, number>;
+    store.finishPurge(a.id, "a", [], "cli", { tables, deliveries_deleted: 0, deliveries_rewritten: 0, system_rows: 0 });
+    now += 2 * 60 * MIN;
+    const f = run().findings.find((x) => x.signal === "erasure_pending")!;
+    expect(f).toMatchObject({ app_id: null, severity: "warning", fact: true });
+    expect(f.summary).toMatch(/^An app was purged 2 h ago; copies of some of its rows may remain/);
+    vacuumIfOwed(store, () => {});
+    expect(signals().filter((s) => s.includes("erasure"))).toEqual([]);
+  });
+
+  it("app:purge knows the fingerprints of the findings that name an app", () => {
+    retentionRan();
+    const a = appWith("a", [{ ts: now - 40 * DAY }]);
+    const old = now - 200 * DAY;
+    store.recordRun({ agent: "health", started_at: old, finished_at: old, outcome: "ok", apps_ok: 1, apps_failed: 0 },
+      [{ app_id: a.id, agent: "health", fingerprint: "health:x:", signal: "x", severity: "warning", summary: "s", action: "a", evidence: {} }], [a.id]);
+    for (let i = 1; i <= 3; i++) store.recordRun({ agent: "health", started_at: old + i, finished_at: old + i, outcome: "ok", apps_ok: 1, apps_failed: 0 }, [], [a.id]);
+    const named = findingInputs("watchdog", run(ctx({ retention })))
+      .filter((f) => f.app_id === null && f.summary.includes(" of a "))
+      .map((f) => f.fingerprint);
+    expect(named.sort()).toEqual(appNamedFingerprints("a").sort());
   });
 
   it("at startup with old data and a lowered period: nothing before retention's first run finishes, nothing after it caught up", async () => {
