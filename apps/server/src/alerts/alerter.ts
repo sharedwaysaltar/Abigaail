@@ -320,10 +320,29 @@ export class Alerter {
     });
   }
 
+  /**
+   * One send. The message is read again from the database first: one deleted
+   * by app:purge is dropped, and one a purge rewrote goes out as rewritten, so
+   * a message queued in memory never names a purged app (DECISIONS #126).
+   */
   private async attempt(lane: Lane, d: PendingDelivery): Promise<void> {
+    let payload: string | undefined;
+    try {
+      payload = this.store.payloadToSend(d.id);
+    } catch (err) {
+      // Not knowing what the message says now, send nothing; it is tried again.
+      const retryAt = this.now() + this.limits.retryDelaysMs[0]!;
+      this.log(`alerts: could not read a ${d.channel} message (${errorClass(err)}); trying again later`);
+      this.enqueue(lane, { ...d, next_attempt_at: retryAt });
+      return;
+    }
+    if (payload === undefined) {
+      this.log(`alerts: ${d.channel} message dropped (deleted or no longer pending)`);
+      return;
+    }
     let result: SendResult;
     try {
-      result = await lane.channel.send(JSON.parse(d.payload) as AlertMessage);
+      result = await lane.channel.send(JSON.parse(payload) as AlertMessage);
     } catch (err) {
       result = { ok: false, error: errorClass(err) };
     }
@@ -344,7 +363,7 @@ export class Alerter {
     const why = `${result.error ?? "Error"}${result.code !== undefined ? ` ${result.code}` : ""}`;
     if (retryAt !== undefined) {
       this.log(`alerts: ${d.channel} attempt ${attempts} failed (${why}); retrying in ${Math.round((retryAt - this.now()) / 1000)} s`);
-      this.enqueue(lane, { ...d, attempts, next_attempt_at: retryAt });
+      this.enqueue(lane, { ...d, payload, attempts, next_attempt_at: retryAt });
     } else {
       this.log(`alerts: ${d.channel} message given up after ${attempts} attempts (${why})`);
     }

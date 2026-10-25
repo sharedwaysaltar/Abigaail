@@ -1,4 +1,5 @@
-// App administration: `npm run app:create -- <name>`, `app:disable -- <name>`, `app:list`.
+// App administration: `npm run app:create -- <name>`, `app:disable -- <name>`, `app:list`,
+// `app:purge -- <name> [--dry-run]` (purge.ts).
 // Every change is written to the audit log with actor "cli".
 // `npm run events:tail -- <name> [n]` prints recent events (read-only, not audited).
 // `npm run findings -- <name>` prints the app's status and open findings.
@@ -9,6 +10,8 @@ import { Runner } from "./agents/runner.js";
 import { Retention } from "./retention.js";
 import { FINDINGS } from "./agents/thresholds.js";
 import { loadConfig } from "./config.js";
+import { prompt } from "./prompt.js";
+import { runPurgeCommand } from "./purge.js";
 
 const [command, name, countArg] = process.argv.slice(2);
 const config = loadConfig();
@@ -52,6 +55,25 @@ async function main(): Promise<void> {
       if (!name) throw new Error("usage: npm run app:disable -- <name>");
       if (!store.disableApp(name, "cli")) throw new Error(`no enabled app named "${name}"`);
       console.log(`Disabled "${name}". Its ingest key is revoked; ingest now returns 403.`);
+      break;
+    }
+    case "purge": {
+      // Once the name is confirmed, Ctrl-C stops the purge between batches (audited); running it again resumes.
+      const stop = new AbortController();
+      const onSigint = () => stop.abort();
+      try {
+        process.exitCode = await runPurgeCommand(process.argv.slice(3), {
+          store,
+          ask: (q) => prompt(q, false),
+          print: (line) => console.log(line),
+          armStop: () => {
+            process.once("SIGINT", onSigint);
+            return stop.signal;
+          },
+        });
+      } finally {
+        process.off("SIGINT", onSigint);
+      }
       break;
     }
     case "list": {
@@ -109,7 +131,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      throw new Error("usage: cli.js create <name> | disable <name> | list | events <name> [count] | findings <name> | agents-once");
+      throw new Error("usage: cli.js create <name> | disable <name> | purge <name> [--dry-run] | list | events <name> [count] | findings <name> | agents-once");
   }
 }
 

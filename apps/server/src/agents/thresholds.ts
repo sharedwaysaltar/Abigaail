@@ -200,9 +200,21 @@ export const RETENTION = {
   behindWarnMs: 6 * HOUR,
   /** ...and critical after this long. */
   behindCriticalMs: 2 * DAY,
+  /** The weekly VACUUM (DECISIONS #129) is overdue past a week and an hour. */
+  vacuumOverdueMs: 7 * DAY + HOUR,
 } as const;
 
 export type RetentionPeriod = keyof typeof RETENTION.periods;
+
+/** app:purge (DECISIONS #126). */
+export const PURGE = {
+  /** Rows per delete transaction, as retention. */
+  batchRows: 1000,
+  /** Messages per alert batch (each may be rewritten). */
+  alertBatch: 100,
+  /** Pause between batches: the purge runs in its own process, so the server's writers need a gap to take the lock. */
+  pauseMs: 5,
+} as const;
 
 /**
  * Alerts (DECISIONS #95-#99). Only confirmed red findings notify (isRed in

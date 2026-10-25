@@ -48,6 +48,7 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
 | `npm run dashboard` / `npm run dashboard:dev` | Build and start the dashboard on http://localhost:4319 (needs `apps/dashboard/.env`, see `.env.example`) |
 | `npm run user:create -- <name>` / `user:disable` / `user:reset-mfa` / `user:unlock` | Dashboard user admin (audited; needs `ABIGAAIL_DASHBOARD_SECRET`) |
 | `npm run app:create -- <name>` / `app:disable` / `app:list` | App admin CLI (audited) |
+| `npm run app:purge -- <name> [--dry-run]` | Delete every row of a disabled app (audited; VACUUM at next server start) |
 | `npm run events:tail -- <name> [n]` | Print an app's recent events (read-only) |
 | `npm run findings -- <name>` | Print an app's status and open findings, plus Abigaail's own |
 | `npm run agents:once` | Run retention, the rollup and every agent once now, then print findings |
@@ -81,7 +82,10 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
   file (`src/salt.ts`, never in the DB), admin CLI. Hosting requirements: docs/HOSTING.md.
   `src/rescrub.ts`: scrubs every message again before storing (the app's known hosts), counts changes in `scrub_mismatches`.
   `src/live.ts`: the Live feed (SSE, 127.0.0.1 only, bearer token, bounded; `LIVE` holds its limits).
-  `src/retention.ts`: hourly deletion past each period (`RETENTION` in `agents/thresholds.ts`), runs even with
+  `src/purge.ts`: `app:purge` (batched, resumable; `PURGE_TABLES` in the store lists every app_id table;
+  `vacuumIfOwed` at startup finishes erasure).
+  `src/retention.ts`: hourly deletion past each period, then the weekly full VACUUM at the quietest hour
+  (`weeklyVacuumSlot`; `RETENTION` in `agents/thresholds.ts`), runs even with
   agents off; erasure helpers (secure_delete, incremental vacuum, WAL truncate) are `packages/store/src/vacuum.ts`.
   What it may carry is `toLiveEvent` / `LIVE_FIELDS` in `packages/store/src/live.ts`.
   `src/alerts/`: the alerter (`alerter.ts`: sweep, dedup, cooldown, bounded sender), `channels.ts` (webhook, nodemailer),

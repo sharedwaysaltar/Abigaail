@@ -96,8 +96,8 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
   const now = Date.now();
   const all = r.listApps();
   const chosen: App | undefined = q.app ? all.find((a) => a.name === q.app) : undefined;
-  // One app at a time: every read is scoped by app_id.
-  const groups = (chosen ? [chosen] : all).map((app) => ({
+  // One app at a time: every read is scoped by app_id. An unknown name (a purged app) shows none.
+  const groups = (chosen ? [chosen] : q.app ? [] : all).map((app) => ({
     app,
     status: r.appStatus(app.id, { now, freshMs: STATUS_FRESH_MS }).status,
     findings: findingsFor(r, app.id, { state, now }),
@@ -106,7 +106,7 @@ export default async function FindingsPage({ searchParams }: { searchParams: Pro
   groups.sort((a, b) => RANK[a.status] - RANK[b.status] || a.app.name.localeCompare(b.app.name));
   const withFindings = groups.filter((g) => g.findings.length);
   const quiet = groups.filter((g) => !g.findings.length);
-  const own = state === "open" && !chosen ? systemFindingsView(r) : [];
+  const own = state === "open" && !q.app ? systemFindingsView(r) : [];
   const ownAlerts = own.length ? alertsByFinding(r, null, now) : new Map<number, AlertItemRow[]>();
   const link = (over: { app?: string | null; state?: string }) => {
     const p = new URLSearchParams();

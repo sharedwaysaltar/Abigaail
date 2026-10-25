@@ -282,7 +282,11 @@ hidden. The defaults, each changeable on the server within a safe minimum:
 | Dashboard sessions | until they expire (2 h idle, 12 h at most) | none | |
 
 Apps and their release names are kept. The visitor-ID secret is replaced at midnight UTC
-and the old one is erased. The dashboard's **Agents** page lists the periods in force
+and the old one is erased. **Deleted data is erased from the file within 7 days:** each
+deletion zeroes the rows at once, and a weekly VACUUM at the quietest hour (from the hourly
+traffic of all apps) rebuilds the database file, so no copy SQLite left in unused space
+survives it. Ingest pauses for the VACUUM's duration (logged; about 2 s per 300 MB measured);
+the SDK's requests wait and are sent again if they time out, so no event is lost. The dashboard's **Agents** page lists the periods in force
 under "Data kept", and each app's page shows its oldest stored event.
 
 Bots (crawlers, AI crawlers, scripts such as `curl`) and scanner probes are recorded but
@@ -322,6 +326,16 @@ printed (or create a new app); many requests with unknown keys also show up in
   answers 403, the SDK backs off and keeps the app running normally. There is no
   re-enable: create a new app and key to reconnect.
 - **For good:** remove the `init` call or `instrumentation.ts` and uninstall the packages.
+- **Delete everything Abigaail stored about an app** (for example on a deletion request):
+  disable it first, then `npm run app:purge -- my-app`. It prints what it will delete, asks
+  you to type the name again, and deletes the app's events, profiles, rollups, findings,
+  alert states and refusal counts in small batches while the server keeps running (add
+  `--dry-run` to see the counts only). If it is interrupted (Ctrl-C), run it again: it
+  resumes, and the audit log reports the totals over every run. Then **restart the server**
+  to erase the last copies from the database file at once (a VACUUM at startup); otherwise
+  the weekly VACUUM does it within 7 days. The audit log
+  keeps that the app existed and was purged (counts only). **Alerts already delivered** to
+  Slack, Discord, ntfy or email are outside Abigaail and cannot be recalled; delete them there.
 
 The SDK never blocks or slows your app, with or without Abigaail: if the server is down,
 events are dropped from a small fixed-size queue and the SDK retries later.
@@ -485,6 +499,7 @@ the webhook's; link-local and metadata addresses are always refused.
 | `npm run dev:server` | Build and start the server (ingest + agents) |
 | `npm run app:create -- <name>` | Register an app and print its ingest key (shown once) |
 | `npm run app:disable -- <name>` | Revoke an app's key |
+| `npm run app:purge -- <name> [--dry-run]` | Delete every row of a disabled app (section 6) |
 | `npm run app:list` | Apps, their state and last event |
 | `npm run events:tail -- <name> [n]` | An app's latest events |
 | `npm run findings -- <name>` | An app's status and open findings |

@@ -8,6 +8,7 @@ import { makeChannels } from "./alerts/channels.js";
 import { Heartbeat } from "./alerts/heartbeat.js";
 import { loadConfig, type Config } from "./config.js";
 import { LIVE, LiveHub, startLive } from "./live.js";
+import { vacuumIfOwed } from "./purge.js";
 import { convertForShrinking, Retention } from "./retention.js";
 import { openSaltFile, type SaltFile } from "./salt.js";
 import { createServer } from "./server.js";
@@ -33,6 +34,8 @@ try {
 const store = openStore(config.dbPath);
 // One-time switch to incremental vacuum, before ingest listens and before any agent worker starts.
 convertForShrinking(store, "database", log);
+// The VACUUM an app:purge left owed (DECISIONS #126), also before ingest listens.
+vacuumIfOwed(store, log);
 if (existsSync(config.authDbPath)) {
   const auth = openAuthStore(config.authDbPath);
   convertForShrinking(auth, "auth database", log);

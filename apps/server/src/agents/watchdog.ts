@@ -265,6 +265,19 @@ function salt(ctx: AgentContext): AgentFinding[] {
  * (catching up), it is a warning at most, until behindCriticalMs after that
  * first run finished.
  */
+/** Subjects of the retention findings that name an app (Abigaail's own findings). */
+const retentionSubjects = (name: string) => ({ events: `events:${name}`, findings: `findings:${name}` });
+
+/**
+ * Fingerprints of Abigaail's own findings that carry an app's name: app:purge
+ * deletes them with the app (DECISIONS #126). A test keeps them in step with
+ * what the Watchdog emits.
+ */
+export function appNamedFingerprints(name: string): string[] {
+  const s = retentionSubjects(name);
+  return [s.events, s.findings].map((subject) => `watchdog:retention_behind:${subject}`);
+}
+
 function retention(ctx: AgentContext): AgentFinding[] {
   const days = ctx.config.retention;
   if (!days) return [];
@@ -288,11 +301,67 @@ function retention(ctx: AgentContext): AgentFinding[] {
     });
   };
   for (const app of ctx.apps) {
-    check(`events:${app.name}`, `Raw events of ${app.name}`, ctx.store.oldestEventTs(app.id), days.events, "ABIGAAIL_RETAIN_EVENTS_DAYS");
-    check(`findings:${app.name}`, `Resolved findings of ${app.name}`, ctx.store.oldestResolvedAt(app.id), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
+    const subjects = retentionSubjects(app.name);
+    check(subjects.events, `Raw events of ${app.name}`, ctx.store.oldestEventTs(app.id), days.events, "ABIGAAIL_RETAIN_EVENTS_DAYS");
+    check(subjects.findings, `Resolved findings of ${app.name}`, ctx.store.oldestResolvedAt(app.id), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
   }
   check("findings:", "Resolved findings about Abigaail itself", ctx.store.oldestResolvedAt(null), days.findings, "ABIGAAIL_RETAIN_FINDINGS_DAYS");
   return out;
+}
+
+/**
+ * app:purge left a VACUUM owed (DECISIONS #126): until the server restarts,
+ * copies of the purged app's rows may remain in the unused space of pages
+ * still in use. Unreachable by any query, but in the file.
+ */
+function erasure(ctx: AgentContext): AgentFinding[] {
+  const out = [...weeklyVacuum(ctx)];
+  const since = ctx.store.erasureOwedSince();
+  if (since === undefined) return out;
+  return [...out, {
+    signal: "erasure_pending",
+    subject: "",
+    severity: "warning",
+    summary: `An app was purged ${humanDuration(ctx.now - since)} ago; copies of some of its rows may remain in unused space inside Abigaail's database file until the next VACUUM.`,
+    cause: "SQLite leaves copies of moved rows in unused space of pages still in use; only a VACUUM removes them. It runs at startup, and weekly at the quietest hour.",
+    action: "Restart Abigaail to erase them now (the VACUUM runs before ingest listens), or wait for the weekly VACUUM. If the log says there was no room, free disk space first.",
+    evidence: { owed_since: since },
+    fact: true,
+  }];
+}
+
+/**
+ * The weekly VACUUM (DECISIONS #129) is what makes deleted data leave the file
+ * within 7 days: skipped for lack of disk, or not run for over 7 days (the
+ * server was down at its hour, or it keeps failing), deleted data may stay in
+ * the file's unused space.
+ */
+function weeklyVacuum(ctx: AgentContext): AgentFinding[] {
+  const noRoom = ctx.store.vacuumNoRoomSince();
+  if (noRoom !== undefined) {
+    return [{
+      signal: "vacuum_skipped",
+      subject: "",
+      severity: "warning",
+      summary: `The weekly VACUUM has been skipped for lack of disk for ${humanDuration(ctx.now - noRoom)}: data deleted since then may remain in unused space inside Abigaail's database file.`,
+      cause: `A VACUUM needs about ${VACUUM_SPACE_FACTOR} x the database file free; it is tried again every hour.`,
+      action: "Free disk space next to the database; the next retention run (within the hour) runs the VACUUM.",
+      evidence: { since: noRoom },
+      fact: true,
+    }];
+  }
+  const last = ctx.store.lastVacuumAt();
+  if (last === undefined || ctx.now - last <= RETENTION.vacuumOverdueMs) return [];
+  return [{
+    signal: "erasure_overdue",
+    subject: "",
+    severity: "warning",
+    summary: `The weekly VACUUM last ran ${humanDuration(ctx.now - last)} ago: data deleted since then may remain in unused space inside Abigaail's database file.`,
+    cause: "The VACUUM runs from the retention job at the quietest hour; the job has not reached it, or it failed.",
+    action: 'Check the server log for "weekly VACUUM" lines and the retention job on the Agents page.',
+    evidence: { last_at: last },
+    fact: true,
+  }];
 }
 
 /**
@@ -387,6 +456,7 @@ export const watchdog: Agent = {
     ...guarded(ctx, "ingest keys", unknownKeys),
     ...guarded(ctx, "retention", retention),
     ...guarded(ctx, "vacuum", vacuum),
+    ...guarded(ctx, "erasure", erasure),
     ...guarded(ctx, "alert delivery", alertDelivery),
   ],
 };

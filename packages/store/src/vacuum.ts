@@ -59,6 +59,24 @@ export function convertToIncremental(
   opts: { freeBytes?: (dir: string) => number; spaceFactor?: number } = {},
 ): VacuumConversion {
   if (autoVacuumMode(db) === AUTO_VACUUM_INCREMENTAL || path === ":memory:") return { status: "already" };
+  return vacuumInPlace(db, path, { ...opts, incremental: true });
+}
+
+/**
+ * Rebuild the whole file (VACUUM), so no deleted content survives anywhere in
+ * it, including copies of cells that page splits left in the unused space of
+ * live pages, which secure_delete never reaches. Same space rule, temp
+ * directory and checkpoint as the conversion; `incremental` also switches the
+ * file to incremental auto_vacuum. Blocks every writer while it runs: call it
+ * at startup, before ingest listens, or at the quietest hour (the weekly
+ * VACUUM, DECISIONS #129). checkpoint: false leaves the WAL truncate to the
+ * caller (one that must not wait for readers).
+ */
+export function vacuumInPlace(
+  db: DatabaseSync,
+  path: string,
+  opts: { freeBytes?: (dir: string) => number; spaceFactor?: number; incremental?: boolean; checkpoint?: boolean } = {},
+): Exclude<VacuumConversion, { status: "already" }> {
   const dir = dirname(resolve(path));
   const bytesBefore = fileBytes(path);
   const needBytes = Math.ceil((opts.spaceFactor ?? VACUUM_SPACE_FACTOR) * (bytesBefore + fileBytes(`${path}-wal`)));
@@ -66,7 +84,7 @@ export function convertToIncremental(
   if (freeBytes < needBytes) return { status: "no_space", needBytes, freeBytes };
 
   const started = performance.now();
-  db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+  if (opts.incremental) db.exec("PRAGMA auto_vacuum = INCREMENTAL");
   db.exec("PRAGMA temp_store = FILE");
   db.exec(`PRAGMA temp_store_directory = '${dir.replaceAll("'", "''")}'`);
   try {
@@ -75,7 +93,7 @@ export function convertToIncremental(
     db.exec("PRAGMA temp_store_directory = ''");
     db.exec("PRAGMA temp_store = DEFAULT");
   }
-  checkpointTruncate(db);
+  if (opts.checkpoint !== false) checkpointTruncate(db);
   return { status: "converted", ms: Math.round(performance.now() - started), bytesBefore, bytesAfter: fileBytes(path) };
 }
 

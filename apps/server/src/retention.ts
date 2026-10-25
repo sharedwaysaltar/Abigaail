@@ -9,7 +9,10 @@
 // app_ids with no apps row included), then for rows without one. Raw events
 // are rolled up before they are deleted, so baselines keep every hour.
 // Deleted bytes are erased: secure_delete zeroes them, incremental vacuum
-// returns freed pages to the filesystem and the WAL is truncated.
+// returns freed pages to the filesystem and the WAL is truncated. Copies of
+// moved rows that page splits leave in unused space of live pages are beyond
+// secure_delete: a full VACUUM once a week, at the quietest hour, removes
+// them, so deleted data is gone from the file within 7 days (DECISIONS #129).
 
 import { existsSync } from "node:fs";
 import { setTimeout as sleep, setImmediate as yieldToIngest } from "node:timers/promises";
@@ -35,6 +38,8 @@ export interface RetentionOptions {
   batchRows?: number;
   /** Wait between attempts to truncate the WAL. Default RETENTION.checkpointRetryMs. */
   checkpointRetryMs?: number;
+  /** Free disk for the weekly VACUUM's space check (tests). */
+  freeBytes?: (dir: string) => number;
 }
 
 export interface RetentionReport {
@@ -54,6 +59,32 @@ export function retentionPolicyRows(days: RetentionDays): { name: RetentionName;
     min_days: RETENTION.periods[name].minDays,
   }));
   return [...rows, { name: "sessions", keep_days: 0, min_days: 0 }];
+}
+
+const WEEK_MS = 7 * DAY_MS;
+const BASELINE_WEEKS = 4;
+
+/**
+ * The hour (its start) for the next weekly VACUUM after one at `last`: of the
+ * 24 hours whose run (at RETENTION.runAtMinute) falls in the last day before
+ * last + 7 days, the one with the least traffic in the same hour of the past
+ * 4 weeks, all apps combined (`traffic` per hour start); the earliest on a
+ * tie. With a steady week it is the same hour every week; at the latest the
+ * run is 7 days after the last one (DECISIONS #129).
+ */
+export function weeklyVacuumSlot(last: number, traffic: (hour: number) => number): number {
+  const latest = Math.floor((last + WEEK_MS - RETENTION.runAtMinute * MINUTE_MS) / HOUR_MS) * HOUR_MS;
+  let best = latest;
+  let bestTraffic = Infinity;
+  for (let h = latest - 23 * HOUR_MS; h <= latest; h += HOUR_MS) {
+    let t = 0;
+    for (let k = 1; k <= BASELINE_WEEKS; k++) t += traffic(h - k * WEEK_MS);
+    if (t < bestTraffic) {
+      best = h;
+      bestTraffic = t;
+    }
+  }
+  return best;
 }
 
 /** Start of the hour `days` before `now`: everything before it is past its period. */
@@ -96,6 +127,22 @@ export function convertForShrinking(
   }
 }
 
+type Checkpointable = { checkpoint(opts: { noWait?: boolean }): { busy: boolean } };
+
+/**
+ * Truncate a WAL without blocking the thread: a reader holding an old
+ * snapshot (an agent mid-query, the dashboard) makes it busy, so it is tried
+ * again a little later. Still busy after RETENTION.checkpointTries: throws
+ * CheckpointBusy. Shared by retention and app:purge.
+ */
+export async function truncateWal(target: Checkpointable, what: string, retryMs: number = RETENTION.checkpointRetryMs): Promise<void> {
+  for (let i = 0; i < RETENTION.checkpointTries; i++) {
+    if (i) await sleep(retryMs);
+    if (!target.checkpoint({ noWait: true }).busy) return;
+  }
+  throw Object.assign(new Error(`${what} could not be truncated: a reader holds an old snapshot`), { name: "CheckpointBusy" });
+}
+
 export class Retention {
   private readonly store: Store;
   private readonly now: () => number;
@@ -117,6 +164,7 @@ export class Retention {
     this.batchRows = opts.batchRows ?? RETENTION.batchRows;
     try {
       this.store.writeRetentionPolicy(retentionPolicyRows(opts.days));
+      this.store.startVacuumClock();
     } catch (err) {
       this.log(`retention: could not record the policy (${errorClass(err)})`);
     }
@@ -234,6 +282,11 @@ export class Retention {
       await this.truncateWal(this.store, "the WAL");
       return false;
     });
+    // Once a week, at the quietest hour: a full VACUUM, so copies left in unused space are gone too.
+    await step("weekly vacuum", async () => {
+      await this.weeklyVacuum();
+      return false;
+    });
     if (error_class === "CheckpointBusy") behind = true;
 
     const report: RetentionReport = { outcome: error_class ? "error" : "ok", ...(error_class ? { error_class } : {}), deleted, behind };
@@ -244,6 +297,58 @@ export class Retention {
       this.log(`retention: deleted ${total} rows${parts.length ? ` (${parts.join(", ")})` : ""}${behind ? "; work left, next run in 5 min" : ""}`);
     }
     return report;
+  }
+
+  /**
+   * The weekly VACUUM, when its slot has come (weeklyVacuumSlot; at once when
+   * overdue). It blocks ingest while it runs, in this thread: requests wait
+   * and the SDK retries any that time out (event ids make that safe). Without
+   * room (2.2 x the file free, #89) it is skipped, logged and reported by the
+   * Watchdog (vacuum_skipped), and tried again at every run.
+   */
+  private async weeklyVacuum(): Promise<void> {
+    const last = this.store.lastVacuumAt();
+    if (last === undefined || this.now() < weeklyVacuumSlot(last, this.trafficByHour(last))) return;
+    const noRoomBefore = this.store.vacuumNoRoomSince();
+    const freeBytes = this.opts.freeBytes ? { freeBytes: this.opts.freeBytes } : {};
+    const result = this.store.fullVacuum({ ...freeBytes, checkpoint: false });
+    if (!result) return;
+    if (result.status === "no_space") {
+      if (noRoomBefore === undefined) {
+        this.log(`retention: weekly VACUUM skipped: needs ${mb(result.needBytes)} free, ${mb(result.freeBytes)} free; tried again every hour`);
+      }
+      return;
+    }
+    this.log(`retention: weekly VACUUM in ${result.ms} ms (${mb(result.bytesBefore)} before)`);
+    await this.truncateWal(this.store, "the WAL");
+    const path = this.opts.authDbPath;
+    if (path && existsSync(path)) {
+      const auth = openAuthStore(path);
+      try {
+        const r = auth.fullVacuum({ ...freeBytes, checkpoint: false });
+        if (r.status === "no_space") this.log("retention: weekly VACUUM of the auth database skipped: not enough free disk");
+        else await this.truncateWal(auth, "the auth WAL");
+      } finally {
+        auth.close();
+      }
+    }
+  }
+
+  /**
+   * Events per hour start, all apps combined (one app_id-scoped query per
+   * app), for the 4 weeks before the hours weeklyVacuumSlot may choose.
+   */
+  private trafficByHour(last: number): (hour: number) => number {
+    const latest = Math.floor((last + WEEK_MS) / HOUR_MS) * HOUR_MS;
+    const hours: number[] = [];
+    for (let h = latest - 24 * HOUR_MS; h <= latest; h += HOUR_MS) {
+      for (let k = 1; k <= BASELINE_WEEKS; k++) hours.push(h - k * WEEK_MS);
+    }
+    const total = new Map<number, number>();
+    for (const app of this.store.listApps()) {
+      for (const [hour, n] of this.store.rolledHours(app.id, hours)) total.set(hour, (total.get(hour) ?? 0) + Number(n));
+    }
+    return (hour) => total.get(hour) ?? 0;
   }
 
   /** Repeat one bounded batch until it deletes nothing; yields between batches. True if the budget ran out first. */
@@ -283,18 +388,9 @@ export class Retention {
     }
   }
 
-  /**
-   * Truncate a WAL without blocking the thread: a reader holding an old
-   * snapshot (an agent mid-query, the dashboard) makes it busy, so it is tried
-   * again a little later. Still busy after RETENTION.checkpointTries: the run
-   * fails as CheckpointBusy (3 in a row raise agent_failing:retention).
-   */
-  private async truncateWal(target: { checkpoint(opts: { noWait?: boolean }): { busy: boolean } }, what: string): Promise<void> {
-    for (let i = 0; i < RETENTION.checkpointTries; i++) {
-      if (i) await sleep(this.opts.checkpointRetryMs ?? RETENTION.checkpointRetryMs);
-      if (!target.checkpoint({ noWait: true }).busy) return;
-    }
-    throw Object.assign(new Error(`${what} could not be truncated: a reader holds an old snapshot`), { name: "CheckpointBusy" });
+  /** Truncate a WAL without blocking the thread (truncateWal). Busy 3 runs in a row raises agent_failing:retention. */
+  private truncateWal(target: Checkpointable, what: string): Promise<void> {
+    return truncateWal(target, what, this.opts.checkpointRetryMs);
   }
 
   private record(startedAt: number, report: RetentionReport): void {

@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from "node:sqlite";
 import { openWritable } from "./store.js";
-import { checkpointTruncate, convertToIncremental, incrementalVacuum, type VacuumConversion } from "./vacuum.js";
+import { checkpointTruncate, convertToIncremental, incrementalVacuum, vacuumInPlace, type VacuumConversion } from "./vacuum.js";
 
 const AUTH_MIGRATIONS: readonly string[] = [
   `
@@ -293,6 +293,11 @@ export class AuthStore {
   /** Return up to `pages` free pages to the filesystem; returns the free pages left. */
   incrementalVacuum(pages: number): number {
     return incrementalVacuum(this.db, pages);
+  }
+
+  /** One full VACUUM, with the weekly one of the monitoring database (DECISIONS #129). */
+  fullVacuum(opts: { freeBytes?: (dir: string) => number; checkpoint?: boolean } = {}): Exclude<VacuumConversion, { status: "already" }> {
+    return vacuumInPlace(this.db, this.path, opts);
   }
 
   /** For tests and audits: every stored session hash. */

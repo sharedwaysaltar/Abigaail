@@ -1,7 +1,7 @@
 export { createServer } from "./server.js";
 export type { ServerOptions } from "./server.js";
 export { loadConfig, loadRetention } from "./config.js";
-export { convertForShrinking, hourCutoff, nextRunAt, Retention, retentionPolicyRows } from "./retention.js";
+export { convertForShrinking, hourCutoff, nextRunAt, Retention, retentionPolicyRows, truncateWal, weeklyVacuumSlot } from "./retention.js";
 export type { RetentionOptions, RetentionReport } from "./retention.js";
 export type { Config } from "./config.js";
 export { classifyUserAgent, eventTime, normaliseIp, utcDay, visitorHash, MAX_EVENT_AGE_MS } from "./derive.js";
@@ -35,3 +35,6 @@ export { Heartbeat } from "./alerts/heartbeat.js";
 export { send } from "./alerts/http.js";
 export type { SendResult } from "./alerts/http.js";
 export { addressAllowed, addressKind, checkedLookup, checkUrl, UrlRefused } from "./alerts/url.js";
+export { purgeApp, PurgeInterrupted, purgePlan, purgeTotal, runPurgeCommand, vacuumIfOwed } from "./purge.js";
+export type { PurgeCommandDeps, PurgeOptions } from "./purge.js";
+export { appNamedFingerprints } from "./agents/watchdog.js";

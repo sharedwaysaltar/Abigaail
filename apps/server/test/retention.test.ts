@@ -118,7 +118,12 @@ describe("a run", () => {
     now = T0 - 500 * DAY;
     store.rollupHour(a, hourOf(now));
     now = T0;
-    store.addIngestRejections([{ app_id: "ghost", minute: T0 - 40 * DAY, status: 403, n: 2 }, { app_id: "ghost", minute: T0 - MIN, status: 403, n: 1 }]);
+    // An app_id with no apps row (from before chunk 7b dropped such writes).
+    const raw = new DatabaseSync(path);
+    const ghost = raw.prepare("INSERT INTO ingest_rejections (app_id, minute, status, n) VALUES ('ghost', ?, 403, ?)");
+    ghost.run(T0 - 40 * DAY, 2);
+    ghost.run(T0 - MIN, 1);
+    raw.close();
     const db = new DatabaseSync(path);
     db.prepare("INSERT INTO db_size_samples (ts, bytes) VALUES (?, 1), (?, 2)").run(T0 - 100 * DAY, T0 - HOUR_MS);
     db.close();
