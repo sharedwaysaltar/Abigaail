@@ -68,12 +68,14 @@ export function convertToIncremental(
  * live pages, which secure_delete never reaches. Same space rule, temp
  * directory and checkpoint as the conversion; `incremental` also switches the
  * file to incremental auto_vacuum. Blocks every writer while it runs: call it
- * at startup, before ingest listens.
+ * at startup, before ingest listens, or at the quietest hour (the weekly
+ * VACUUM, DECISIONS #129). checkpoint: false leaves the WAL truncate to the
+ * caller (one that must not wait for readers).
  */
 export function vacuumInPlace(
   db: DatabaseSync,
   path: string,
-  opts: { freeBytes?: (dir: string) => number; spaceFactor?: number; incremental?: boolean } = {},
+  opts: { freeBytes?: (dir: string) => number; spaceFactor?: number; incremental?: boolean; checkpoint?: boolean } = {},
 ): Exclude<VacuumConversion, { status: "already" }> {
   const dir = dirname(resolve(path));
   const bytesBefore = fileBytes(path);
@@ -91,7 +93,7 @@ export function vacuumInPlace(
     db.exec("PRAGMA temp_store_directory = ''");
     db.exec("PRAGMA temp_store = DEFAULT");
   }
-  checkpointTruncate(db);
+  if (opts.checkpoint !== false) checkpointTruncate(db);
   return { status: "converted", ms: Math.round(performance.now() - started), bytesBefore, bytesAfter: fileBytes(path) };
 }
 

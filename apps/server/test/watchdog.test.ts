@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appNamedFingerprints, evaluate, findingInputs, loadRetention, Retention, vacuumIfOwed, watchdog, type AgentContext } from "@abigaail/server";
-import { openStore, PURGE_DELETE, type App, type PurgeTable, type RunInput, type Store } from "@abigaail/store";
+import { openStore, type App, type RunInput, type Store } from "@abigaail/store";
 
 const MIN = 60_000;
 const DAY = 86_400_000;
@@ -413,8 +413,7 @@ describe("retention", () => {
     const a = appWith("a", [{ ts: now - MIN }]);
     expect(signals().filter((s) => s.includes("erasure"))).toEqual([]);
     store.disableApp("a", "test");
-    const tables = Object.fromEntries(PURGE_DELETE.map((t) => [t, 0])) as Record<PurgeTable, number>;
-    store.finishPurge(a.id, "a", [], "cli", { tables, deliveries_deleted: 0, deliveries_rewritten: 0, system_rows: 0 });
+    store.finishPurge(a.id, "a", [], "cli");
     now += 2 * 60 * MIN;
     const f = run().findings.find((x) => x.signal === "erasure_pending")!;
     expect(f).toMatchObject({ app_id: null, severity: "warning", fact: true });

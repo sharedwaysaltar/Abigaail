@@ -84,7 +84,8 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
   `src/live.ts`: the Live feed (SSE, 127.0.0.1 only, bearer token, bounded; `LIVE` holds its limits).
   `src/purge.ts`: `app:purge` (batched, resumable; `PURGE_TABLES` in the store lists every app_id table;
   `vacuumIfOwed` at startup finishes erasure).
-  `src/retention.ts`: hourly deletion past each period (`RETENTION` in `agents/thresholds.ts`), runs even with
+  `src/retention.ts`: hourly deletion past each period, then the weekly full VACUUM at the quietest hour
+  (`weeklyVacuumSlot`; `RETENTION` in `agents/thresholds.ts`), runs even with
   agents off; erasure helpers (secure_delete, incremental vacuum, WAL truncate) are `packages/store/src/vacuum.ts`.
   What it may carry is `toLiveEvent` / `LIVE_FIELDS` in `packages/store/src/live.ts`.
   `src/alerts/`: the alerter (`alerter.ts`: sweep, dedup, cooldown, bounded sender), `channels.ts` (webhook, nodemailer),

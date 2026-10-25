@@ -135,7 +135,7 @@ describe("what a purge deletes", () => {
     expect(rows(b.id)).toEqual(before);
     expect(store.appByName("blog")).toBeDefined();
     // The dry-run plan is what the purge deleted.
-    expect(done).toEqual(plan);
+    expect(done).toEqual({ ...plan, resumed: 0 });
     // The mixed message stays, without shop; the shop-only one is gone.
     const left = sql<{ id: number; payload: string }>("SELECT id, payload FROM alert_deliveries ORDER BY id");
     expect(left.map((d) => d.id)).toEqual([deliveries[0]!.id]);
@@ -301,6 +301,62 @@ describe("while the server is up", () => {
     expect(Object.values(rows(a.id)).every((count) => count === 0)).toBe(true);
     expect(store.appById(a.id)).toBeUndefined();
     expect(rows(b.id)).toEqual(before);
+  });
+
+  it("Ctrl-C stops between batches, audited with the counts so far; the next run resumes and audits the totals over both runs", async () => {
+    const a = seed("shop", "a");
+    const seeded = rows(a.id);
+    store.disableApp("shop", "cli");
+    const stop = new AbortController();
+    let batches = 0;
+    const out: string[] = [];
+    const deps = (extra: Partial<PurgeCommandDeps["purge"]> = {}): PurgeCommandDeps => ({
+      store,
+      ask: async () => "shop",
+      print: (l) => out.push(l),
+      armStop: () => stop.signal,
+      purge: { pauseMs: 0, batchRows: 7, checkpointRetryMs: 1, ...extra },
+    });
+    expect(await runPurgeCommand(["shop"], deps({ onBatch: () => (++batches === 3 ? stop.abort() : undefined) }))).toBe(130);
+    expect(out.at(-1)).toBe("Interrupted: 21 rows deleted so far. Run the same command again to finish.");
+    const interrupted = store.listAudit().find((e) => e.action === "app.purge_interrupted")!;
+    expect(interrupted.app_id).toBe(a.id);
+    expect(JSON.parse(interrupted.detail!)).toMatchObject({ reason: "signal", rows: { events: 21, profiles: 0 } });
+    expect(rows(a.id).events).toBe(9);
+
+    out.length = 0;
+    const again = new AbortController();
+    expect(await runPurgeCommand(["shop"], { ...deps(), armStop: () => again.signal })).toBe(0);
+    expect(out[0]).toBe('Resuming the purge of "shop" deletes, for good:');
+    expect(out.at(-2)).toMatch(/^Purged "shop": \d+ rows deleted over 2 runs/);
+    const done = JSON.parse(store.listAudit().find((e) => e.action === "app.purge")!.detail!) as { rows: Record<string, number>; resumed: number };
+    // Every row seeded, over both runs: not only what the second run deleted.
+    expect(done.rows).toEqual(seeded);
+    expect(done.resumed).toBe(1);
+    expect(store.listAudit().filter((e) => e.app_id === a.id).map((e) => e.action))
+      .toEqual(["app.purge", "app.purge_started", "app.purge_interrupted", "app.purge_started", "app.disable", "app.create"]);
+  });
+
+  it("the totals stay exact after a run that was killed (no interruption recorded) or failed", async () => {
+    const a = seed("shop", "a");
+    const seeded = rows(a.id);
+    store.disableApp("shop", "cli");
+    // A run killed after two batches: nothing but its batches reached the database.
+    store.startPurge(a.id, "cli", purgePlan(store, a));
+    store.purgeBatch("events", a.id, 10);
+    store.purgeBatch("events", a.id, 10);
+    // A run that failed.
+    let batches = 0;
+    await expect(purge(a, { onBatch: () => {
+      if (++batches === 2) throw new Error("disk on fire");
+    } })).rejects.toThrow("disk on fire");
+    expect(JSON.parse(store.listAudit().find((e) => e.action === "app.purge_interrupted")!.detail!)).toMatchObject({ reason: "error", rows: { events: 30 } });
+    const total = await purge(a);
+    expect(total.tables).toEqual(seeded);
+    expect(total.resumed).toBe(2);
+    expect(JSON.parse(store.listAudit()[0]!.detail!)).toMatchObject({ rows: seeded, resumed: 2 });
+    // The purge's own count is gone with the app.
+    expect(sql("SELECT count(*) AS n FROM purge_progress")).toEqual([{ n: 0 }]);
   });
 
   it("each batch commits on its own: another writer gets the lock between batches without waiting", async () => {

@@ -15,8 +15,10 @@ decided later (see DECISIONS #2); this list grows as chunks land.
       by `npm run app:purge` for every `app.purge` entry in the audit log newer than the backup
       (DECISIONS #127), so a restore never brings a purged app back. Restart after purging
       (the VACUUM that finishes erasure runs at startup).
-- [ ] **Free disk of at least 2.2 × the database** for the VACUUM at the first start after an
-      `app:purge` (DECISIONS #127); without it erasure waits and the Watchdog reports `erasure_pending`.
+- [ ] **Free disk of at least 2.2 × the database, always**, for the weekly VACUUM (DECISIONS
+      #129) and the one at the first start after an `app:purge` (#127). Without it the VACUUM is
+      skipped, deleted data stays in the file's unused space past 7 days, and the Watchdog
+      reports `vacuum_skipped`.
 - [ ] **Free disk of at least 2.2 × the database once**, at the first start after upgrading to
       chunk 7: the server converts the file to incremental vacuum (a one-time VACUUM, temp copy
       in `data/`). Without the room it skips this, keeps running and reports `vacuum_pending`;

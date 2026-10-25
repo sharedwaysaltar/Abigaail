@@ -16,7 +16,7 @@
 // start, before ingest listens (vacuumIfOwed).
 
 import { setTimeout as sleep } from "node:timers/promises";
-import { PURGE_DELETE, type App, type PurgeCounts, type PurgeTable, type Store } from "@abigaail/store";
+import { PURGE_DELETE, type App, type PurgeCounts, type PurgeTable, type PurgeTotals, type Store } from "@abigaail/store";
 import { errorClass } from "./agents/evaluate.js";
 import { appNamedFingerprints } from "./agents/watchdog.js";
 import { PURGE, RETENTION } from "./agents/thresholds.js";
@@ -32,6 +32,8 @@ export interface PurgeOptions {
   log?: (msg: string) => void;
   /** Called after each batch (tests: interrupt or write in between). */
   onBatch?: (table: PurgeTable, deleted: number) => void | Promise<void>;
+  /** Stops the purge between batches (Ctrl-C). */
+  signal?: AbortSignal;
   checkpointRetryMs?: number;
 }
 
@@ -45,11 +47,22 @@ export function purgeTotal(c: PurgeCounts): number {
   return Object.values(c.tables).reduce((a, b) => a + b, 0) + c.system_rows;
 }
 
+/** Thrown by purgeApp when its signal stops it between batches. */
+export class PurgeInterrupted extends Error {
+  override name = "PurgeInterrupted";
+  constructor(readonly sofar: PurgeCounts) {
+    super("purge interrupted");
+  }
+}
+
 /**
  * Purge one disabled app. Throws AppEnabled for an enabled app (nothing is
- * deleted). Returns the rows deleted by this run.
+ * deleted). `signal` stops it between batches: the run is audited as
+ * app.purge_interrupted with what is deleted so far and PurgeInterrupted is
+ * thrown; an error is audited the same way and rethrown. Running it again
+ * resumes. Returns the totals over every run.
  */
-export async function purgeApp(o: PurgeOptions): Promise<PurgeCounts> {
+export async function purgeApp(o: PurgeOptions): Promise<PurgeTotals> {
   const { store, app } = o;
   const actor = o.actor ?? "cli";
   const batchRows = o.batchRows ?? PURGE.batchRows;
@@ -58,29 +71,34 @@ export async function purgeApp(o: PurgeOptions): Promise<PurgeCounts> {
   const fingerprints = appNamedFingerprints(app.name);
 
   store.startPurge(app.id, actor, store.purgeCounts(app.id, fingerprints));
-  const done: PurgeCounts = { tables: {} as Record<PurgeTable, number>, deliveries_deleted: 0, deliveries_rewritten: 0, system_rows: 0 };
-  for (const t of PURGE_DELETE) done.tables[t] = 0;
-
-  for (const table of PURGE_DELETE) {
-    for (;;) {
-      let n: number;
-      if (table === "alert_items") {
-        const r = store.purgeAlerts(app.id, app.name, PURGE.alertBatch);
-        n = r.items;
-        done.deliveries_deleted += r.deleted;
-        done.deliveries_rewritten += r.rewritten;
-      } else {
-        n = store.purgeBatch(table, app.id, batchRows);
+  try {
+    for (const table of PURGE_DELETE) {
+      let deleted = 0;
+      for (;;) {
+        if (o.signal?.aborted) throw new PurgeInterrupted(store.purgeProgress(app.id));
+        const n = table === "alert_items"
+          ? store.purgeAlerts(app.id, app.name, PURGE.alertBatch).items
+          : store.purgeBatch(table, app.id, batchRows);
+        deleted += n;
+        await o.onBatch?.(table, n);
+        if (n === 0) break;
+        await sleep(pauseMs);
       }
-      done.tables[table] += n;
-      await o.onBatch?.(table, n);
-      if (n === 0) break;
-      await sleep(pauseMs);
+      if (deleted) log(`${table}: ${deleted} deleted`);
     }
-    if (done.tables[table]) log(`${table}: ${done.tables[table]} deleted`);
+  } catch (err) {
+    const interrupted = err instanceof PurgeInterrupted;
+    try {
+      const sofar = store.interruptPurge(app.id, actor, interrupted ? "signal" : "error");
+      if (interrupted) throw new PurgeInterrupted(sofar);
+    } catch (auditErr) {
+      if (auditErr instanceof PurgeInterrupted) throw auditErr;
+      log(`could not record the interruption (${errorClass(auditErr)})`);
+    }
+    throw err;
   }
 
-  const total = store.finishPurge(app.id, app.name, fingerprints, actor, done);
+  const total = store.finishPurge(app.id, app.name, fingerprints, actor);
 
   // Erase: freed pages back to the filesystem, then no old page image left in the WAL.
   while (store.incrementalVacuum(RETENTION.vacuumPages) > 0) await sleep(pauseMs);
@@ -117,6 +135,8 @@ export interface PurgeCommandDeps {
   /** One line typed by the operator. */
   ask: (question: string) => Promise<string>;
   print: (line: string) => void;
+  /** Called once the name is confirmed, just before deleting: the signal Ctrl-C aborts from then on. */
+  armStop?: () => AbortSignal;
   /** Overrides for tests. */
   purge?: Partial<Omit<PurgeOptions, "store" | "app">>;
 }
@@ -165,9 +185,18 @@ export async function runPurgeCommand(args: readonly string[], deps: PurgeComman
     print("The name does not match; nothing was deleted.");
     return 1;
   }
-  const total = await purgeApp({ store, app, log: (m) => print(`  ${m}`), ...deps.purge });
-  print(`Purged "${name}": ${purgeTotal(total)} rows deleted, the app removed, the freed space erased.`);
-  print("Restart the Abigaail server to finish: it runs a VACUUM at startup, before ingest listens, to erase copies " +
-    "of the app's rows that SQLite left in the unused space of pages still in use.");
+  let total: PurgeTotals;
+  try {
+    const signal = deps.armStop?.();
+    total = await purgeApp({ store, app, log: (m) => print(`  ${m}`), ...(signal ? { signal } : {}), ...deps.purge });
+  } catch (err) {
+    if (!(err instanceof PurgeInterrupted)) throw err;
+    print(`Interrupted: ${purgeTotal(err.sofar)} rows deleted so far. Run the same command again to finish.`);
+    return 130;
+  }
+  const runs = total.resumed ? ` over ${total.resumed + 1} runs` : "";
+  print(`Purged "${name}": ${purgeTotal(total)} rows deleted${runs}, the app removed, the freed space erased.`);
+  print("Restart the Abigaail server to finish now: it runs a VACUUM at startup, before ingest listens, to erase copies " +
+    "of the app's rows that SQLite left in the unused space of pages still in use. Otherwise the weekly VACUUM does it within 7 days.");
   return 0;
 }

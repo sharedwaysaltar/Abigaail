@@ -315,16 +315,51 @@ function retention(ctx: AgentContext): AgentFinding[] {
  * still in use. Unreachable by any query, but in the file.
  */
 function erasure(ctx: AgentContext): AgentFinding[] {
+  const out = [...weeklyVacuum(ctx)];
   const since = ctx.store.erasureOwedSince();
-  if (since === undefined) return [];
-  return [{
+  if (since === undefined) return out;
+  return [...out, {
     signal: "erasure_pending",
     subject: "",
     severity: "warning",
-    summary: `An app was purged ${humanDuration(ctx.now - since)} ago; copies of some of its rows may remain in unused space inside Abigaail's database file until Abigaail restarts.`,
-    cause: "SQLite leaves copies of moved rows in unused space of pages still in use; only a VACUUM removes them, and it runs at startup so it never blocks ingest.",
-    action: "Restart Abigaail: the VACUUM runs at startup, before ingest listens. If the log says there was no room, free disk space first.",
+    summary: `An app was purged ${humanDuration(ctx.now - since)} ago; copies of some of its rows may remain in unused space inside Abigaail's database file until the next VACUUM.`,
+    cause: "SQLite leaves copies of moved rows in unused space of pages still in use; only a VACUUM removes them. It runs at startup, and weekly at the quietest hour.",
+    action: "Restart Abigaail to erase them now (the VACUUM runs before ingest listens), or wait for the weekly VACUUM. If the log says there was no room, free disk space first.",
     evidence: { owed_since: since },
+    fact: true,
+  }];
+}
+
+/**
+ * The weekly VACUUM (DECISIONS #129) is what makes deleted data leave the file
+ * within 7 days: skipped for lack of disk, or not run for over 7 days (the
+ * server was down at its hour, or it keeps failing), deleted data may stay in
+ * the file's unused space.
+ */
+function weeklyVacuum(ctx: AgentContext): AgentFinding[] {
+  const noRoom = ctx.store.vacuumNoRoomSince();
+  if (noRoom !== undefined) {
+    return [{
+      signal: "vacuum_skipped",
+      subject: "",
+      severity: "warning",
+      summary: `The weekly VACUUM has been skipped for lack of disk for ${humanDuration(ctx.now - noRoom)}: data deleted since then may remain in unused space inside Abigaail's database file.`,
+      cause: `A VACUUM needs about ${VACUUM_SPACE_FACTOR} x the database file free; it is tried again every hour.`,
+      action: "Free disk space next to the database; the next retention run (within the hour) runs the VACUUM.",
+      evidence: { since: noRoom },
+      fact: true,
+    }];
+  }
+  const last = ctx.store.lastVacuumAt();
+  if (last === undefined || ctx.now - last <= RETENTION.vacuumOverdueMs) return [];
+  return [{
+    signal: "erasure_overdue",
+    subject: "",
+    severity: "warning",
+    summary: `The weekly VACUUM last ran ${humanDuration(ctx.now - last)} ago: data deleted since then may remain in unused space inside Abigaail's database file.`,
+    cause: "The VACUUM runs from the retention job at the quietest hour; the job has not reached it, or it failed.",
+    action: 'Check the server log for "weekly VACUUM" lines and the retention job on the Agents page.',
+    evidence: { last_at: last },
     fact: true,
   }];
 }

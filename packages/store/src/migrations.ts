@@ -340,6 +340,18 @@ export const MIGRATIONS: readonly string[] = [
     since INTEGER NOT NULL
   );
   `,
+  // 14: what app:purge has deleted so far, per app and table (or message
+  // count), added to in each batch's own transaction, so the audit of a
+  // purge finished over several runs reports the totals (DECISIONS #128).
+  // Deleted by the purge's last step.
+  `
+  CREATE TABLE purge_progress (
+    app_id TEXT NOT NULL,
+    item   TEXT NOT NULL,
+    n      INTEGER NOT NULL,
+    PRIMARY KEY (app_id, item)
+  );
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

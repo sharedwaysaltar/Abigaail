@@ -170,8 +170,9 @@ const EXPIRE_SQL: Record<ExpiringTable, { app?: string; none?: string }> = {
  * Every table with an app_id column and what app:purge does with it (DECISIONS #126),
  * in purge order: raw events first (they hold the visitor hash). audit_log is
  * kept: it records admin actions, holds nothing about the app's users and
- * expires with the audit period. A test lists the schema's app_id tables and
- * fails on any missing here, so a new table cannot be forgotten.
+ * expires with the audit period. purge_progress is the purge's own count,
+ * read and deleted by its last step (#128). A test lists the schema's app_id
+ * tables and fails on any missing here, so a new table cannot be forgotten.
  */
 export const PURGE_TABLES = {
   events: "delete",
@@ -186,7 +187,8 @@ export const PURGE_TABLES = {
   ingest_rejections: "delete",
   scrub_mismatches: "delete",
   audit_log: "keep",
-} as const satisfies Record<string, "delete" | "keep">;
+  purge_progress: "last",
+} as const satisfies Record<string, "delete" | "keep" | "last">;
 
 /** Tables app:purge empties for an app. */
 export type PurgeTable = { [T in keyof typeof PURGE_TABLES]: (typeof PURGE_TABLES)[T] extends "delete" ? T : never }[keyof typeof PURGE_TABLES];
@@ -202,6 +204,11 @@ export interface PurgeCounts {
   deliveries_rewritten: number;
   /** Abigaail's own findings and alert states that name the app. */
   system_rows: number;
+}
+
+/** What app:purge audits when it finishes: the totals over every run, and how many earlier runs did not finish. */
+export interface PurgeTotals extends PurgeCounts {
+  resumed: number;
 }
 
 /**
@@ -749,7 +756,7 @@ export class Store extends StoreReader {
     };
   }
 
-  /** Start a purge: the app must exist and be disabled (so ingest cannot write). Audited with the planned counts. */
+  /** Start a purge (or a resumed one): the app must exist and be disabled (so ingest cannot write). Audited with the planned counts. */
   startPurge(appId: string, actor: string, planned: PurgeCounts): void {
     this.tx(() => {
       this.requireDisabled(appId);
@@ -762,11 +769,35 @@ export class Store extends StoreReader {
     return !!this.db.prepare("SELECT 1 FROM audit_log WHERE app_id = ? AND action = 'app.purge_started' LIMIT 1").get(appId);
   }
 
-  /** Delete up to `limit` of one app's rows from one table, in one short transaction. */
+  /**
+   * What the app's purge has deleted so far, over every run (#128). Each
+   * batch adds to it in its own transaction, so it is exact even after a
+   * run was killed.
+   */
+  purgeProgress(appId: string): PurgeCounts {
+    const rows = new Map(
+      (this.db.prepare("SELECT item, n FROM purge_progress WHERE app_id = ?").all(appId) as { item: string; n: number }[]).map((r) => [r.item, Number(r.n)]),
+    );
+    const tables = Object.fromEntries(PURGE_DELETE.map((t) => [t, rows.get(t) ?? 0])) as Record<PurgeTable, number>;
+    return { tables, deliveries_deleted: rows.get("deliveries_deleted") ?? 0, deliveries_rewritten: rows.get("deliveries_rewritten") ?? 0, system_rows: 0 };
+  }
+
+  private addProgress(appId: string, item: string, n: number): void {
+    if (!n) return;
+    this.db
+      .prepare("INSERT INTO purge_progress (app_id, item, n) VALUES (?, ?, ?) ON CONFLICT (app_id, item) DO UPDATE SET n = n + excluded.n")
+      .run(appId, item, n);
+  }
+
+  /** Delete up to `limit` of one app's rows from one table, and count them, in one short transaction. */
   purgeBatch(table: Exclude<PurgeTable, "alert_items">, appId: string, limit: number): number {
     const sql = PURGE_SQL[table];
     if (!sql) throw new RangeError("not a purge table");
-    return this.tx(() => Number(this.db.prepare(sql).run(appId, appId, limit).changes));
+    return this.tx(() => {
+      const n = Number(this.db.prepare(sql).run(appId, appId, limit).changes);
+      this.addProgress(appId, table, n);
+      return n;
+    });
   }
 
   /**
@@ -807,33 +838,50 @@ export class Store extends StoreReader {
       this.db.prepare("DELETE FROM alert_items WHERE app_id = ? AND delivery = ?").run(appId, delivery);
       out.rewritten++;
     }
+    this.addProgress(appId, "alert_items", out.items);
+    this.addProgress(appId, "deliveries_deleted", out.deleted);
+    this.addProgress(appId, "deliveries_rewritten", out.rewritten);
     return out;
+  }
+
+  /** A run stopped before the end (Ctrl-C, an error): audited with what is deleted so far, over every run. */
+  interruptPurge(appId: string, actor: string, reason: "signal" | "error"): PurgeCounts {
+    return this.tx(() => {
+      const sofar = this.purgeProgress(appId);
+      this.audit(actor, "app.purge_interrupted", appId, {
+        reason,
+        rows: sofar.tables,
+        deliveries_deleted: sofar.deliveries_deleted,
+        deliveries_rewritten: sofar.deliveries_rewritten,
+      });
+      return sofar;
+    });
   }
 
   /**
    * The last step, in one transaction: delete whatever was written for the
    * app while the batches ran, Abigaail's own findings and alert states with
    * one of `fingerprints`, then the apps row (the foreign keys refuse it if
-   * anything still points at it), and audit "app.purge" with the counts only.
-   * `done` adds this step's counts to the batches'. Returns the totals.
+   * anything still points at it), and audit "app.purge" with the totals over
+   * every run (from purge_progress, then deleted) and how many earlier runs
+   * did not finish. Counts only. Returns the totals.
    */
-  finishPurge(appId: string, name: string, fingerprints: readonly string[], actor: string, done: PurgeCounts): PurgeCounts {
+  finishPurge(appId: string, name: string, fingerprints: readonly string[], actor: string): PurgeTotals {
     return this.tx(() => {
       this.requireDisabled(appId);
-      const total: PurgeCounts = { ...done, tables: { ...done.tables } };
       for (const t of PURGE_DELETE) {
         if (t === "alert_items") continue;
-        for (let n; (n = Number(this.db.prepare(PURGE_SQL[t]).run(appId, appId, 10_000).changes)); ) total.tables[t] += n;
+        for (let n; (n = Number(this.db.prepare(PURGE_SQL[t]).run(appId, appId, 10_000).changes)); ) this.addProgress(appId, t, n);
       }
-      for (let r; (r = this.purgeAlertsIn(appId, name, 1_000)).items; ) {
-        total.tables.alert_items += r.items;
-        total.deliveries_deleted += r.deleted;
-        total.deliveries_rewritten += r.rewritten;
-      }
+      while (this.purgeAlertsIn(appId, name, 1_000).items);
+      let system_rows = 0;
       for (const fp of fingerprints) {
-        total.system_rows += Number(this.db.prepare("DELETE FROM findings WHERE app_id IS NULL AND fingerprint = ?").run(fp).changes);
-        total.system_rows += Number(this.db.prepare("DELETE FROM alert_state WHERE app_id IS NULL AND fingerprint = ?").run(fp).changes);
+        system_rows += Number(this.db.prepare("DELETE FROM findings WHERE app_id IS NULL AND fingerprint = ?").run(fp).changes);
+        system_rows += Number(this.db.prepare("DELETE FROM alert_state WHERE app_id IS NULL AND fingerprint = ?").run(fp).changes);
       }
+      const runs = Number((this.db.prepare("SELECT count(*) AS n FROM audit_log WHERE app_id = ? AND action = 'app.purge_started'").get(appId) as { n: number }).n);
+      const total: PurgeTotals = { ...this.purgeProgress(appId), system_rows, resumed: Math.max(0, runs - 1) };
+      this.db.prepare("DELETE FROM purge_progress WHERE app_id = ?").run(appId);
       this.db.prepare("DELETE FROM apps WHERE id = ?").run(appId);
       // Copies of its cells may remain in the unused space of live pages: a VACUUM at the next start removes them.
       this.db.prepare("INSERT INTO maintenance (task, since) VALUES ('vacuum', ?) ON CONFLICT (task) DO NOTHING").run(this.now());
@@ -842,6 +890,7 @@ export class Store extends StoreReader {
         deliveries_deleted: total.deliveries_deleted,
         deliveries_rewritten: total.deliveries_rewritten,
         system_rows: total.system_rows,
+        resumed: total.resumed,
       });
       return total;
     });
@@ -969,28 +1018,50 @@ export class Store extends StoreReader {
     return checkpointTruncate(this.db, opts);
   }
 
-  /** One-time switch to incremental auto_vacuum when disk allows (see vacuum.ts). Its VACUUM also pays an owed one. */
+  /** One-time switch to incremental auto_vacuum when disk allows (see vacuum.ts). Its VACUUM counts as a full one. */
   convertToIncremental(opts: { freeBytes?: (dir: string) => number } = {}): VacuumConversion {
     const result = convertToIncremental(this.db, this.path, opts);
-    if (result.status === "converted") this.vacuumPaid();
+    if (result.status === "converted") this.recordVacuum();
     return result;
   }
 
   /**
-   * The VACUUM app:purge left owed (DECISIONS #126), when disk allows; at
+   * The VACUUM app:purge left owed (DECISIONS #127), when disk allows; at
    * startup, before ingest listens. undefined: none owed. Stays owed when
    * there is no room (or it fails), so the next start tries again.
    */
   vacuumIfOwed(opts: { freeBytes?: (dir: string) => number } = {}): Exclude<VacuumConversion, { status: "already" }> | undefined {
-    if (this.erasureOwedSince() === undefined || this.path === ":memory:") return undefined;
+    if (this.erasureOwedSince() === undefined) return undefined;
+    return this.fullVacuum(opts);
+  }
+
+  /**
+   * One full VACUUM (DECISIONS #129): rebuilds the file, so nothing deleted
+   * survives anywhere in it. Blocks every writer while it runs. Records when
+   * it ran (the weekly schedule counts from it; an owed one is paid), or that
+   * there was no room. checkpoint: false leaves the WAL truncate to the caller.
+   */
+  fullVacuum(opts: { freeBytes?: (dir: string) => number; checkpoint?: boolean } = {}): Exclude<VacuumConversion, { status: "already" }> | undefined {
+    if (this.path === ":memory:") return undefined;
     const result = vacuumInPlace(this.db, this.path, opts);
-    if (result.status === "converted") this.vacuumPaid();
+    if (result.status === "converted") {
+      this.recordVacuum();
+    } else {
+      this.db.prepare("INSERT INTO maintenance (task, since) VALUES ('vacuum_no_room', ?) ON CONFLICT (task) DO NOTHING").run(this.now());
+    }
     return result;
   }
 
-  private vacuumPaid(): void {
-    this.db.prepare("DELETE FROM maintenance WHERE task = 'vacuum'").run();
-    this.checkpoint();
+  private recordVacuum(): void {
+    this.tx(() => {
+      this.db.prepare("DELETE FROM maintenance WHERE task IN ('vacuum', 'vacuum_no_room')").run();
+      this.db.prepare("INSERT INTO maintenance (task, since) VALUES ('vacuum_last', ?) ON CONFLICT (task) DO UPDATE SET since = excluded.since").run(this.now());
+    });
+  }
+
+  /** Start the weekly VACUUM's clock if it has none (the first one is due within 7 days). */
+  startVacuumClock(): void {
+    this.db.prepare("INSERT INTO maintenance (task, since) VALUES ('vacuum_last', ?) ON CONFLICT (task) DO NOTHING").run(this.now());
   }
 
   /** Return up to `pages` free pages to the filesystem; returns the free pages left. */

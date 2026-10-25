@@ -835,9 +835,23 @@ export class StoreReader {
       .all() as unknown as RetentionPolicyRow[];
   }
 
-  /** Since when a VACUUM is owed after app:purge (DECISIONS #126); undefined when none is. */
+  /** Since when a VACUUM is owed after app:purge (DECISIONS #127); undefined when none is. */
   erasureOwedSince(): number | undefined {
-    const row = this.db.prepare("SELECT since FROM maintenance WHERE task = 'vacuum'").get() as { since: number } | undefined;
+    return this.maintenanceSince("vacuum");
+  }
+
+  /** When the last full VACUUM ran (or the weekly clock started); undefined before retention first ran (DECISIONS #129). */
+  lastVacuumAt(): number | undefined {
+    return this.maintenanceSince("vacuum_last");
+  }
+
+  /** Since when full VACUUMs have been skipped for lack of disk; undefined when the last one ran. */
+  vacuumNoRoomSince(): number | undefined {
+    return this.maintenanceSince("vacuum_no_room");
+  }
+
+  private maintenanceSince(task: string): number | undefined {
+    const row = this.db.prepare("SELECT since FROM maintenance WHERE task = ?").get(task) as { since: number } | undefined;
     return row ? Number(row.since) : undefined;
   }
 

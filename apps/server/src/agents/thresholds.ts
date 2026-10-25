@@ -200,6 +200,8 @@ export const RETENTION = {
   behindWarnMs: 6 * HOUR,
   /** ...and critical after this long. */
   behindCriticalMs: 2 * DAY,
+  /** The weekly VACUUM (DECISIONS #129) is overdue past a week and an hour. */
+  vacuumOverdueMs: 7 * DAY + HOUR,
 } as const;
 
 export type RetentionPeriod = keyof typeof RETENTION.periods;

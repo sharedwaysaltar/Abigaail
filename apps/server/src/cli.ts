@@ -58,11 +58,22 @@ async function main(): Promise<void> {
       break;
     }
     case "purge": {
-      process.exitCode = await runPurgeCommand(process.argv.slice(3), {
-        store,
-        ask: (q) => prompt(q, false),
-        print: (line) => console.log(line),
-      });
+      // Once the name is confirmed, Ctrl-C stops the purge between batches (audited); running it again resumes.
+      const stop = new AbortController();
+      const onSigint = () => stop.abort();
+      try {
+        process.exitCode = await runPurgeCommand(process.argv.slice(3), {
+          store,
+          ask: (q) => prompt(q, false),
+          print: (line) => console.log(line),
+          armStop: () => {
+            process.once("SIGINT", onSigint);
+            return stop.signal;
+          },
+        });
+      } finally {
+        process.off("SIGINT", onSigint);
+      }
       break;
     }
     case "list": {

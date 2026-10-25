@@ -47,8 +47,9 @@ describe("every table with an app_id is covered by the purge", () => {
     expect(tables.sort()).toEqual(Object.keys(PURGE_TABLES).sort());
   });
 
-  it("only audit_log is kept", () => {
+  it("only audit_log is kept; the purge's own progress goes last", () => {
     expect(Object.entries(PURGE_TABLES).filter(([, what]) => what === "keep").map(([t]) => t)).toEqual(["audit_log"]);
+    expect(Object.entries(PURGE_TABLES).filter(([, what]) => what === "last").map(([t]) => t)).toEqual(["purge_progress"]);
   });
 });
 
@@ -57,7 +58,7 @@ describe("a purge needs a disabled app", () => {
     const a = store.createApp("a", "test").app.id;
     store.addIngestRejections([{ app_id: a, minute: T0, status: 403, n: 1 }]);
     expect(() => store.startPurge(a, "cli", empty())).toThrow(/not disabled/);
-    expect(() => store.finishPurge(a, "a", [], "cli", empty())).toThrow(/not disabled/);
+    expect(() => store.finishPurge(a, "a", [], "cli")).toThrow(/not disabled/);
     expect(store.appById(a)).toBeDefined();
     expect(count("ingest_rejections", a)).toBe(1);
     expect(store.listAudit().map((e) => e.action)).toEqual(["app.create"]);
@@ -67,14 +68,14 @@ describe("a purge needs a disabled app", () => {
     const a = store.createApp("a", "test").app.id;
     store.addIngestRejections([{ app_id: a, minute: T0, status: 403, n: 2 }]);
     store.disableApp("a", "test");
-    const total = store.finishPurge(a, "a", [], "cli", empty());
+    const total = store.finishPurge(a, "a", [], "cli");
     expect(total.tables.ingest_rejections).toBe(1);
     expect(store.appById(a)).toBeUndefined();
     expect(count("ingest_rejections", a)).toBe(0);
     const entry = store.listAudit()[0]!;
     expect(entry).toMatchObject({ actor: "cli", action: "app.purge", app_id: a });
     const detail = JSON.parse(entry.detail!) as Record<string, unknown>;
-    expect(Object.keys(detail).sort()).toEqual(["deliveries_deleted", "deliveries_rewritten", "rows", "system_rows"]);
+    expect(Object.keys(detail).sort()).toEqual(["deliveries_deleted", "deliveries_rewritten", "resumed", "rows", "system_rows"]);
     for (const n of Object.values(detail.rows as Record<string, unknown>)) expect(typeof n).toBe("number");
   });
 });
@@ -86,7 +87,7 @@ describe("writes for a purged app are dropped", () => {
     a = store.createApp("a", "test").app.id;
     b = store.createApp("b", "test").app.id;
     store.disableApp("a", "test");
-    store.finishPurge(a, "a", [], "cli", empty());
+    store.finishPurge(a, "a", [], "cli");
   });
 
   const finding = (app_id: string) => ({ app_id, agent: "health", fingerprint: "health:x:", signal: "x", severity: "warning" as const, summary: "s", action: "a", evidence: {} });

@@ -1,6 +1,6 @@
 export { openReadOnly, openStore, Store, APP_NAME_RE, PURGE_DELETE, PURGE_TABLES } from "./store.js";
 export type {
-  AuditEntry, DeliveryInput, ExpiringTable, FindingInput, IngestBatch, PendingDelivery, PurgeCounts, PurgeTable, RecordRunOptions, RunInput, ScopedTable, StoreOptions,
+  AuditEntry, DeliveryInput, ExpiringTable, FindingInput, IngestBatch, PendingDelivery, PurgeCounts, PurgeTable, PurgeTotals, RecordRunOptions, RunInput, ScopedTable, StoreOptions,
 } from "./store.js";
 export { HOUR_MS, isRed, MATTERS_SQL, mattersSql, percentile, StoreReader } from "./reader.js";
 export type {
