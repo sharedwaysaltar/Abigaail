@@ -17,8 +17,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BLOCK_DOCS_MS, DEMO_FRAMES, DEPENDENCY_MS, NODE_MS, NORMAL_FAULTS, REPO_ROOT, SLOW_SEARCH_MS } from "@abigaail/sim";
 
-const ok = { dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0 };
-const failing = { type: "faults", faults: { dependency: "failing", slowSearch: true, userErrorShare: 0.5, leakPerRequest: 2560, leakPerSecond: 448, blockDocs: true, oomKillMb: 96 } };
+const ok = { dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0, checkoutBug: 0, searchExtraMs: 0, crashAfterMs: 0 };
+const failing = { type: "faults", faults: { dependency: "failing", slowSearch: true, userErrorShare: 0.5, leakPerRequest: 2560, leakPerSecond: 448, blockDocs: true, oomKillMb: 96, checkoutBug: 0.4, searchExtraMs: 110, crashAfterMs: 30_000 } };
 
 function proc(opts: { ipc: boolean; env?: Record<string, string> }) {
   const e = new EventEmitter();
@@ -59,6 +59,12 @@ describe("fault control", () => {
     { type: "faults", faults: { ...ok, leakPerSecond: 1e9 } },
     { type: "faults", faults: { ...ok, blockDocs: 1 } },
     { type: "faults", faults: { ...ok, oomKillMb: "96" } },
+    { type: "faults", faults: { ...ok, checkoutBug: 1.5 } },
+    { type: "faults", faults: { ...ok, checkoutBug: "0.4" } },
+    { type: "faults", faults: { ...ok, searchExtraMs: -1 } },
+    { type: "faults", faults: { ...ok, searchExtraMs: 60_000 } },
+    { type: "faults", faults: { ...ok, crashAfterMs: 0.5 } },
+    { type: "faults", faults: { ...ok, crashAfterMs: 1e9 } },
     { type: "faults", faults: { dependency: "ok", slowSearch: false, userErrorShare: 0 } },
     { type: "faults", faults: { ...ok, exec: "x" } },
     { type: "faults", faults: ok, extra: 1 },
@@ -74,6 +80,11 @@ describe("fault control", () => {
     // The replay's profiles name the lines the real demo's profiles do.
     const lines = readFileSync(join(REPO_ROOT, DEMO_FRAMES.renderDocs.file), "utf8").split("\n");
     for (const f of [DEMO_FRAMES.renderDocs, DEMO_FRAMES.rememberSearch]) expect(lines[f.line - 1]).toContain(`export function ${f.fn}(`);
+    // The release faults' frames are the lines that throw.
+    expect(lines[DEMO_FRAMES.applyDiscount.line - 2]).toContain("export function applyDiscount(");
+    expect(lines[DEMO_FRAMES.applyDiscount.line - 1]).toContain("cart.totals.amount");
+    expect(lines[DEMO_FRAMES.runMigrations.line - 2]).toContain("export function runMigrations(");
+    expect(lines[DEMO_FRAMES.runMigrations.line - 1]).toContain("throw new MigrationError(");
     expect(NORMAL_FAULTS).toEqual(DEMO_NORMAL);
   });
 });

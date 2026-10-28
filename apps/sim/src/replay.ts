@@ -1,10 +1,10 @@
 // Replays a run plan against a store with a simulated clock: the traffic model
 // and the demo model stand in for the demo app and its SDK (with runtime
-// signals: ready, instance, heap, blocks), and the real Health, Watchdog and
-// Resilience agents run every minute as the runner would. The tests use it to
+// signals: ready, instance, heap, blocks), and the real Health, Watchdog,
+// Resilience and Rollout Safety agents run every minute as the runner would. The tests use it to
 // pin each scenario's findings and timings without waiting hours.
 
-import { evaluate, findingInputs, health, resilience, watchdog, type Agent } from "@abigaail/server";
+import { evaluate, findingInputs, health, resilience, rollout, watchdog, type Agent } from "@abigaail/server";
 import { HOUR_MS, type Store } from "@abigaail/store";
 import { blockItem, lifecycleItem, metricItem, profileItem, requestItems, type Item } from "./events.js";
 import { BLOCK_DOCS_MS, DEMO_FRAMES, NORMAL_FAULTS, outcome, type Faults } from "./model.js";
@@ -14,7 +14,8 @@ import { FIRST_RELEASE, insertValidated } from "./seed.js";
 import { generate, MIN, NORMAL_MODE, SEC, type AppKind, type Kind, type Mode } from "./traffic.js";
 import { Tracker, storeChecks, timeline, type Problem } from "./verify.js";
 
-const AGENTS: readonly Agent[] = [health, watchdog, resilience];
+// Rollout runs last: live, the agents run side by side, so Health sees Rollout's finding from the minute before.
+const AGENTS: readonly Agent[] = [health, watchdog, resilience, rollout];
 const FLUSH_MS = 5 * SEC;
 
 /** The demo's SDK as the model sends it (runtime_v1, DECISIONS #110). */
@@ -57,6 +58,8 @@ export interface ReplayOptions {
    * stamped at an interval's end, so up to 30 s after the requests they explain.
    */
   metricsPhaseMs?: number;
+  /** The agents to run (default all four); tests leave one out to compare. */
+  agents?: readonly Agent[];
 }
 
 export interface ReplayResult {
@@ -85,6 +88,9 @@ export function replay(o: ReplayOptions): ReplayResult {
   let heapMb: number = M.baseHeapMb;
   let ready: { at: number; bootId: string } | undefined;
   let lastMetrics = o.start;
+  // crashAfterMs: when this process throws its uncaught error, and the crash record the next boot reads.
+  let crashAt: number | undefined;
+  let prevExit: { code: number; error_type: string; frame: { file: string; line: number; fn: string } } | undefined;
   let docsBlocks = 0;
   let bootAt = o.start;
   let blockSamples = 0;
@@ -115,6 +121,8 @@ export function replay(o: ReplayOptions): ReplayResult {
     docsBlocks = 0;
     bootAt = lastProfileSend = lastHeap = now;
     blockSamples = 0;
+    // The simulator applies the faults at every start; a failing migration throws this long after.
+    crashAt = faults.crashAfterMs ? now + faults.crashAfterMs : undefined;
   };
   /** The demo's profiles: CPU samples inside blocks (renderDocs) and the live heap by site (rememberSearch). */
   const profiles = (now: number) => {
@@ -141,6 +149,7 @@ export function replay(o: ReplayOptions): ReplayResult {
     up = false;
     buffer = [];
     ready = undefined;
+    crashAt = undefined;
     if (unexpected && supervise) restartAt = now + M.restartAfterMs;
   };
   const metrics = (now: number) => {
@@ -158,7 +167,10 @@ export function replay(o: ReplayOptions): ReplayResult {
     lastMetrics = now;
   };
   const apply = (a: Action, now: number) => {
-    if ("faults" in a) faults = { ...faults, ...a.faults };
+    if ("faults" in a) {
+      faults = { ...faults, ...a.faults };
+      if ("crashAfterMs" in a.faults) crashAt = up && faults.crashAfterMs ? now + faults.crashAfterMs : undefined;
+    }
     else if ("humans" in a) mode = { ...mode, humans: a.humans };
     else if ("bots" in a) mode = { ...mode, bots: a.bots };
     else if ("extra" in a) mode = { ...mode, extra: a.extra };
@@ -169,6 +181,7 @@ export function replay(o: ReplayOptions): ReplayResult {
       flush(now);
       up = false;
       ready = undefined;
+      crashAt = undefined;
     } else if ("start" in a) {
       if (a.start.release) release = a.start.release;
       up = true;
@@ -185,10 +198,16 @@ export function replay(o: ReplayOptions): ReplayResult {
       up = true;
       boot(now);
     }
+    if (up && crashAt !== undefined && now >= crashAt) {
+      // An uncaught error: the process exits (code 1) before its queue is sent; the crash record names it (#112).
+      prevExit = { code: 1, error_type: "MigrationError", frame: { ...DEMO_FRAMES.runMigrations } };
+      die(now, true);
+    }
     if (up) {
       if (ready && now >= ready.at) {
-        buffer.push(lifecycleItem(r, now, "ready", undefined, { ...instance, boot_id: ready.bootId, startup_ms: M.startupMs, heap_limit_mb: M.heapLimitMb }));
+        buffer.push(lifecycleItem(r, now, "ready", undefined, { ...instance, boot_id: ready.bootId, startup_ms: M.startupMs, heap_limit_mb: M.heapLimitMb, ...(prevExit ? { prev_exit: prevExit } : {}) }));
         ready = undefined;
+        prevExit = undefined;
       }
       for (const req of generate(r, o.app, now, now + SEC, mode)) {
         const out = outcome(r, o.app, req.path, faults);
@@ -226,7 +245,7 @@ export function replay(o: ReplayOptions): ReplayResult {
         for (let h = rolledThrough; h < closed; h += HOUR_MS) o.store.rollupHour(o.appId, h);
         rolledThrough = closed;
       }
-      for (const agent of AGENTS) {
+      for (const agent of o.agents ?? AGENTS) {
         const result = evaluate(agent, {
           store: o.store,
           apps: o.store.listApps(),

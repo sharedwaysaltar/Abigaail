@@ -35,6 +35,7 @@ export const SCHEDULE = {
   watchdog: { everyMs: 60_000, timeoutMs: 20_000 },
   usage: { everyMs: 15 * 60_000, timeoutMs: 60_000 },
   resilience: { everyMs: 60_000, timeoutMs: 20_000 },
+  rollout: { everyMs: 60_000, timeoutMs: 20_000 },
   /** Not an agent: the hourly rollup runs in the main thread. */
   rollup: { everyMs: 3_600_000 },
   /** Not an agent: retention runs hourly in the main thread (every 5 min while catching up). */
@@ -158,4 +159,83 @@ export const VIEWS = {
   usageTop: 5,
   /** Recent runs per agent on the Agents page. */
   agentRuns: 30,
+};
+
+/**
+ * Rollout Safety (agent 5, DECISIONS #131-#133). Shared because Health and
+ * Resilience fold into its findings and the Releases view shows its numbers.
+ */
+export const ROLLOUT = {
+  /** A release is judged for this long after it was deployed (or until the next one). */
+  judgeMs: 24 * HOUR,
+  /**
+   * Repeated looks: it is tested every minute for judgeMs, so every test is
+   * corrected for this many looks as well as for the number of tests in the
+   * run (a union bound: α / (tests × looks)).
+   */
+  looks: 1440,
+  /** Family-wise error over a release's whole judgement: for "watch", and for "recommend rollback". */
+  alphaWatch: 0.01,
+  alphaRollback: 0.001,
+  /** Nothing but a crash loop is judged in the first minutes after a deploy. */
+  minObservedMs: 10 * MIN,
+
+  // Errors per route: 5xx, and 4xx other than 401/403 (e.g. 404 on a route that used to answer).
+  /** Requests that matter on a route since the deploy before its error shares are judged. */
+  minRequests: 50,
+  minFailures: 5,
+  /** The Wilson lower bound of the new share must reach max(factor × usual, usual + floor). */
+  errorFactor: 2,
+  errorFloor: 0.02,
+  /** Usual requests in the baseline before a route's own share is used (else the app's). */
+  minBaselineRequests: 50,
+
+  // Latency per route, over the latest window (the first minutes after the deploy are cold start, Resilience's).
+  latencyWindowMs: 30 * MIN,
+  warmupMs: 5 * MIN,
+  minLatencyRequests: 30,
+  /** p95 must reach this many times the usual p95, and this much more. */
+  latencyRatio: 1.5,
+  latencyFloorMs: 100,
+  /** Under no change, this share of requests is above the usual p95. */
+  aboveUsualShare: 0.05,
+
+  // A route that went quiet.
+  quietMinExpected: 20,
+  quietShare: 0.1,
+
+  // New error types.
+  newErrorMin: 3,
+  errorHistoryMs: 7 * 24 * HOUR,
+
+  // Impact needed for "recommend rollback" (any one).
+  /** Extra failures (above the usual share) of at least this share of all requests since the deploy... */
+  excessShare: 0.05,
+  /** ...or a route carrying this share of the usual traffic... */
+  routeTrafficShare: 0.1,
+  /** ...failing for at least this share of its requests (Wilson lower bound)... */
+  routeFailShare: 0.2,
+  /** ...or as slow as Health calls critical (its latencyCriticalRatio; a test keeps them equal)... */
+  latencyRollbackRatio: 2.5,
+  /** ...or at least half of all requests slower than the app's usual p95 (Wilson lower bound). */
+  appSlowShare: 0.5,
+  /** Confidence: at least this many extra failures (or slow requests) behind a rollback. */
+  minExcess: 20,
+
+  // Before the deploy.
+  /** The previous release must have been normal for this long before the deploy for a rollback. */
+  preDeployMs: 30 * MIN,
+  /** Without hour-of-week history, compare with the previous release's own last hours (at most this long). */
+  fallbackMs: 3 * HOUR,
+
+  // Looks fine.
+  fineMinRequests: 200,
+  fineMinMs: 30 * MIN,
+
+  // Crash loops after a deploy (fold with Resilience).
+  /** The release's first crash must come this soon after the deploy. */
+  loopAfterDeployMs: 30 * MIN,
+  /** Dependency: a route's recent failures explained by one failing host (Health's foldShare). */
+  dependencyShare: 0.5,
+  dependencyWindowMs: 30 * MIN,
 };

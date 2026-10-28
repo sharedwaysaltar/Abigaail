@@ -143,7 +143,9 @@ export function crashCause(store: StoreReader, appId: string, boot: LifecycleRow
  * event is not a shutdown. Deploys (a new release) are Health's, never a crash.
  */
 export function restartVerdict(store: StoreReader, appId: string, now: number): RestartVerdict | undefined {
-  const crashes = unexpectedRestarts(store, appId, now, R.loopLongMs);
+  // Crashes before the latest deploy were the replaced release's: a rollback ends them (#133).
+  const deployedAt = Math.max(-Infinity, ...store.deploys(appId).map((d) => (d.deployed_at !== null && d.deployed_at <= now ? d.deployed_at : -Infinity)));
+  const crashes = unexpectedRestarts(store, appId, now, R.loopLongMs).filter((c) => c.ts > deployedAt);
   const recent = crashes.filter((c) => c.ts >= now - R.restartWindowMs).length;
   if (!recent) return undefined;
   const loop = recent >= R.loopShort || crashes.length >= R.loopLong;

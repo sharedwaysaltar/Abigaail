@@ -352,6 +352,19 @@ export const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (app_id, item)
   );
   `,
+  // 15: deploys (DECISIONS #130, #131). deployed_at / replaced_release: the
+  // latest boot on this release whose app's last event before it was on
+  // another release (a deploy, as Health's #54), and that release. commit_sha,
+  // previous_release, lockfile_hash: the deploy step's metadata (deploy_v1),
+  // NULL when it was not sent. Releases deployed before this migration have no
+  // deployed_at and are not judged by Rollout Safety.
+  `
+  ALTER TABLE deploys ADD COLUMN deployed_at INTEGER;
+  ALTER TABLE deploys ADD COLUMN replaced_release TEXT;
+  ALTER TABLE deploys ADD COLUMN commit_sha TEXT;
+  ALTER TABLE deploys ADD COLUMN previous_release TEXT;
+  ALTER TABLE deploys ADD COLUMN lockfile_hash TEXT;
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

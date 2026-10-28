@@ -365,6 +365,95 @@ describe("schema features announced by the server (DECISIONS #110)", () => {
   });
 });
 
+describe("held events: deploy metadata is sent once, never dropped (DECISIONS #130)", () => {
+  const deploy = (): EventInput => ({ type: "deploy", commit: "0123456789abcdef0123456789abcdef01234567", previous: "v1.4.1", lockfile: "a".repeat(64) });
+  /** A transport whose answer can change between sends. */
+  function server(answer: () => "failed" | "rejected" | { result: "ok"; features: string[] }) {
+    const batches: Batch[] = [];
+    const transport: Transport = async (b) => {
+      batches.push(b);
+      return answer();
+    };
+    return { batches, transport, sent: () => batches.flatMap((b) => b.events).filter((e) => e.type === "deploy") };
+  }
+
+  it("waits for the server to announce deploy_v1, then sends it once", async () => {
+    const s = server(() => ({ result: "ok", features: ["runtime_v1", "deploy_v1"] }));
+    const c = createClient({ ...base, transport: s.transport });
+    c.hold(deploy());
+    c.capture(req());
+    await c.flush();
+    // The first answer announced it: the next send carries it, and only once.
+    await c.flush();
+    c.capture(req());
+    await c.flush();
+    await c.flush();
+    expect(s.sent()).toHaveLength(1);
+    expect(s.batches[0]!.events.map((e) => e.type)).toEqual(["request"]);
+  });
+
+  it("is never queued: overflowing the queue before the first answer does not drop it", async () => {
+    const s = server(() => ({ result: "ok", features: ["deploy_v1"] }));
+    const c = createClient({ ...base, maxQueue: 5, transport: s.transport });
+    c.hold(deploy());
+    for (let i = 0; i < 50; i++) c.capture(req());
+    expect(c.stats().dropped).toBeGreaterThan(0);
+    await c.flush();
+    await c.flush();
+    expect(s.sent()).toHaveLength(1);
+  });
+
+  it("a failed send keeps it; it is given up only on an answer", async () => {
+    let answer: "failed" | { result: "ok"; features: string[] } = { result: "ok", features: ["deploy_v1"] };
+    const s = server(() => answer);
+    const c = createClient({ ...base, transport: s.transport, breaker: { failureThreshold: 100 } });
+    c.capture(req());
+    await c.flush();
+    c.hold(deploy());
+    answer = "failed";
+    await c.flush();
+    await c.flush();
+    answer = { result: "ok", features: ["deploy_v1"] };
+    await c.flush();
+    await c.flush();
+    // Tried three times, accepted once, never again after the 202.
+    expect(s.sent()).toHaveLength(3);
+    expect(s.batches.at(-1)!.events.some((e) => e.type === "deploy")).toBe(true);
+    c.capture(req());
+    await c.flush();
+    expect(s.sent()).toHaveLength(3);
+  });
+
+  it("an older server never gets it (counted unsupported once); it goes when the server is upgraded", async () => {
+    let features: string[] = ["runtime_v1"];
+    const s = server(() => ({ result: "ok", features }));
+    const c = createClient({ ...base, transport: s.transport });
+    c.hold(deploy());
+    for (let i = 0; i < 3; i++) {
+      c.capture(req());
+      await c.flush();
+    }
+    expect(s.sent()).toEqual([]);
+    expect(c.stats()).toMatchObject({ unsupported: 1, dropped: 0 });
+    features = ["runtime_v1", "deploy_v1"];
+    c.capture(req());
+    await c.flush();
+    await c.flush();
+    expect(s.sent()).toHaveLength(1);
+  });
+
+  it("an invalid deploy event is never held", async () => {
+    const s = server(() => ({ result: "ok", features: ["deploy_v1"] }));
+    const c = createClient({ ...base, transport: s.transport });
+    c.hold({ type: "deploy", commit: "not a sha", lockfile: "short" });
+    c.capture(req());
+    await c.flush();
+    await c.flush();
+    expect(s.sent()).toEqual([]);
+    expect(c.stats().invalid).toBe(1);
+  });
+});
+
 describe("fetchTransport reads the features from a small 202 body", () => {
   const serve = (body: string, status = 202) =>
     fetchTransport({

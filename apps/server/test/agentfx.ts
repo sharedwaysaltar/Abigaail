@@ -98,11 +98,11 @@ export class Fx {
     }]);
   }
 
-  error(ts: number, type: string, route?: string, frame?: { file: string; line: number; fn?: string }): void {
+  error(ts: number, type: string, route?: string, frame?: { file: string; line: number; fn?: string }, release?: string): void {
     this.put([{
       event: { type: "error", event_id: id(), client_ts: ts, error_type: type, handled: false, ...(route ? { route } : {}), ...(frame ? { frames: [frame] } : {}) },
       derived: { ts },
-    }]);
+    }], release);
   }
 
   metric(ts: number, name: MetricName, value: number): void {

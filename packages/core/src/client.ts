@@ -15,6 +15,8 @@ import { fetchTransport, type SendResult, type Transport } from "./transport.js"
 export const SDK_NAME = "@abigaail/core";
 /** Outbound hosts remembered for the scrubber's host rule. */
 const MAX_KNOWN_HOSTS = 500;
+/** Events held until their feature is announced (one deploy event per process). */
+const MAX_HELD = 4;
 export const SDK_VERSION = "0.1.0";
 
 export interface ClientOptions {
@@ -75,6 +77,14 @@ export interface ClientStats {
 export interface AbigaailClient {
   /** Queue an event. Synchronous, never throws, never blocks on the network. */
   capture(event: EventInput): void;
+  /**
+   * Keep an event outside the queue until the server has announced the
+   * feature it needs, then send it once (DECISIONS #130). Queue overflow and
+   * sampling never touch it, a failed send keeps it, and it is given up only
+   * when the server answers 202 (sent) or 400 (it will never take it). For a
+   * handful of once-per-process events; synchronous, never throws.
+   */
+  hold(event: EventInput): void;
   /** Send what is queued. Resolves within the timeout, never rejects. */
   flush(): Promise<void>;
   /** Stop the timer and make one bounded final flush. Never rejects. */
@@ -116,6 +126,7 @@ const NOOP_STATS: ClientStats = {
 export function noopClient(): AbigaailClient {
   return {
     capture() {},
+    hold() {},
     flush: () => Promise.resolve(),
     shutdown: () => Promise.resolve(),
     stats: () => ({ ...NOOP_STATS }),
@@ -163,6 +174,8 @@ class Client implements AbigaailClient {
   private counters = { invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0, unsupported: 0 };
   /** Features the server announced in its latest 202; undefined until one arrives. */
   private announced: ReadonlySet<string> | undefined;
+  /** Events waiting for their feature (hold()); `counted` once an answer said it is not announced. */
+  private held: { event: AbigaailEvent; counted: boolean }[] = [];
   /** The app's outbound hosts seen so far: the only hostnames an error message may keep. */
   private readonly hosts = new Set<string>();
   private readonly sanitize: SanitizeContext;
@@ -241,6 +254,35 @@ class Client implements AbigaailClient {
     }
   }
 
+  hold(input: EventInput): void {
+    try {
+      if (this.closed || this.held.length >= MAX_HELD) return;
+      const event = sanitizeEvent(input, uuid, this.now, this.sanitize);
+      if (!event) {
+        this.counters.invalid++;
+        return;
+      }
+      this.held.push({ event, counted: false });
+    } catch (err) {
+      this.report(err);
+    }
+  }
+
+  /** Held events the server has announced, in the order they were held. */
+  private readyHeld(): AbigaailEvent[] {
+    if (!this.announced) return [];
+    const out: AbigaailEvent[] = [];
+    for (const h of this.held) {
+      if (this.supported(h.event)) out.push(h.event);
+      else if (!h.counted) {
+        // An older server: kept (it may be upgraded), counted once, never sent to it.
+        h.counted = true;
+        this.counters.unsupported++;
+      }
+    }
+    return out;
+  }
+
   flush(): Promise<void> {
     // One send loop at a time; concurrent callers share it.
     this.inFlight ??= this.drain().finally(() => {
@@ -251,11 +293,14 @@ class Client implements AbigaailClient {
 
   private async drain(): Promise<void> {
     try {
-      while (this.queue.size > 0 && this.breaker.allowRequest()) {
+      while ((this.queue.size > 0 || this.readyHeld().length > 0) && this.breaker.allowRequest()) {
+        // Held events go first; they leave `held` only on an answer, never on a failed send.
+        const held = this.readyHeld();
         // Checked again here: the server may have announced less since an event was queued.
-        const taken = this.queue.take(this.batchSize);
-        const events = taken.filter((e) => this.supported(e));
-        this.counters.unsupported += taken.length - events.length;
+        const taken = this.queue.take(Math.max(0, this.batchSize - held.length));
+        const queued = taken.filter((e) => this.supported(e));
+        this.counters.unsupported += taken.length - queued.length;
+        const events = [...held, ...queued];
         if (!events.length) continue;
         const batch: Batch = {
           schema_version: SCHEMA_VERSION,
@@ -272,21 +317,27 @@ class Client implements AbigaailClient {
           this.announced = new Set(typeof outcome === "string" ? [] : (outcome.features ?? []));
           this.breaker.recordSuccess();
           this.counters.sent += events.length;
+          this.release(held);
         } else if (result === "rejected") {
           // The server says the batch is invalid; resending it will not help.
           this.breaker.recordSuccess();
           this.counters.rejected += events.length;
+          this.release(held);
         } else {
           this.breaker.recordFailure();
           this.counters.failedSends++;
-          // Safe to resend later: event_id makes ingest idempotent.
-          this.queue.requeue(events);
+          // Safe to resend later: event_id makes ingest idempotent. Held events are still held.
+          this.queue.requeue(queued);
           return;
         }
       }
     } catch (err) {
       this.report(err);
     }
+  }
+
+  private release(sent: readonly AbigaailEvent[]): void {
+    if (sent.length) this.held = this.held.filter((h) => !sent.includes(h.event));
   }
 
   private supported(event: AbigaailEvent): boolean {

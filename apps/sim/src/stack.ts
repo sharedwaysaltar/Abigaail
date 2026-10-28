@@ -180,7 +180,7 @@ export class NodeDemo implements Demo {
   private supervising = false;
   private release = "";
 
-  constructor(key: string, private readonly log: Log) {
+  constructor(key: string, private readonly log: Log, private readonly crashDir?: string) {
     this.#key = key;
   }
 
@@ -201,6 +201,8 @@ export class NodeDemo implements Demo {
       ABIGAAIL_DEMO_SIM: "1",
       // Profiling on, so findings can name renderDocs and rememberSearch (DECISIONS #120).
       ABIGAAIL_PROFILING: "1",
+      // The crash record, so a release that crashes at start names its uncaught error (crash-deploy).
+      ...(this.crashDir ? { ABIGAAIL_CRASH_RECORD_DIR: this.crashDir } : {}),
       PORT: String(PORTS.node),
     };
     const child = track(fork(DEMO_NODE_MAIN, [], { env, silent: true, execArgv: [] }));

@@ -109,7 +109,8 @@ however it gets its configuration). Never commit the key.
 |---|---|---|
 | `ABIGAAIL_ENDPOINT` | yes | `http://127.0.0.1:4318/ingest` when the app runs on the same machine as Abigaail. Across machines, only over HTTPS (see below). |
 | `ABIGAAIL_INGEST_KEY` | yes | The `abk_…` key from step 3 |
-| `ABIGAAIL_RELEASE` | recommended | The deployed version, e.g. the git commit. Without it the release is `unknown` and deploys cannot be told apart from restarts. |
+| `ABIGAAIL_RELEASE` | recommended | The deployed version, ideally the git commit SHA. Without it the release is `unknown`: deploys cannot be told apart from restarts, and Rollout Safety does not judge releases. |
+| `ABIGAAIL_COMMIT`, `ABIGAAIL_PREVIOUS_RELEASE`, `ABIGAAIL_LOCKFILE_HASH` | no | Deploy metadata from your deploy step: see [Deploy metadata](#deploy-metadata) below. |
 | `ABIGAAIL_ENVIRONMENT` | no | `production`, `staging`, `development` or `test`. Default: from `NODE_ENV`. |
 | `ABIGAAIL_REGION` | no | Where the app runs, as a hosting region code such as `LON1` (uppercase letters, digits, hyphens). Sent once when the app starts; it places the app on the dashboard's map. Without it the app is listed as "not on the map". |
 | `ABIGAAIL_CRASH_RECORD_DIR` | no | An existing directory the app may write to. When the process ends, the SDK writes a few hundred bytes there (exit code, the uncaught error's class and first project frame, heap in use), and the next start reports and deletes them, so a restart says *why* it happened. Off by default. A kill by signal or out of memory leaves nothing, which is itself the answer. |
@@ -173,6 +174,65 @@ every 5 minutes (measured: V8 records the app's code when a CPU profile starts),
 when no request is in flight, and turns itself off if it gets worse. That pause is shown
 on the Runtime tab and never counted as the app blocking its event loop. One limit of
 V8's profiler: a small function that V8 has inlined into its caller shows as the caller.
+
+### Deploy metadata
+
+Your deploy step knows things the running app does not: which commit it built, which
+release it replaces, and whether the dependencies changed. Set them in the app's
+environment when you deploy; the SDK sends them once per process start (only hashes and
+ids, never a path or file contents), and the **Releases** tab shows them. The SDK never
+reads git or your lockfile itself.
+
+| Variable | Value |
+|---|---|
+| `ABIGAAIL_RELEASE` | The git commit SHA (if the release is a SHA, it is also the commit) |
+| `ABIGAAIL_COMMIT` | The commit SHA, when the release is a version label such as `v2.3.0` |
+| `ABIGAAIL_PREVIOUS_RELEASE` | The release that was live before this deploy |
+| `ABIGAAIL_LOCKFILE_HASH` | SHA-256 of the lockfile, 64 hex characters |
+
+In a shell deploy script:
+
+```sh
+export ABIGAAIL_RELEASE=$(git rev-parse HEAD)
+export ABIGAAIL_PREVIOUS_RELEASE=$(cat /srv/myapp/.release 2>/dev/null)
+export ABIGAAIL_LOCKFILE_HASH=$(sha256sum package-lock.json | cut -d' ' -f1)
+echo "$ABIGAAIL_RELEASE" > /srv/myapp/.release   # for the next deploy
+```
+
+In GitHub Actions, `ABIGAAIL_RELEASE: ${{ github.sha }}` and
+`ABIGAAIL_PREVIOUS_RELEASE: ${{ github.event.before }}` (on push), plus the `sha256sum`
+line in a step, written into the environment your app starts with.
+
+Nothing breaks without them: the release a deploy replaced is taken from the app's own
+events, and the Releases tab says "not sent". An invalid value is left out with one
+warning naming the variable (never the value). They are sent only once your Abigaail
+server says it accepts them, held until then, and never dropped when the SDK is busy.
+
+**Rollout Safety** judges each release for 24 hours after its deploy: its own requests
+against the same routes at the same hours of the week before it, with exact tests
+corrected for being looked at every minute. It says "recommend rollback" (critical, so
+you are alerted) only when the impact is high (a big route failing, extra failures of at
+least 5 % of all requests, a crash loop that began with the release, …) **and** it is
+sure (corrected p < 0.001, at least 20 extra failures, the previous release was fine
+before the deploy). Otherwise it says watch, looks fine, or too little traffic yet.
+
+### Source maps
+
+Stack frames and profiles name the files that run, which in production are compiled
+(`dist/server.js`, `.next/server/chunks/…`). To have them name your source files and
+lines instead:
+
+- **TypeScript (tsc):** set `"sourceMap": true` in `tsconfig.json`, and start Node with
+  `--enable-source-maps` (or `NODE_OPTIONS=--enable-source-maps`). Node then maps every
+  stack trace; reading a stack costs a little more, which matters only if your app
+  creates very many errors.
+- **Next.js:** set `experimental: { serverSourceMaps: true }` in `next.config` (off by
+  default in production builds) and start with `NODE_OPTIONS=--enable-source-maps`.
+  **Never** set `productionBrowserSourceMaps`: it serves your source code to anyone.
+
+Paths stay project-relative as always: a source path outside your project is never sent.
+While a release's frames still point at compiled files, the Releases tab says so once.
+Mapping profiles (which Node does not map) comes with chunk 11b.
 
 ## 3. Connect a Next.js app
 
@@ -372,10 +432,12 @@ checks each one automatically:
 ```bash
 npm run sim -- list                 # scenarios and the finding each must produce
 npm run sim -- run slow-route       # one scenario (about 20 min)
-npm run sim -- run all              # every scenario (about 55 min)
+npm run sim -- run all              # every scenario (about 70 min)
 npm run sim -- run all --app next   # demo-next (build it first: npm run build -w @abigaail/demo-next)
 npm run sim -- run blocking-route   # runtime scenarios, each on its own: blocking-route, oom-loop,
 npm run sim -- run leak             # and leak (about 4 h); the demo runs with profiling on
+npm run sim -- run bad-deploy       # release scenarios, each on its own: bad-deploy, slow-deploy,
+npm run sim -- run crash-deploy     # clean-deploy and crash-deploy (about 35-65 min each)
 npm run bench:profiling             # profiling overhead (not part of npm run check)
 npm run sim -- reset                # delete the simulator's data
 ```
@@ -388,7 +450,9 @@ seeds four weeks of normal history there so the agents have a baseline, then sen
 realistic traffic: visitors on an hour-of-week curve, crawlers and scanner probes, a
 failing dependency, a slow route, a burst of server errors, a crash loop, an outage, a
 traffic collapse and a deploy; on their own, a route that blocks the event loop, an
-out-of-memory restart loop and a slow memory leak. It prints PASS or FAIL for each expected finding, with how
+out-of-memory restart loop, a slow memory leak, and four deploys of a new release: one
+that breaks a route, one that slows one, a clean one, and one that crashes at every start
+(each then rolled back, as you would after "recommend rollback"). It prints PASS or FAIL for each expected finding, with how
 long it took to appear and to resolve. It only talks to demo apps on this machine and
 never touches `data/abigaail.db`; stop `npm run dev:server` and the demo first (it needs
 their ports). To watch a run in the dashboard, set `ABIGAAIL_DB_PATH=./data/sim/abigaail.db`

@@ -1,4 +1,5 @@
 import {
+  COMMIT_RE,
   EVENT_ID_RE,
   HOST_INVALID,
   HOST_IP_LITERAL,
@@ -14,9 +15,11 @@ import {
   METRIC_NAMES,
   OUTBOUND_OUTCOMES,
   PROFILE_KINDS,
+  RELEASE_RE,
   REQUEST_FLAGS,
   ROUTE_OTHER,
   SCRUB_VERSION,
+  SHA256_RE,
   cleanCode,
   isFramePath,
   isHost,
@@ -27,6 +30,7 @@ import {
   scrub,
   type AbigaailEvent,
   type BlockEvent,
+  type DeployEvent,
   type ErrorEvent,
   type LifecycleEvent,
   type OutboundEvent,
@@ -291,7 +295,18 @@ export function sanitizeEvent(input: unknown, eventId: () => string, now: () => 
       if (e.route !== undefined) out.route = isRoute(e.route) ? e.route : ROUTE_OTHER;
       return out;
     }
+    case "deploy":
+      return cleanDeploy(e, base);
     default:
       return undefined;
   }
+}
+
+/** Deploy metadata (deploy_v1): each value kept only if it matches its pattern; nothing left drops the event. */
+function cleanDeploy(e: Raw, base: { event_id: string; client_ts: number }): DeployEvent | undefined {
+  const out: DeployEvent = { type: "deploy", ...base };
+  if (typeof e.commit === "string" && COMMIT_RE.test(e.commit)) out.commit = e.commit;
+  if (typeof e.previous === "string" && e.previous.length <= LIMITS.maxReleaseLength && RELEASE_RE.test(e.previous)) out.previous = e.previous;
+  if (typeof e.lockfile === "string" && SHA256_RE.test(e.lockfile)) out.lockfile = e.lockfile;
+  return out.commit !== undefined || out.previous !== undefined || out.lockfile !== undefined ? out : undefined;
 }

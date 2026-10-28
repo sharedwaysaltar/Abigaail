@@ -74,7 +74,7 @@ export type RequestFlag = (typeof REQUEST_FLAGS)[number];
  * server it talks to has announced it, so a newer SDK never loses batches to an
  * older server (DECISIONS #110).
  */
-export const FEATURES = ["runtime_v1", "profile_v1"] as const;
+export const FEATURES = ["runtime_v1", "profile_v1", "deploy_v1"] as const;
 export type Feature = (typeof FEATURES)[number];
 export const FEATURE_RE = /^[a-z][a-z0-9_]{0,31}$/;
 export const MAX_FEATURES = 16;
@@ -254,6 +254,22 @@ export interface BlockEvent extends BaseEvent {
 }
 
 /**
+ * What the deploy step knows about this release (deploy_v1, DECISIONS #130),
+ * sent once per process. The release itself is the batch's `release`; this
+ * adds the commit it was built from, the release it replaced, and a hash of
+ * the lockfile. Hashes and ids only: never a path, a message or file contents.
+ */
+export interface DeployEvent extends BaseEvent {
+  type: "deploy";
+  /** Git commit SHA the release was built from (7-40 lowercase hex). */
+  commit?: string;
+  /** The release that was live before this deploy, as the deploy step saw it. */
+  previous?: string;
+  /** SHA-256 of the lockfile (64 lowercase hex), computed by the deploy step. */
+  lockfile?: string;
+}
+
+/**
  * What a profile's samples are (profile_v1, DECISIONS #118): CPU time (whole
  * app, or one route), CPU time while the event loop was blocked, or live heap
  * by the site that allocated it (sampled bytes).
@@ -290,7 +306,7 @@ export interface ProfileEvent extends BaseEvent {
   stacks: { frames: number[]; weight: number }[];
 }
 
-export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent | BlockEvent | ProfileEvent;
+export type AbigaailEvent = RequestEvent | ErrorEvent | OutboundEvent | MetricEvent | LifecycleEvent | BlockEvent | ProfileEvent | DeployEvent;
 export type EventType = AbigaailEvent["type"];
 
 /** Event as handed to the SDK: the SDK fills in event_id and client_ts. */
@@ -335,6 +351,11 @@ export const IPV4_RE =
 export const IPV6_RE =
   /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
 
+/** Git commit SHAs, short or full, lowercase (DeployEvent.commit). */
+export const COMMIT_RE = /^[0-9a-f]{7,40}$/;
+/** SHA-256 hex digests (DeployEvent.lockfile). */
+export const SHA256_RE = /^[0-9a-f]{64}$/;
+
 /** Opaque instance ids (see LifecycleEvent.instance). */
 export const INSTANCE_RE = /^[0-9a-f]{12}$/;
 /** Exit codes Node reports. */
@@ -358,6 +379,7 @@ export const MAX_FN_LENGTH = 100;
 
 /** The feature an event needs the server to have announced, or undefined for the base schema. */
 export function eventFeature(e: { type: string; name?: unknown; kind?: unknown; instance?: unknown }): Feature | undefined {
+  if (e.type === "deploy") return "deploy_v1";
   if (e.type === "profile") return "profile_v1";
   if (e.type === "metric" && (PROFILE_METRIC_NAMES as readonly unknown[]).includes(e.name)) return "profile_v1";
   if (e.type === "block") return "runtime_v1";

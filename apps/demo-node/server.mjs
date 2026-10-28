@@ -5,7 +5,7 @@
 import http from "node:http";
 import v8 from "node:v8";
 import { DEFAULT_IGNORE, init } from "@abigaail/node";
-import { BLOCK_DOCS_MS, DEPENDENCY_MS, faultControl, NORMAL_MS, rememberSearch, renderDocs, SLOW_SEARCH_MS } from "./faults.mjs";
+import { applyDiscount, BLOCK_DOCS_MS, DEPENDENCY_MS, faultControl, NORMAL_MS, rememberSearch, renderDocs, runMigrations, SLOW_SEARCH_MS } from "./faults.mjs";
 
 const abigaail = init({
   // Demo only: send every second so the Live view feels live. The SDK default stays 5 s.
@@ -18,7 +18,12 @@ const abigaail = init({
   // defaults to off), so Health's dependency findings have one shape run after run.
   ...(process.env.ABIGAAIL_DEMO_SIM === "1" ? { linkOutbound: true } : {}),
 });
-const faults = faultControl();
+// A bad release that fails to start (crashAfterMs): an uncaught error after a while, as a failed migration would.
+let crashTimer;
+const faults = faultControl(process, (f) => {
+  clearTimeout(crashTimer);
+  if (f.crashAfterMs) crashTimer = setTimeout(runMigrations, f.crashAfterMs);
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const between = ([min, max]) => min + Math.random() * (max - min);
@@ -91,11 +96,13 @@ const server = http.createServer(async (req, res) => {
       await sleep(between(NORMAL_MS["/docs"]));
       res.end("docs");
     } else if (path === "/search") {
-      await sleep(faults.get().slowSearch ? SLOW_SEARCH_MS : between(NORMAL_MS["/search"]));
+      await sleep((faults.get().slowSearch ? SLOW_SEARCH_MS : between(NORMAL_MS["/search"])) + faults.get().searchExtraMs);
       if (faults.get().leakPerRequest) leakSearch(faults.get().leakPerRequest);
       res.end("results");
     } else if (path === "/checkout") {
+      route = "/checkout";
       await sleep(between(NORMAL_MS["/checkout"]));
+      if (Math.random() < faults.get().checkoutBug) applyDiscount({});
       const r = await fetch(`${depBase}/__dep`, { signal: AbortSignal.timeout(2000) }).catch(() => null);
       res.statusCode = r?.ok ? 200 : 502;
       res.end(r?.ok ? "paid" : "payment provider unavailable");

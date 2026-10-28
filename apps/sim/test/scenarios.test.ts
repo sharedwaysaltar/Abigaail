@@ -4,7 +4,8 @@
 
 import { appendFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
-import { mins, plan, replay, scenario, scenariosFor, WARMUP_MS, type AppKind, type Scenario } from "@abigaail/sim";
+import { health, resilience, watchdog, type Agent } from "@abigaail/server";
+import { mins, plan, replay, scenario, scenariosFor, WARMUP_MS, type AppKind, type Scenario, type Tracker } from "@abigaail/sim";
 import { BUSY, cleanup, QUIET, seededStore } from "./simfx.js";
 
 const MIN = 60_000;
@@ -129,6 +130,32 @@ for (const app of ["node", "next"] as const) {
           } finally {
             s.close();
           }
+        }
+      }, 300_000);
+
+      it("bad-deploy: Health reports /checkout as fast as without Rollout, and never while Rollout's critical covers it (#133)", () => {
+        const runWith = (agents?: readonly Agent[]) => {
+          const s = seededStore(app, QUIET);
+          try {
+            const r = replay({ store: s.store, appId: s.appId, app, plan: plan(app, ["bad-deploy"]), start: QUIET, ...(agents ? { agents } : {}) });
+            return { tracker: r.tracker, rollout: s.store.findingHistory(s.appId).find((f) => f.fingerprint === "rollout:release:sim-r2") };
+          } finally {
+            s.close();
+          }
+        };
+        const firstCritical = (t: Tracker, fp: string) => t.emissionsOf(fp).find((e) => e.severity === "critical")?.at;
+        const withRollout = runWith();
+        const today = runWith([health, watchdog, resilience]);
+        // As fast as today: Rollout changes nothing before it takes over.
+        expect(firstCritical(withRollout.tracker, "health:server_errors:/checkout")).toBe(firstCritical(today.tracker, "health:server_errors:/checkout"));
+        expect(withRollout.tracker.emissionsOf("health:new_error:TypeError /checkout")[0]!.at).toBe(today.tracker.emissionsOf("health:new_error:TypeError /checkout")[0]!.at);
+        // Never twice: from the run after Rollout's first critical until its last emission, Health is silent about /checkout.
+        const rollout = withRollout.tracker.emissionsOf("rollout:release:sim-r2");
+        const from = rollout.find((e) => e.severity === "critical")!.at;
+        const to = rollout.at(-1)!.at;
+        expect(withRollout.rollout!.evidence.covers).toMatchObject({ routes: { "/checkout": ["errors"] }, error_keys: ["TypeError /checkout"] });
+        for (const fp of ["health:server_errors:/checkout", "health:new_error:TypeError /checkout"]) {
+          expect(withRollout.tracker.emissionsOf(fp).filter((e) => e.at > from + MIN && e.at <= to)).toEqual([]);
         }
       }, 300_000);
 

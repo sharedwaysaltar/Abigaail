@@ -13,6 +13,7 @@ import {
   humanDuration,
   leakVerdicts,
   restartVerdict,
+  rolloutCovers,
   rowsByKey,
   startupVerdict,
   typicalP95,
@@ -50,6 +51,8 @@ function commonCause(crashes: Crash[]): Crash {
 function restarts(ctx: AgentContext, app: App): AgentFinding[] {
   const v = restartVerdict(ctx.store, app.id, ctx.now);
   if (!v) return [];
+  // A crash loop the latest release brought is in Rollout Safety's release finding, once it reports it (#133).
+  if (rolloutCovers(ctx.store.openFindings(app.id), { loop: true }, v.severity)) return [];
   const recent = v.crashes.filter((c) => c.ts >= ctx.now - R.restartWindowMs);
   const top = commonCause(recent);
   const times = v.recent === 1 ? "once" : `${v.recent} times`;
@@ -152,13 +155,17 @@ function coldStart(ctx: AgentContext, app: App): AgentFinding[] {
     parts.push(v.normal_ms !== null ? `took ${ms(v.startup_ms)} to start, ${(v.startup_ms / v.normal_ms).toFixed(1)}× its usual ${ms(v.normal_ms)}` : `took ${ms(v.startup_ms)} to start`);
     Object.assign(evidence, { startup: v });
   }
-  // The first requests after a start, against the app's usual p95 for this hour.
+  // The first requests after a start, against the app's usual p95 for this hour, judged once the
+  // next window is in: a cold start is slow and then fast. A release that stays as slow after it
+  // is no cold start but the release itself, Rollout Safety's finding (#133).
   const boot = ctx.store.lastBoot(app.id);
-  if (boot && end - boot.ts >= R.coldWindowMs && end - boot.ts <= R.coldShowMs) {
+  if (boot && end - boot.ts >= 2 * R.coldWindowMs && end - boot.ts <= R.coldShowMs) {
     const first = ctx.store.statsFor(app.id, "app", boot.ts, boot.ts + R.coldWindowMs)[0];
+    const next = ctx.store.statsFor(app.id, "app", boot.ts + R.coldWindowMs, boot.ts + 2 * R.coldWindowMs)[0];
+    const stayedSlow = next !== undefined && next.n >= R.coldMinRequests && next.p95 !== null && first?.p95 != null && first.p95 < R.coldRatio * next.p95;
     const slots = baselineSlots(ctx.store, app.id, boot.ts);
     const normal = typicalP95(rowsByKey(ctx.store, app.id, "app", slots).get("*"));
-    if (first && first.n >= R.coldMinRequests && first.p95 !== null && normal && first.p95 >= R.coldRatio * normal.median) {
+    if (first && first.n >= R.coldMinRequests && first.p95 !== null && normal && first.p95 >= R.coldRatio * normal.median && !stayedSlow) {
       release ??= boot.release;
       parts.push(`answered its first ${first.n} requests with p95 ${ms(first.p95)}, ${(first.p95 / normal.median).toFixed(1)}× its usual ${ms(normal.median)}`);
       Object.assign(evidence, { first_requests: { window_ms: R.coldWindowMs, requests: first.n, p95: first.p95, baseline_p95: normal.median, baseline: slots.source } });

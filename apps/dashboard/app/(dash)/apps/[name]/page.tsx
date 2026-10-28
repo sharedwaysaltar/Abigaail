@@ -280,7 +280,7 @@ export default async function AppPage({ params }: { params: Promise<{ name: stri
                 <li key={e.kind === "deploy" ? `d${e.release}${e.ts}` : `f${e.finding.id}`} style={{ display: "block" }}>
                   <div className="small faint">{when(e.ts)}</div>
                   {e.kind === "deploy" ? (
-                    <div>Deployed <span className="mono">{e.release}</span> <span className="muted small">({e.environment})</span></div>
+                    <div>Deployed <a className="mono" href={`/apps/${encodeURIComponent(app.name)}/releases/${encodeURIComponent(e.release)}`}>{e.release}</a> <span className="muted small">({e.environment})</span></div>
                   ) : (
                     <div>
                       {e.finding.summary}{" "}

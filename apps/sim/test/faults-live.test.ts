@@ -3,11 +3,11 @@
 // fault that does nothing. This runs the demo's own code in a child process and
 // measures what it does: the leak keeps real heap, and renderDocs blocks the loop.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { BLOCK_DOCS_MS, REPO_ROOT } from "@abigaail/sim";
+import { BLOCK_DOCS_MS, DEMO_FRAMES, REPO_ROOT } from "@abigaail/sim";
 
 const FAULTS = pathToFileURL(join(REPO_ROOT, "apps/demo-node/faults.mjs")).href;
 
@@ -65,5 +65,27 @@ describe("demo-node's faults do what the scenarios say", () => {
     `);
     expect(maxMs).toBeGreaterThan(BLOCK_DOCS_MS - 20);
     expect(lateMs).toBeGreaterThan(BLOCK_DOCS_MS - 40);
+  });
+
+  it("checkoutBug's applyDiscount throws a TypeError from its own line (bad-deploy)", () => {
+    const { thrown, line } = child(`
+      import { applyDiscount } from ${JSON.stringify(FAULTS)};
+      try { applyDiscount({}); console.log(JSON.stringify({ thrown: 0 })); }
+      catch (e) { console.log(JSON.stringify({ thrown: e instanceof TypeError ? 1 : 0, line: Number(/faults\\.mjs:(\\d+)/.exec(e.stack)[1]) })); }
+    `);
+    expect(thrown).toBe(1);
+    expect(line).toBe(DEMO_FRAMES.applyDiscount.line);
+  });
+
+  it("crashAfterMs's runMigrations, on a timer, ends the process: exit code 1, an uncaught MigrationError (crash-deploy)", () => {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { runMigrations } from ${JSON.stringify(FAULTS)};
+      process.on("uncaughtExceptionMonitor", (e) => console.log(JSON.stringify({ name: e.name, line: Number(/faults\\.mjs:(\\d+)/.exec(e.stack)[1]) })));
+      setTimeout(runMigrations, 20);
+      setTimeout(() => console.log("still running"), 2000);
+    `], { encoding: "utf8", timeout: 10_000, env: { PATH: process.env.PATH ?? "" } });
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain("still running");
+    expect(JSON.parse(r.stdout.trim())).toEqual({ name: "MigrationError", line: DEMO_FRAMES.runMigrations.line });
   });
 });
