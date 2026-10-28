@@ -394,13 +394,18 @@ describe("held events: deploy metadata is sent once, never dropped (DECISIONS #1
 
   it("is never queued: overflowing the queue before the first answer does not drop it", async () => {
     const s = server(() => ({ result: "ok", features: ["deploy_v1"] }));
-    const c = createClient({ ...base, maxQueue: 5, transport: s.transport });
+    // Deterministic overflow: no sampling (it would shed requests at random before the
+    // queue fills), a batch larger than the queue (no size-triggered send) and no timer.
+    const c = createClient({ ...base, maxQueue: 5, batchSize: 100, sampleThreshold: 1, flushIntervalMs: 0, transport: s.transport });
     c.hold(deploy());
     for (let i = 0; i < 50; i++) c.capture(req());
-    expect(c.stats().dropped).toBeGreaterThan(0);
+    await Promise.resolve();
+    expect(s.batches).toEqual([]);
+    expect(c.stats()).toMatchObject({ dropped: 45, sampledOut: 0 });
     await c.flush();
     await c.flush();
     expect(s.sent()).toHaveLength(1);
+    expect(s.sent()[0]).toMatchObject({ commit: "0123456789abcdef0123456789abcdef01234567", previous: "v1.4.1", lockfile: "a".repeat(64) });
   });
 
   it("a failed send keeps it; it is given up only on an answer", async () => {
