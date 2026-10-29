@@ -13,8 +13,12 @@ import {
   type ClientStats,
 } from "@abigaail/core";
 import {
+  COMMIT_RE,
   ENVIRONMENTS,
   HTTP_METHODS,
+  LIMITS,
+  RELEASE_RE,
+  SHA256_RE,
   ROUTE_UNMATCHED,
   type Environment,
   type HttpMethod,
@@ -62,6 +66,18 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
   nodeVersion?: string;
   /** Hosting region code sent with the boot event, e.g. "LON1". Default ABIGAAIL_REGION. */
   region?: string;
+  /**
+   * Deploy metadata, set by the deploy step (DECISIONS #130). The git commit
+   * the release was built from (default ABIGAAIL_COMMIT, else the release
+   * itself when it is a SHA), the release it replaced (default
+   * ABIGAAIL_PREVIOUS_RELEASE) and the lockfile's SHA-256 (default
+   * ABIGAAIL_LOCKFILE_HASH). Sent once per process, independently of runtime
+   * signals, once the server announces deploy_v1. The SDK never reads git or
+   * the lockfile itself.
+   */
+  commit?: string;
+  previousRelease?: string;
+  lockfileHash?: string;
   /**
    * Runtime signals for the Resilience agent: post-GC heap floor, which route
    * blocks the event loop, startup time. Default true; sent only once the
@@ -290,9 +306,10 @@ export function init(opts: NodeOptions = {}): AbigaailNode {
       report(new AbigaailWarning("ABIGAAIL_REGION is not a region code (letters, digits and hyphens, 2-24); sending no region"));
     }
     const crashRecordDir = opts.crashRecordDir ?? env.ABIGAAIL_CRASH_RECORD_DIR;
+    const deploy = deployInfo(opts, env, release, report);
     const instance = new NodeAdapter(
       client,
-      { ...opts, linkOutbound, region, ...(crashRecordDir ? { crashRecordDir } : {}) },
+      { ...opts, linkOutbound, region, deploy, ...(crashRecordDir ? { crashRecordDir } : {}) },
       report,
       hostOf(endpoint),
       sendTransient,
@@ -304,6 +321,34 @@ export function init(opts: NodeOptions = {}): AbigaailNode {
     report(err);
     return NOOP;
   }
+}
+
+/**
+ * The deploy step's metadata, each value checked against its pattern. An
+ * invalid one is left out with one warning naming the setting, never the value.
+ */
+function deployInfo(opts: NodeOptions, env: NodeJS.ProcessEnv, release: string, report: (err: unknown) => void): DeployInfo | undefined {
+  const out: DeployInfo = {};
+  const check = (value: string | undefined, setting: string, ok: (v: string) => boolean, what: string): string | undefined => {
+    if (value === undefined || value === "") return undefined;
+    if (ok(value)) return value;
+    report(new AbigaailWarning(`${setting} is not ${what}; sending it without`));
+    return undefined;
+  };
+  const commit = check(opts.commit ?? env.ABIGAAIL_COMMIT, "ABIGAAIL_COMMIT", (v) => COMMIT_RE.test(v), "a git commit SHA (7-40 lowercase hex)");
+  if (commit) out.commit = commit;
+  else if (opts.commit === undefined && !env.ABIGAAIL_COMMIT && COMMIT_RE.test(release)) out.commit = release;
+  const previous = check(opts.previousRelease ?? env.ABIGAAIL_PREVIOUS_RELEASE, "ABIGAAIL_PREVIOUS_RELEASE", (v) => v.length <= LIMITS.maxReleaseLength && RELEASE_RE.test(v), "a release (letters, digits, . _ - +; at most 64)");
+  if (previous) out.previous = previous;
+  const lockfile = check(opts.lockfileHash ?? env.ABIGAAIL_LOCKFILE_HASH, "ABIGAAIL_LOCKFILE_HASH", (v) => SHA256_RE.test(v), "a SHA-256 hex digest (64 lowercase hex)");
+  if (lockfile) out.lockfile = lockfile;
+  return out.commit || out.previous || out.lockfile ? out : undefined;
+}
+
+interface DeployInfo {
+  commit?: string;
+  previous?: string;
+  lockfile?: string;
 }
 
 class NodeAdapter implements AbigaailNode {
@@ -334,7 +379,7 @@ class NodeAdapter implements AbigaailNode {
 
   constructor(
     private readonly client: AbigaailClient,
-    opts: NodeOptions,
+    opts: NodeOptions & { deploy?: DeployInfo },
     private readonly report: (err: unknown) => void,
     private readonly ownHost: string | undefined,
     /** False when the endpoint is plain http off this machine (DECISIONS #36). */
@@ -435,6 +480,8 @@ class NodeAdapter implements AbigaailNode {
     const bootId = randomUUID();
     this.client.capture({ type: "lifecycle", kind: "boot", event_id: bootId, ...(opts.region ? { region: opts.region } : {}) });
     this.runtime?.booted(bootId);
+    // Held outside the queue until the server announces deploy_v1, whatever runtimeSignals says (#130).
+    if (opts.deploy) this.client.hold({ type: "deploy", ...opts.deploy });
   }
 
   /** Subscribe with every handler guarded: a subscriber that throws would surface in the host app. */

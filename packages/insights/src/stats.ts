@@ -47,6 +47,47 @@ export function poissonUpperTail(k: number, lambda: number): number {
   return k <= 0 ? 1 : 1 - poissonCdf(k - 1, lambda);
 }
 
+/** ln Γ(x) for x > 0 (Lanczos, g = 7): about 15 significant digits. */
+export function logGamma(x: number): number {
+  if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - logGamma(1 - x);
+  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059, 12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+  const z = x - 1;
+  let a = c[0]!;
+  const t = z + 7.5;
+  for (let i = 1; i < 9; i++) a += c[i]! / (z + i);
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(a);
+}
+
+/** ln P(X = k) for X ~ Binomial(n, p). */
+function logBinomPmf(k: number, n: number, p: number): number {
+  return logGamma(n + 1) - logGamma(k + 1) - logGamma(n - k + 1) + k * Math.log(p) + (n - k) * Math.log1p(-p);
+}
+
+/**
+ * P(X >= k) for X ~ Binomial(n, p), exact: how surprising k failures in n
+ * requests are when the usual failure share is p. Summed from the smaller
+ * tail, in log space, stopping once the terms no longer matter.
+ */
+export function binomialUpperTail(k: number, n: number, p: number): number {
+  if (k <= 0) return 1;
+  if (k > n) return 0;
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  const sumFrom = (from: number, to: number, step: 1 | -1): number => {
+    const first = logBinomPmf(from, n, p);
+    let total = 0;
+    for (let i = from; step > 0 ? i <= to : i >= to; i += step) {
+      const term = Math.exp(logBinomPmf(i, n, p) - first);
+      total += term;
+      if (term < 1e-17 * total) break;
+    }
+    return Math.exp(first + Math.log(total));
+  };
+  // Above the mean the upper tail's terms fall away from k; below it, sum the lower tail instead.
+  if (k > n * p) return Math.min(1, sumFrom(k, n, 1));
+  return Math.max(0, 1 - sumFrom(k - 1, 0, -1));
+}
+
 /** "3 min", "2 h 5 min", "45 s": durations for summaries. */
 export function humanDuration(ms: number): string {
   const s = Math.round(ms / 1000);

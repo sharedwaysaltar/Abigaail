@@ -55,6 +55,20 @@ export interface Scenario {
 
 const health = (signal: string, subject = "") => `health:${signal}:${subject}`;
 const resilience = (signal: string, subject = "") => `resilience:${signal}:${subject}`;
+const rollout = (release: string) => `rollout:release:${release}`;
+
+/** Deploy sim-r2 with these faults (applied at its start), as a release that brings them would. */
+const deployR2 = (faults: Partial<Faults> = {}): Scenario["steps"] => [
+  { at: 0, action: { stop: true } },
+  ...(Object.keys(faults).length ? [{ at: SEC, action: { faults } }] : []),
+  { at: 2 * SEC, action: { start: { release: "sim-r2" } } },
+];
+/** Roll back (or move on) to sim-r1 at `at`, with the faults sim-r2 brought gone. */
+const backToR1 = (at: number, faults: Partial<Faults> = {}): Scenario["steps"] => [
+  { at, action: { stop: true } },
+  ...(Object.keys(faults).length ? [{ at: at + SEC, action: { faults } }] : []),
+  { at: at + 2 * SEC, action: { start: { release: "sim-r1" } } },
+];
 
 /** May appear while the stack starts: no traffic in the window yet, or the app has not reconnected. */
 export const STARTUP_ALLOWED: readonly string[] = [health("too_little_traffic"), "watchdog:reconnecting:"];
@@ -136,6 +150,65 @@ export const SCENARIOS: readonly Scenario[] = [
     expect: [{ fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN }],
     forbid: [resilience("restart")],
     forbidMs: 3 * MIN,
+  },
+  {
+    name: "bad-deploy",
+    apps: ["node"],
+    description: "Deploys sim-r2, whose /checkout throws a TypeError on 40% of requests (500); rolled back to sim-r1 after 25 min. Health reports the route at once; Rollout Safety recommends a rollback once it is sure, and Health's findings fold into it.",
+    steps: [...deployR2({ checkoutBug: 0.4 }), ...backToR1(25 * MIN, { checkoutBug: 0 })],
+    faultMs: 25 * MIN + 2 * SEC,
+    expect: [
+      { fingerprint: rollout("sim-r2"), severity: "critical", summary: ["Recommend rollback: release sim-r2 (replacing sim-r1)", "/checkout returns 5xx", "new error TypeError on /checkout"], showWithinMs: 16 * MIN, resolveWithinMs: 6 * MIN },
+      { fingerprint: health("server_errors", "/checkout"), severity: "critical", summary: ["/checkout returns 5xx"], showWithinMs: 7 * MIN, resolveWithinMs: 21 * MIN },
+      { fingerprint: health("new_error", "TypeError /checkout"), severity: "warning", summary: ["New error: TypeError on /checkout"], showWithinMs: 4 * MIN, resolveWithinMs: 21 * MIN },
+      { fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },
+      { fingerprint: health("deploy", "sim-r1"), severity: "info", summary: ["deployed release sim-r1 (was sim-r2)"], showWithinMs: 28 * MIN, resolveWithinMs: 19 * MIN },
+    ],
+  },
+  {
+    name: "slow-deploy",
+    apps: ["node"],
+    description: "Deploys sim-r2, whose /search takes 105 ms longer (about 2.3× its usual p95: Health's warning, not its critical); back to sim-r1 after 25 min. Rollout Safety says watch, not rollback: the route carries a quarter of the traffic and is not 2.5× as slow.",
+    steps: [...deployR2({ searchExtraMs: 105 }), ...backToR1(25 * MIN, { searchExtraMs: 0 })],
+    faultMs: 25 * MIN + 2 * SEC,
+    expect: [
+      { fingerprint: rollout("sim-r2"), severity: "warning", summary: ["Watch release sim-r2 (replacing sim-r1)", "/search p95 is"], showWithinMs: 14 * MIN, resolveWithinMs: 6 * MIN },
+      { fingerprint: health("latency", "/search"), severity: "warning", summary: ["/search p95 is"], showWithinMs: 6 * MIN, resolveWithinMs: 11 * MIN },
+      { fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },
+      { fingerprint: health("deploy", "sim-r1"), severity: "info", summary: ["deployed release sim-r1 (was sim-r2)"], showWithinMs: 28 * MIN, resolveWithinMs: 19 * MIN },
+    ],
+  },
+  {
+    name: "clean-deploy",
+    apps: ["node"],
+    description: "Deploys sim-r2, which behaves exactly like sim-r1; the next deploy (sim-r1 again) comes 40 min later. Rollout Safety says it looks fine, never watch or rollback.",
+    steps: [...deployR2(), ...backToR1(40 * MIN)],
+    faultMs: 40 * MIN + 2 * SEC,
+    expect: [
+      { fingerprint: rollout("sim-r2"), severity: "info", summary: ["Release sim-r2 looks fine", "no route worse than"], showWithinMs: 36 * MIN, resolveWithinMs: 3 * MIN },
+      { fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },
+      { fingerprint: health("deploy", "sim-r1"), severity: "info", summary: ["deployed release sim-r1 (was sim-r2)"], showWithinMs: 43 * MIN, resolveWithinMs: 19 * MIN },
+    ],
+  },
+  {
+    name: "crash-deploy",
+    apps: ["node"],
+    description: "Deploys sim-r2, which throws an uncaught MigrationError 30 s after every start (a failed migration); a supervisor restarts it. Rolled back to sim-r1 after 12 min. Resilience reports the restarts at once; Rollout Safety recommends a rollback, and the restart finding folds into it.",
+    steps: [
+      { at: 0, action: { supervise: true } },
+      ...deployR2({ crashAfterMs: 30_000 }),
+      { at: 12 * MIN, action: { supervise: false } },
+      ...backToR1(12 * MIN, { crashAfterMs: 0 }),
+    ],
+    faultMs: 12 * MIN + 2 * SEC,
+    expect: [
+      { fingerprint: rollout("sim-r2"), severity: "critical", summary: ["Recommend rollback: release sim-r2 (replacing sim-r1)", "crashed", "uncaught MigrationError at apps/demo-node/faults.mjs"], showWithinMs: 6 * MIN, resolveWithinMs: 6 * MIN },
+      { fingerprint: resilience("restart"), severity: "warning", summary: ["without a clean shutdown", "uncaught MigrationError"], showWithinMs: 3 * MIN, resolveWithinMs: 20 * MIN },
+      { fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },
+      { fingerprint: health("deploy", "sim-r1"), severity: "info", summary: ["deployed release sim-r1 (was sim-r2)"], showWithinMs: 15 * MIN, resolveWithinMs: 19 * MIN },
+    ],
+    // The uncaught error is usually lost with the process (#31); if it arrives, Health calls it new.
+    allowed: [health("new_error", "MigrationError -")],
   },
   {
     name: "crash-loop",
@@ -254,9 +327,12 @@ export const WARMUP_MS = 6 * MIN;
 
 /**
  * `run all`: when each scenario starts. Scenarios whose findings differ
- * overlap; restarts come one after another, then the long collapse.
- * blocking-route, oom-loop and leak run on their own: a blocked loop slows
- * every route, an OOM loop overlaps every restart, and a leak takes hours.
+ * overlap; restarts come one after another, then the long collapse, then the
+ * deploy (after it, everything runs on the new release, which Rollout Safety
+ * would rightly blame). blocking-route, oom-loop, leak and the release
+ * scenarios run on their own: a blocked loop slows every route, an OOM loop
+ * overlaps every restart, a leak takes hours, and each release scenario
+ * deploys a release of its own.
  */
 export const ALL: Record<AppKind, readonly { name: string; at: number }[]> = {
   node: [
@@ -264,16 +340,17 @@ export const ALL: Record<AppKind, readonly { name: string; at: number }[]> = {
     { name: "dependency", at: WARMUP_MS },
     { name: "slow-route", at: WARMUP_MS },
     { name: "error-burst", at: WARMUP_MS },
-    { name: "deploy", at: 13 * MIN },
-    { name: "crash-loop", at: 17 * MIN },
-    { name: "outage", at: 21 * MIN },
-    { name: "collapse", at: 28 * MIN },
+    { name: "crash-loop", at: 13 * MIN },
+    { name: "outage", at: 17 * MIN },
+    { name: "collapse", at: 24 * MIN },
+    // Last: everything after a deploy runs on the new release, and Rollout Safety judges it.
+    { name: "deploy", at: 47 * MIN },
   ],
   next: [
     { name: "bots", at: 0 },
     { name: "error-burst", at: WARMUP_MS },
-    { name: "deploy", at: 13 * MIN },
-    { name: "crash-loop", at: 17 * MIN },
+    { name: "crash-loop", at: 13 * MIN },
+    { name: "deploy", at: 17 * MIN },
   ],
 };
 

@@ -4,13 +4,14 @@
 // return null with a reason; the dashboard shows that grey, never as healthy.
 
 import {
-  HOUR_MS, type AgentRun, type AlertChannelRow, type AlertDelivery, type AlertItemRow, type App, type AppStatus, type Finding, type RetentionName,
-  type RunOutcome, type StatRow, type StoreReader,
+  HOUR_MS, type AgentRun, type AlertChannelRow, type AlertDelivery, type AlertItemRow, type App, type AppStatus, type Deploy, type Finding, type ReleaseError,
+  type RetentionName, type RunOutcome, type StatRow, type StoreReader,
 } from "@abigaail/store";
 import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
 import { blockingRoutes, leakVerdicts, unexpectedRestarts, type BlockingRoute, type Crash, type LeakVerdict } from "./resilience.js";
 import { median, poissonCdf, poissonUpperTail } from "./stats.js";
-import { BASELINE, RESILIENCE, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
+import { BASELINE, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
+import { judge, releaseInput, type ReleaseData, type SignalKind, type Verdict } from "./rollout.js";
 
 const MIN = 60_000;
 
@@ -667,5 +668,127 @@ export function runtimeView(store: StoreReader, appId: string, now: number): Run
     usualStartupMs: before.length >= RESILIENCE.startupMinHistory ? median(before)! : null,
     findings: store.openFindings(appId).filter((f) => f.agent === "resilience").sort(worstFirst),
     profilerPauses: pauses.length ? { count: pauses.length, maxMs: Math.max(...pauses), totalMs: pauses.reduce((a, b) => a + b, 0) } : null,
+  };
+}
+
+// ---- releases (Rollout Safety, DECISIONS #131-#135) ------------------------------------
+
+export interface ReleaseRow {
+  release: string;
+  /** The deploy (a boot that replaced another release), or the first time it was seen. */
+  at: number;
+  deployed: boolean;
+  replaced: string | null;
+  /** The deploy step's metadata; null when it was not sent. */
+  commit: string | null;
+  previous: string | null;
+  /** Lockfile changed against the release it replaced: null when either hash is unknown. */
+  lockfileChanged: boolean | null;
+  /** Rollout Safety's verdict, as its latest finding for the release says. */
+  verdict: Verdict | null;
+  finding: Finding | null;
+}
+
+const verdictOf = (f: Finding | undefined): Verdict | null => (f ? ((f.evidence.verdict as Verdict | undefined) ?? null) : null);
+
+/** Every release the app has sent, newest first, with Rollout Safety's verdict. */
+export function releasesView(store: StoreReader, appId: string): ReleaseRow[] {
+  const deploys = store.deploys(appId);
+  const byRelease = new Map(deploys.map((d) => [d.release, d]));
+  return deploys
+    .map((d) => {
+      const before = d.replaced_release !== null ? byRelease.get(d.replaced_release) : d.previous_release !== null ? byRelease.get(d.previous_release) : undefined;
+      const f = store.latestFinding(appId, `rollout:release:${d.release}`);
+      return {
+        release: d.release,
+        at: d.deployed_at ?? d.first_seen,
+        deployed: d.deployed_at !== null,
+        replaced: d.replaced_release,
+        commit: d.commit_sha,
+        previous: d.previous_release,
+        lockfileChanged: d.lockfile_hash !== null && before?.lockfile_hash ? d.lockfile_hash !== before.lockfile_hash : null,
+        verdict: verdictOf(f),
+        finding: f ?? null,
+      };
+    })
+    .sort((a, b) => b.at - a.at || (a.release < b.release ? -1 : 1));
+}
+
+export interface ReleaseRouteView {
+  route: string;
+  before: { requests: number; share5xx: number | null; share4xx: number | null; p95: number | null } | null;
+  after: { requests: number; share5xx: number | null; share4xx: number | null; notFound: number; p95: number | null };
+  expected: number | null;
+  usualShare: number | null;
+  /** Signals that passed their test and effect gate (what a "watch" or "rollback" rests on). */
+  changed: SignalKind[];
+  dependency: { host: string } | null;
+}
+
+export interface ReleaseDetail {
+  release: string;
+  deploy: Deploy;
+  row: ReleaseRow;
+  /** Why it is not judged, when it is not (the app's first release, or one deployed before deploys were recorded). */
+  notJudged: string | null;
+  /** The span compared, and against what. */
+  from: number | null;
+  to: number | null;
+  baseline: ReleaseData["baseline"] | null;
+  baselineMs: number | null;
+  routes: ReleaseRouteView[];
+  errors: (ReleaseError & { isNew: boolean })[];
+  crashes: { ts: number; text: string }[];
+  /** Frames point at compiled output (dist/, .next/, build/): source maps would name the source lines. */
+  compiledFrames: boolean;
+  finding: Finding | null;
+}
+
+const COMPILED = /^(dist|build|out|\.next|\.output)\//;
+
+/**
+ * One release, as Rollout Safety compares it: the same rules on the same rows,
+ * over [deploy, the next deploy or 24 h later, or now].
+ */
+export function releaseView(store: StoreReader, appId: string, release: string, now: number): ReleaseDetail | undefined {
+  const deploys = store.deploys(appId);
+  const d = deploys.find((x) => x.release === release);
+  if (!d) return undefined;
+  const row = releasesView(store, appId).find((r) => r.release === release)!;
+  const finding = row.finding;
+  const base = { release, deploy: d, row, finding, routes: [], errors: [], crashes: [], compiledFrames: false, from: null, to: null, baseline: null, baselineMs: null };
+  if (d.deployed_at === null || d.replaced_release === null) {
+    return { ...base, notJudged: "Not judged: the app's first release, or one deployed before Abigaail recorded deploys." };
+  }
+  if (release === "unknown") return { ...base, notJudged: "Not judged: the app does not name its release (set ABIGAAIL_RELEASE to the git commit SHA)." };
+  const next = deploys.filter((x) => x.deployed_at !== null && x.deployed_at > d.deployed_at!).sort((a, b) => a.deployed_at! - b.deployed_at!)[0];
+  const end = Math.min(windowEnd(now), next?.deployed_at ?? Infinity, d.deployed_at + ROLLOUT.judgeMs);
+  const data = releaseInput(store, appId, end, d as Deploy & { deployed_at: number; replaced_release: string })!;
+  const j = judge(data.input);
+  const share = (x: number, n: number) => (n > 0 ? x / n : null);
+  const routes = data.routes.map((r): ReleaseRouteView => ({
+    route: r.route,
+    before: r.before ? { requests: r.before.n, share5xx: share(r.before.x5, r.before.n), share4xx: share(r.before.x4, r.before.n), p95: r.latency?.usual ?? null } : null,
+    after: { requests: r.after.n, share5xx: share(r.after.x5, r.after.n), share4xx: share(r.after.x4, r.after.n), notFound: r.after.x404, p95: r.latency?.p95 ?? null },
+    expected: r.expected ?? null,
+    usualShare: r.usualShare ?? null,
+    changed: j.signals.filter((s) => s.significant && s.route === r.route && s.kind !== "new_error").map((s) => s.kind),
+    dependency: r.dependency ? { host: r.dependency.host } : null,
+  }));
+  const fresh = new Set(data.input.newErrors.map((e) => e.key));
+  const errors = store.releaseErrors(appId, release, d.deployed_at, data.end, 10).map((e) => ({ ...e, isNew: fresh.has(`${e.error_type} ${e.route ?? "-"}`) }));
+  const profileFiles = store.profiles(appId, "cpu", d.deployed_at, data.end, 3).flatMap((p) => p.frames.map((f) => f.file));
+  const compiledFrames = [...errors.map((e) => e.file ?? ""), ...profileFiles].some((f) => COMPILED.test(f));
+  return {
+    ...base,
+    notJudged: null,
+    from: d.deployed_at,
+    to: data.end,
+    baseline: data.baseline,
+    baselineMs: data.baselineMs ?? null,
+    routes,
+    errors,
+    crashes: data.crashes.map((c) => ({ ts: c.ts, text: c.text })),
+    compiledFrames,
   };
 }

@@ -68,7 +68,7 @@ function printReport(results: Result[], problems: Problem[], notes: string[]): b
     console.log(`  ${mark}  ${r.scenario.padEnd(12)} ${r.fingerprint} (${r.severity}): ${times}${r.status === "pass" ? "" : ` (${r.detail})`}`);
   }
   for (const p of problems) console.log(`  FAIL  ${p.kind}: ${p.detail}`);
-  for (const n of notes) console.log(`  note  usage (info, not judged): ${n}`);
+  for (const n of notes) console.log(`  note  (info, not judged): ${n}`);
   const ok = results.every((r) => r.status === "pass") && !problems.length;
   console.log(ok ? "\nAll expectations met." : "\nSome expectations were not met.");
   return ok;
@@ -99,7 +99,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
   console.log(`Seeded ${events} events of history over ${hours.length} past hours in ${((Date.now() - t0) / 1000).toFixed(1)} s.`);
 
   const server = new Server(paths, log, liveToken);
-  const demo: Demo = app === "node" ? new NodeDemo(key, log) : new NextDemo(key, log);
+  const demo: Demo = app === "node" ? new NodeDemo(key, log, paths.crash) : new NextDemo(key, log);
   let driver: Driver | undefined;
   let reader: StoreReader | undefined;
   let stopping = false;

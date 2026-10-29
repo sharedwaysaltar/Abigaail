@@ -1,5 +1,7 @@
-export { BASELINE, EVAL_LAG_MS, RESILIENCE, SCHEDULE, STATUS_FRESH_MS, VIEWS, windowEnd } from "./thresholds.js";
-export { humanDuration, mad, mannKendallZ, median, poissonCdf, poissonUpperTail, theilSen, wilsonLower } from "./stats.js";
+export { BASELINE, EVAL_LAG_MS, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, VIEWS, windowEnd } from "./thresholds.js";
+export { binomialUpperTail, humanDuration, logGamma, mad, mannKendallZ, median, poissonCdf, poissonUpperTail, theilSen, wilsonLower } from "./stats.js";
+export { heldVerdict, judge, judgedRelease, releaseInput, rolloutCovers, VERDICT_RANK } from "./rollout.js";
+export type { BeforeAfter, Covers, JudgeInput, Judgement, LoopInput, ReleaseData, RouteInput, Signal, SignalKind, Verdict } from "./rollout.js";
 export { blockingRoutes, causeText, crashCause, leakVerdicts, restartVerdict, startupVerdict, unexpectedRestarts } from "./resilience.js";
 export type { BlockingRoute, Crash, CrashCause, LeakKind, LeakVerdict, RestartVerdict, StartupVerdict } from "./resilience.js";
 export {
@@ -23,6 +25,8 @@ export {
   findingsFor,
   fourNumbers,
   headline,
+  releasesView,
+  releaseView,
   responseSeries,
   RETENTION_LABEL,
   retentionView,
@@ -45,6 +49,9 @@ export type {
   Measure,
   PointState,
   Reason,
+  ReleaseDetail,
+  ReleaseRouteView,
+  ReleaseRow,
   RegionInfo,
   RetentionRow,
   RouteChange,

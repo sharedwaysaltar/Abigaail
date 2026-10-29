@@ -47,6 +47,7 @@ function fakeClient(features: string[] = ["runtime_v1", "profile_v1"], breaker: 
   const events: Record<string, unknown>[] = [];
   const client: AbigaailClient = {
     capture: (e) => void events.push(e as Record<string, unknown>),
+    hold: () => {},
     flush: () => Promise.resolve(),
     shutdown: () => Promise.resolve(),
     stats: () => ({ queued: 0, dropped: 0, invalid: 0, sampledOut: 0, sent: 0, rejected: 0, failedSends: 0, unsupported: 0, breaker }),

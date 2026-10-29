@@ -8,7 +8,7 @@ const DAY = 24 * HOUR;
 import { BASELINE, STATUS_FRESH_MS } from "@abigaail/insights";
 
 // SCHEDULE lives in insights so the dashboard's Agents view shows the same schedules.
-export { BASELINE, EVAL_LAG_MS, RESILIENCE, SCHEDULE, STATUS_FRESH_MS, windowEnd } from "@abigaail/insights";
+export { BASELINE, EVAL_LAG_MS, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, windowEnd } from "@abigaail/insights";
 
 export const FINDINGS = {
   /** A finding resolved this recently is reopened instead of duplicated. */

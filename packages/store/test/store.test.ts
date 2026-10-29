@@ -158,11 +158,50 @@ describe("events", () => {
     store.insertBatch(app.id, batch([request()], { receivedAt: 5_000, release: "r1" }));
     store.insertBatch(app.id, batch([request()], { receivedAt: 6_000, release: "r1" }));
     store.insertBatch(app.id, batch([request()], { receivedAt: 7_000, release: "r2" }));
+    const none = { deployed_at: null, replaced_release: null, commit_sha: null, previous_release: null, lockfile_hash: null };
     expect(store.deploys(app.id)).toEqual([
-      { release: "r1", environment: "staging", first_seen: 5_000, last_seen: 6_000 },
-      { release: "r2", environment: "staging", first_seen: 7_000, last_seen: 7_000 },
+      { release: "r1", environment: "staging", first_seen: 5_000, last_seen: 6_000, ...none },
+      { release: "r2", environment: "staging", first_seen: 7_000, last_seen: 7_000, ...none },
     ]);
     expect(store.appByName("a")?.last_event_at).toBe(7_000);
+  });
+
+  describe("deploys (DECISIONS #130, #131)", () => {
+    const boot = (): AbigaailEvent => ({ type: "lifecycle", event_id: id(), client_ts: 1, kind: "boot" });
+    /** One batch from one process: events at `ts`, on `release`. */
+    const send = (appId: string, ts: number, release: string, events: AbigaailEvent[]) =>
+      store.insertBatch(appId, { receivedAt: ts, release, environment: "staging", events: events.map((event) => ({ event, derived: { ts } })) });
+    const row = (appId: string, release: string) => store.deploys(appId).find((d) => d.release === release)!;
+
+    it("a boot on a new release is its deploy: when, and which release it replaced", () => {
+      const { app } = store.createApp("a", "test");
+      send(app.id, 1_000, "r1", [boot()]);
+      // The app's first boot ever replaced nothing.
+      expect(row(app.id, "r1")).toMatchObject({ deployed_at: null, replaced_release: null });
+      send(app.id, 2_000, "r1", [request()]);
+      send(app.id, 3_000, "r2", [boot()]);
+      expect(row(app.id, "r2")).toMatchObject({ deployed_at: 3_000, replaced_release: "r1" });
+      // A second instance of r2 (rolling deploy) or a restart on r2 is not a deploy.
+      send(app.id, 4_000, "r2", [boot()]);
+      expect(row(app.id, "r2").deployed_at).toBe(3_000);
+      // A rollback to r1 is a deploy of r1, replacing r2; deploying r2 again later moves its time.
+      send(app.id, 5_000, "r1", [boot()]);
+      expect(row(app.id, "r1")).toMatchObject({ deployed_at: 5_000, replaced_release: "r2" });
+      send(app.id, 6_000, "r2", [boot()]);
+      expect(row(app.id, "r2")).toMatchObject({ deployed_at: 6_000, replaced_release: "r1" });
+    });
+
+    it("the deploy step's metadata lands on the release's row, never in events; a retry changes nothing", () => {
+      const { app } = store.createApp("a", "test");
+      const deploy: AbigaailEvent = { type: "deploy", event_id: id(), client_ts: 1, commit: "0123456789abcdef0123456789abcdef01234567", previous: "v1", lockfile: "b".repeat(64) };
+      send(app.id, 1_000, "v2", [boot(), deploy]);
+      send(app.id, 1_000, "v2", [deploy]);
+      expect(row(app.id, "v2")).toMatchObject({ commit_sha: "0123456789abcdef0123456789abcdef01234567", previous_release: "v1", lockfile_hash: "b".repeat(64) });
+      expect(store.countEvents(app.id)).toBe(1);
+      // A later deploy event that carries less keeps what is known.
+      send(app.id, 2_000, "v2", [{ type: "deploy", event_id: id(), client_ts: 1, lockfile: "c".repeat(64) }]);
+      expect(row(app.id, "v2")).toMatchObject({ commit_sha: "0123456789abcdef0123456789abcdef01234567", lockfile_hash: "c".repeat(64) });
+    });
   });
 });
 

@@ -36,6 +36,8 @@ describe("every page and route handler requires a session", () => {
     expect(entries).toContain("app/(dash)/apps/[name]/live/page.tsx");
     expect(entries).toContain("app/(dash)/findings/page.tsx");
     expect(entries).toContain("app/(dash)/agents/page.tsx");
+    expect(entries).toContain("app/(dash)/apps/[name]/releases/page.tsx");
+    expect(entries).toContain("app/(dash)/apps/[name]/releases/[release]/page.tsx");
   });
 
   it.each(entries.filter((p) => !PUBLIC.has(p)))("%s calls requireSession() itself", (p) => {

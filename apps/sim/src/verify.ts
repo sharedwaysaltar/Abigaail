@@ -77,6 +77,9 @@ export interface Problem {
   detail: string;
 }
 
+/** Info that is reported, never judged: Usage's findings, and Rollout's verdict while it is info. */
+const noted = (f: Finding) => (f.agent === "usage" || f.agent === "rollout") && f.severity === "info";
+
 export class Tracker {
   private readonly seen = new Map<number, Seen>();
 
@@ -145,15 +148,24 @@ export class Tracker {
     });
   }
 
-  /** Findings nothing in the plan accounts for, and forbidden ones. Usage's info findings are only noted. */
+  /**
+   * Findings nothing in the plan accounts for, and forbidden ones. Usage's
+   * info findings, and Rollout Safety's info verdicts on a release ("too
+   * little traffic yet", "looks fine"), are only noted; a Rollout warning or
+   * critical (watch, rollback) the plan does not expect at that level fails.
+   */
   problems(): Problem[] {
     const expected = new Set([...this.t.items.map((i) => i.exp.fingerprint), ...this.t.allowed]);
+    const alarming = new Set(this.t.items.filter((i) => i.exp.severity === "warning" || i.exp.severity === "critical").map((i) => i.exp.fingerprint));
     const out: Problem[] = [];
-    for (const { finding: f } of this.seen.values()) {
+    for (const { finding: f, emissions } of this.seen.values()) {
       if (f.first_seen < this.t.runStart) continue;
       const never = NEVER_ALLOWED.includes(f.fingerprint);
-      if (never || (!expected.has(f.fingerprint) && !(f.agent === "usage" && f.severity === "info"))) {
+      if (never || (!expected.has(f.fingerprint) && !noted(f))) {
         out.push({ kind: "unexpected", detail: `${f.fingerprint} (${f.severity}): ${f.summary}` });
+      } else if (f.agent === "rollout" && !alarming.has(f.fingerprint)) {
+        const alarm = [...emissions.values()].find((e) => e.severity === "warning" || e.severity === "critical");
+        if (alarm) out.push({ kind: "unexpected", detail: `${f.fingerprint} (${alarm.severity}): ${alarm.summary}` });
       }
       for (const fb of this.t.forbids) {
         if (f.fingerprint === fb.fingerprint && f.first_seen >= fb.from && f.first_seen <= fb.to) {
@@ -164,9 +176,9 @@ export class Tracker {
     return out;
   }
 
-  /** Usage's info findings, reported but never a failure. */
+  /** Usage's info findings and Rollout's info verdicts, reported but never a failure. */
   notes(): string[] {
-    return [...this.seen.values()].filter((s) => s.finding.agent === "usage" && s.finding.first_seen >= this.t.runStart).map((s) => `${s.finding.fingerprint}: ${s.finding.summary}`);
+    return [...this.seen.values()].filter((s) => noted(s.finding) && s.finding.first_seen >= this.t.runStart).map((s) => `${s.finding.fingerprint}: ${s.finding.summary}`);
   }
 
   /** Every expectation passed or failed (nothing is still waiting or open). */

@@ -18,6 +18,7 @@ export { AGENTS, agentByName } from "./agents/registry.js";
 export { watchdog, heartbeatGap } from "./agents/watchdog.js";
 export { health } from "./agents/health.js";
 export { resilience } from "./agents/resilience.js";
+export { rollout } from "./agents/rollout.js";
 export { usage } from "./agents/usage.js";
 export * as thresholds from "./agents/thresholds.js";
 export type { Agent, AgentConfig, AgentContext, AgentFinding, AgentSchedule, WorkerInput, WorkerResult } from "./agents/types.js";

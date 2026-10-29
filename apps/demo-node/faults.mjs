@@ -20,6 +20,9 @@ export const SLOW_SEARCH_MS = 1200;
 export const BLOCK_DOCS_MS = 300;
 /** Largest leak per /search request, KB. */
 export const MAX_LEAK_KB = 8192;
+/** Largest extra /search time (searchExtraMs) and longest wait before a crash (crashAfterMs). */
+export const MAX_EXTRA_MS = 5000;
+export const MAX_CRASH_AFTER_MS = 600_000;
 
 /**
  * leakPerRequest: KB each /search request keeps for good (a leak that follows traffic).
@@ -27,14 +30,19 @@ export const MAX_LEAK_KB = 8192;
  * oomKillMb: with a leak, the process kills itself (SIGKILL) once its heap
  * passes this, as a container's OOM killer would; 0 = off. A real V8
  * out-of-memory abort is not used: it can write a core dump on the machine.
+ * The release faults (a bad deploy, DECISIONS #134): checkoutBug, the share of
+ * /checkout requests that throw a TypeError in applyDiscount (500);
+ * searchExtraMs, extra time on every /search; crashAfterMs, an uncaught
+ * MigrationError this long after the fault is applied (the simulator applies
+ * faults at every start, so a supervised demo crashes in a loop); 0 = off.
  */
-export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0 });
+export const NORMAL_FAULTS = Object.freeze({ dependency: "ok", slowSearch: false, userErrorShare: 0, leakPerRequest: 0, leakPerSecond: 0, blockDocs: false, oomKillMb: 0, checkoutBug: 0, searchExtraMs: 0, crashAfterMs: 0 });
 
-const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "leakPerSecond", "blockDocs", "oomKillMb"];
+const KEYS = ["dependency", "slowSearch", "userErrorShare", "leakPerRequest", "leakPerSecond", "blockDocs", "oomKillMb", "checkoutBug", "searchExtraMs", "crashAfterMs"];
 const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
 const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, leakPerSecond, blockDocs, oomKillMb } }`, or undefined if malformed. */
+/** `{ type: "faults", faults: { dependency, slowSearch, userErrorShare, leakPerRequest, leakPerSecond, blockDocs, oomKillMb, checkoutBug, searchExtraMs, crashAfterMs } }`, or undefined if malformed. */
 export function parseFaults(msg) {
   if (!isObject(msg) || msg.type !== "faults" || Object.keys(msg).length !== 2 || !isObject(msg.faults)) return undefined;
   const f = msg.faults;
@@ -43,6 +51,8 @@ export function parseFaults(msg) {
   if (typeof f.slowSearch !== "boolean") return undefined;
   if (typeof f.userErrorShare !== "number" || !(f.userErrorShare >= 0 && f.userErrorShare <= 1)) return undefined;
   if (!isInt(f.leakPerRequest, 0, MAX_LEAK_KB) || !isInt(f.leakPerSecond, 0, MAX_LEAK_KB) || typeof f.blockDocs !== "boolean" || !isInt(f.oomKillMb, 0, 65536)) return undefined;
+  if (typeof f.checkoutBug !== "number" || !(f.checkoutBug >= 0 && f.checkoutBug <= 1)) return undefined;
+  if (!isInt(f.searchExtraMs, 0, MAX_EXTRA_MS) || !isInt(f.crashAfterMs, 0, MAX_CRASH_AFTER_MS)) return undefined;
   return Object.freeze({
     dependency: f.dependency,
     slowSearch: f.slowSearch,
@@ -51,6 +61,9 @@ export function parseFaults(msg) {
     leakPerSecond: f.leakPerSecond,
     blockDocs: f.blockDocs,
     oomKillMb: f.oomKillMb,
+    checkoutBug: f.checkoutBug,
+    searchExtraMs: f.searchExtraMs,
+    crashAfterMs: f.crashAfterMs,
   });
 }
 
@@ -59,7 +72,7 @@ export function parseFaults(msg) {
  * IPC channel (it was forked) and ABIGAAIL_DEMO_SIM=1; otherwise the app
  * always behaves normally. Malformed messages are ignored.
  */
-export function faultControl(proc = process) {
+export function faultControl(proc = process, onChange = () => {}) {
   let faults = NORMAL_FAULTS;
   const enabled = typeof proc.send === "function" && proc.env.ABIGAAIL_DEMO_SIM === "1";
   if (enabled) {
@@ -67,6 +80,7 @@ export function faultControl(proc = process) {
       const next = parseFaults(msg);
       if (!next) return;
       faults = next;
+      onChange(faults);
       proc.send({ type: "faults-applied" });
     });
   }
@@ -114,4 +128,17 @@ export function renderDocs(ms) {
     pages++;
   }
   return html.length + pages;
+}
+
+/** A bad release's bug: a cart without totals (checkoutBug). Throws a TypeError, as such code would. */
+export function applyDiscount(cart) {
+  return cart.totals.amount * 0.9;
+}
+
+/** A failed migration at startup (crashAfterMs): an uncaught error ends the process. */
+export class MigrationError extends Error {
+  name = "MigrationError";
+}
+export function runMigrations() {
+  throw new MigrationError("migration failed: column already exists");
 }

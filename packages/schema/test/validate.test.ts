@@ -317,3 +317,26 @@ describe("validateBatch: profiles (profile_v1, DECISIONS #118)", () => {
     expect(ok(profile({ kind: "block", samples_concurrent: 1 }))).toBe(false);
   });
 });
+
+describe("validateBatch: deploy metadata (deploy_v1, DECISIONS #130)", () => {
+  const deploy = { type: "deploy", event_id: ID, client_ts: 1, commit: "0123456789abcdef0123456789abcdef01234567", previous: "v1.4.1", lockfile: "a".repeat(64) };
+
+  it("accepts a commit, the previous release and a lockfile hash, alone or together", () => {
+    expect(validateBatch(batch([deploy])).ok).toBe(true);
+    expect(validateBatch(batch([{ type: "deploy", event_id: ID, client_ts: 1, commit: "abc1234" }])).ok).toBe(true);
+    expect(validateBatch(batch([{ type: "deploy", event_id: ID, client_ts: 1, lockfile: "0".repeat(64) }])).ok).toBe(true);
+  });
+
+  it.each([
+    ["an empty deploy", { type: "deploy", event_id: ID, client_ts: 1 }],
+    ["a commit that is not a SHA", { ...deploy, commit: "main" }],
+    ["an upper-case or short SHA", { ...deploy, commit: "ABC1234" }],
+    ["a six-digit SHA", { ...deploy, commit: "abc123" }],
+    ["a lockfile that is not a SHA-256", { ...deploy, lockfile: "a".repeat(63) }],
+    ["a previous release with spaces", { ...deploy, previous: "v1 hotfix" }],
+    ["a lockfile path", { ...deploy, lockfile: "package-lock.json" }],
+    ["any other field (a message, a branch)", { ...deploy, branch: "main" }],
+  ])("rejects %s", (_name, e) => {
+    expect(validateBatch(batch([e])).ok).toBe(false);
+  });
+});

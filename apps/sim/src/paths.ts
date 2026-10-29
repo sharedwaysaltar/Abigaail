@@ -46,6 +46,8 @@ export interface SimPaths {
   authDb: string;
   log: string;
   report: string;
+  /** demo-node's crash records (ABIGAAIL_CRASH_RECORD_DIR), so a crash names its uncaught error (#112). */
+  crash: string;
 }
 
 /**
@@ -68,6 +70,7 @@ export function simPaths(root = REPO_ROOT): SimPaths {
     authDb: file("auth.db"),
     log: file("sim.log"),
     report: file("report.json"),
+    crash: file("crash"),
   };
 }
 
@@ -86,6 +89,7 @@ function assertSimDir(data: string, dir: string): void {
 export function ensureSimDir(root = REPO_ROOT): SimPaths {
   const paths = simPaths(root);
   mkdirSync(paths.dir, { recursive: true });
+  mkdirSync(paths.crash, { recursive: true });
   return simPaths(root);
 }
 

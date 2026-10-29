@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AbigaailEvent, Environment } from "@abigaail/schema";
+import type { AbigaailEvent, DeployEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
 import { APP_COLUMNS, HOUR_MS, StoreReader, type AlertState, type App, type DeliveryStatus, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
@@ -386,7 +386,16 @@ export class Store extends StoreReader {
       let inserted = 0;
       const rows: EventRow[] = [];
       let latestBoot: { ts: number; region: string | null } | undefined;
+      let deployBoot: { ts: number; replaced: string } | undefined;
+      let deploy: DeployEvent | undefined;
+      const releaseBefore = this.db.prepare("SELECT release FROM events WHERE app_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1");
       for (const { event, derived } of batch.events) {
+        if (event.type === "deploy") {
+          // Deploy metadata lives on the deploys row only (kept like the row, #87); retries are idempotent.
+          deploy = event;
+          inserted++;
+          continue;
+        }
         if (event.type === "profile") {
           // Profiles have their own table: larger, never live, shorter retention.
           const data = JSON.stringify({
@@ -407,7 +416,12 @@ export class Store extends StoreReader {
         );
         inserted += Number(changes);
         if (changes) rows.push(r);
-        if (changes && event.type === "lifecycle" && event.kind === "boot") latestBoot = { ts: r.ts, region: event.region ?? null };
+        if (changes && event.type === "lifecycle" && event.kind === "boot") {
+          latestBoot = { ts: r.ts, region: event.region ?? null };
+          // A boot on a new release is a deploy (as Health's #54): the latest one wins.
+          const before = releaseBefore.get(appId, r.ts) as { release: string } | undefined;
+          if (before && before.release !== batch.release && (!deployBoot || r.ts > deployBoot.ts)) deployBoot = { ts: r.ts, replaced: before.release };
+        }
       }
       // The latest boot wins, also over boots stored by earlier batches.
       if (latestBoot) {
@@ -422,6 +436,19 @@ export class Store extends StoreReader {
           ON CONFLICT (app_id, release, environment)
           DO UPDATE SET last_seen = max(last_seen, excluded.last_seen)`)
         .run(appId, batch.release, batch.environment, batch.receivedAt, batch.receivedAt);
+      if (deployBoot) {
+        this.db
+          .prepare(`UPDATE deploys SET deployed_at = ?, replaced_release = ?
+                    WHERE app_id = ? AND release = ? AND environment = ? AND (deployed_at IS NULL OR deployed_at < ?)`)
+          .run(deployBoot.ts, deployBoot.replaced, appId, batch.release, batch.environment, deployBoot.ts);
+      }
+      if (deploy) {
+        this.db
+          .prepare(`UPDATE deploys SET commit_sha = coalesce(?, commit_sha), previous_release = coalesce(?, previous_release),
+                      lockfile_hash = coalesce(?, lockfile_hash)
+                    WHERE app_id = ? AND release = ? AND environment = ?`)
+          .run(deploy.commit ?? null, deploy.previous ?? null, deploy.lockfile ?? null, appId, batch.release, batch.environment);
+      }
       this.db
         .prepare("UPDATE apps SET last_event_at = max(coalesce(last_event_at, 0), ?) WHERE id = ?")
         .run(batch.receivedAt, appId);

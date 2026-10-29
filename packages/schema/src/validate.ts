@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import {
+  COMMIT_RE,
   ENVIRONMENTS,
   EVENT_ID_RE,
   FRAME_PATH_RE,
@@ -29,6 +30,7 @@ import {
   ROUTE_OTHER,
   ROUTE_RE,
   ROUTE_UNMATCHED,
+  SHA256_RE,
   SUPPORTED_SCHEMA_VERSIONS,
   type Batch,
 } from "./index.js";
@@ -209,6 +211,17 @@ export const profileEventSchema = z
     if (JSON.stringify(e).length > LIMITS.maxProfileBytes) ctx.addIssue({ code: "custom", message: "profile too large", path: [] });
   });
 
+export const deployEventSchema = z
+  .strictObject({
+    type: z.literal("deploy"),
+    event_id: eventId,
+    client_ts: clientTs,
+    commit: z.string().regex(COMMIT_RE, "must be a git commit SHA").optional(),
+    previous: z.string().min(1).max(LIMITS.maxReleaseLength).regex(RELEASE_RE).optional(),
+    lockfile: z.string().regex(SHA256_RE, "must be a SHA-256 hex digest").optional(),
+  })
+  .refine((e) => e.commit !== undefined || e.previous !== undefined || e.lockfile !== undefined, { message: "deploy carries nothing", path: [] });
+
 export const eventSchema = z.discriminatedUnion("type", [
   requestEventSchema,
   errorEventSchema,
@@ -217,6 +230,7 @@ export const eventSchema = z.discriminatedUnion("type", [
   lifecycleEventSchema,
   blockEventSchema,
   profileEventSchema,
+  deployEventSchema,
 ]);
 
 export const batchSchema = z.strictObject({

@@ -4,7 +4,7 @@
 // needs a minimum of evidence and a statistical bound before it speaks, and
 // names a cause when a failing dependency explains a failing route.
 
-import { HOUR_MS, type App, type Severity, type StatRow } from "@abigaail/store";
+import { HOUR_MS, type App, type Finding, type Severity, type StatRow } from "@abigaail/store";
 import {
   baselineSlots,
   blockingRoutes,
@@ -12,6 +12,7 @@ import {
   leakVerdicts,
   median,
   poissonCdf,
+  rolloutCovers,
   rowsByKey,
   totals,
   typicalCount,
@@ -43,9 +44,35 @@ interface Windows {
   end: number;
   routes5: Map<string, StatRow>;
   routes15: Map<string, StatRow>;
+  /** What the two windows really cover: 5 and 15 min, or less since a deploy inside them. */
+  ms5: number;
+  ms15: number;
 }
 
 const byKey = (rows: StatRow[]) => new Map(rows.map((r) => [r.key, r]));
+
+/** The latest deploy (a boot that replaced another release, #131) inside the 15-min window, if any. */
+function deployInWindow(ctx: AgentContext, app: App, end: number): number | undefined {
+  const at = Math.max(-Infinity, ...ctx.store.deploys(app.id).map((d) => d.deployed_at ?? -Infinity));
+  return at > end - 15 * MIN && at < end ? at : undefined;
+}
+
+/**
+ * Route windows ending at `end` that start no earlier than `from` (a deploy):
+ * what the release before it did is no longer happening, so its errors and
+ * latency are not judged against the one running now (#133).
+ */
+function routeWindows(ctx: AgentContext, app: App, end: number, from = -Infinity): Windows {
+  const f5 = Math.max(end - 5 * MIN, from);
+  const f15 = Math.max(end - 15 * MIN, from);
+  return {
+    end,
+    routes5: byKey(ctx.store.statsFor(app.id, "route", f5, end)),
+    routes15: byKey(ctx.store.statsFor(app.id, "route", f15, end)),
+    ms5: end - f5,
+    ms15: end - f15,
+  };
+}
 
 // ---- 1. deploys ------------------------------------------------------------------
 
@@ -101,7 +128,7 @@ function routeErrors(app: App, w: Windows, slots: Slots, base: Map<string, (Stat
     const rate = typicalRate(base.get(route), (r) => r.status_5xx);
     // The 5-minute window speaks first; the 15-minute one adds evidence on low traffic.
     let best: { windowMs: number; row: StatRow; severity: Severity; lb: number } | undefined;
-    for (const [windowMs, row] of [[5 * MIN, w.routes5.get(route)], [15 * MIN, row15]] as const) {
+    for (const [windowMs, row] of [[w.ms5, w.routes5.get(route)], [w.ms15, row15]] as const) {
       if (!row) continue;
       const j = judgeErrors(row, rate);
       if (j && (!best || RANK[j.severity] > RANK[best.severity])) best = { windowMs, row, ...j };
@@ -152,11 +179,11 @@ function authFailures(w: Windows, slots: Slots, base: Map<string, (StatRow | und
       subject: route,
       severity: "warning",
       summary:
-        `${route} refuses ${pct(row.status_401_403 / row.n)} of requests with 401/403 (${row.status_401_403} of ${row.n} in 15 min)` +
+        `${route} refuses ${pct(row.status_401_403 / row.n)} of requests with 401/403 (${row.status_401_403} of ${row.n} in ${humanDuration(w.ms15)})` +
         (rate === undefined ? "; no baseline yet." : `, usually ${pct(rate)}${normalFor(slots, w.end)}.`),
       cause: "A login or permission problem, not an outage: sessions expiring, a broken auth provider, or a client sending bad credentials.",
       action: "Check the auth flow on this route; if one client causes it, the Bots & Abuse agent will separate brute force from real users.",
-      evidence: { route, window_ms: 15 * MIN, requests: row.n, refused: row.status_401_403, wilson_lower: lb, baseline: slots.source, baseline_share: rate ?? null },
+      evidence: { route, window_ms: w.ms15, requests: row.n, refused: row.status_401_403, wilson_lower: lb, baseline: slots.source, baseline_share: rate ?? null },
     });
   }
   return out;
@@ -190,12 +217,12 @@ function routeLatency(w: Windows, slots: Slots, base: Map<string, (StatRow | und
         subject: route,
         severity: j.severity,
         summary: j.normal
-          ? `${route} p95 is ${ms(j.p95)}, ${(j.p95 / j.normal.median).toFixed(1)}× its usual ${ms(j.normal.median)}${normalFor(slots, w.end)}; ${row.n} requests in 5 min.`
-          : `${route} p95 is ${ms(j.p95)} over ${row.n} requests in 5 min; no baseline yet.`,
+          ? `${route} p95 is ${ms(j.p95)}, ${(j.p95 / j.normal.median).toFixed(1)}× its usual ${ms(j.normal.median)}${normalFor(slots, w.end)}; ${row.n} requests in ${humanDuration(w.ms5)}.`
+          : `${route} p95 is ${ms(j.p95)} over ${row.n} requests in ${humanDuration(w.ms5)}; no baseline yet.`,
         action: "Look for a slow dependency or a recent deploy touching this route.",
         evidence: {
           route,
-          window_ms: 5 * MIN,
+          window_ms: w.ms5,
           requests: row.n,
           p50: row.p50,
           p95: row.p95,
@@ -402,8 +429,8 @@ function trafficCollapse(ctx: AgentContext, app: App, w: Windows, slots: Slots):
 
 // ---- 7. new error bursts -----------------------------------------------------------
 
-function errorBursts(ctx: AgentContext, app: App, w: Windows, slots: Slots): AgentFinding[] {
-  const errors = ctx.store.statsFor(app.id, "error", w.end - 15 * MIN, w.end).filter((e) => e.n >= H.minNewErrors);
+function errorBursts(ctx: AgentContext, app: App, w: Windows, slots: Slots, open: readonly Finding[]): AgentFinding[] {
+  const errors = ctx.store.statsFor(app.id, "error", w.end - w.ms15, w.end).filter((e) => e.n >= H.minNewErrors);
   if (!errors.length) return [];
   const histFrom = w.end - H.errorHistoryMs;
   const thisHour = Math.floor(w.end / HOUR_MS) * HOUR_MS;
@@ -416,30 +443,33 @@ function errorBursts(ctx: AgentContext, app: App, w: Windows, slots: Slots): Age
   const base = rowsByKey(ctx.store, app.id, "error", slots);
   const out: AgentFinding[] = [];
   for (const e of errors) {
+    // A new error type the latest release brought is in Rollout Safety's release finding (#133).
+    if (rolloutCovers(open, { errorKey: e.key }, "warning")) continue;
     const [type, route] = e.key.split(" ");
     const where = route && route !== "-" ? ` on ${route}` : "";
-    const evidence = { error: e.key, count: e.n, window_ms: 15 * MIN };
+    const evidence = { error: e.key, count: e.n, window_ms: w.ms15 };
+    const span = humanDuration(w.ms15);
     if (!hasHistory || !seen.has(e.key)) {
       out.push({
         signal: "new_error",
         subject: e.key,
         severity: "warning",
         summary: hasHistory
-          ? `New error: ${type}${where}, ${e.n} times in 15 min, not seen in the last 7 days.`
-          : `${type}${where} occurred ${e.n} times in 15 min; no error history yet to compare with.`,
+          ? `New error: ${type}${where}, ${e.n} times in ${span}, not seen in the last 7 days.`
+          : `${type}${where} occurred ${e.n} times in ${span}; no error history yet to compare with.`,
         cause: "Often the first sign of a bad code path, typically after a deploy.",
         action: "Check the stack frames in the error events and what changed recently.",
         evidence: { ...evidence, history: hasHistory },
       });
       continue;
     }
-    const normal = typicalCount(base.get(e.key)) / 4;
+    const normal = (typicalCount(base.get(e.key)) * w.ms15) / HOUR_MS;
     if (e.n >= Math.max(H.minNewErrors, H.errorBurstFactor * Math.max(normal, 1))) {
       out.push({
         signal: "error_burst",
         subject: e.key,
         severity: "warning",
-        summary: `${type}${where} occurred ${e.n} times in 15 min, about ${normal < 1 ? "<1" : Math.round(normal)} usually${normalFor(slots, w.end)}.`,
+        summary: `${type}${where} occurred ${e.n} times in ${span}, about ${normal < 1 ? "<1" : Math.round(normal)} usually${normalFor(slots, w.end)}.`,
         action: "Check the stack frames in the error events and what changed recently.",
         evidence: { ...evidence, usual_per_15_min: normal, baseline: slots.source },
       });
@@ -489,11 +519,10 @@ function dataTrust(ctx: AgentContext, app: App, w: Windows): AgentFinding[] {
 function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   if (app.disabled_at !== null) return [];
   const end = ctx.windowEnd;
-  const w: Windows = {
-    end,
-    routes5: byKey(ctx.store.statsFor(app.id, "route", end - 5 * MIN, end)),
-    routes15: byKey(ctx.store.statsFor(app.id, "route", end - 15 * MIN, end)),
-  };
+  const w = routeWindows(ctx, app, end);
+  // Route errors, latency and error types since a deploy inside the windows, when there is one (#133).
+  const deployedAt = deployInWindow(ctx, app, end);
+  const wr = deployedAt === undefined ? w : routeWindows(ctx, app, end, deployedAt);
   const slots = baselineSlots(ctx.store, app.id, end);
   const routeBase = rowsByKey(ctx.store, app.id, "route", slots);
   const out: AgentFinding[] = [];
@@ -517,7 +546,10 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   const deps = dependencies(ctx, app, w, slots);
   const causesByWindow = new Map<number, { route: string; host: string; requests: number }[]>();
   const linkedByWindow = new Map<number, { host: string; route: string | null; calls: number; failed: number }[]>();
-  for (const failure of routeErrors(app, w, slots, routeBase)) {
+  // Routes the latest release broke are Rollout Safety's, once it reports them at least as severely (#133).
+  const open = ctx.store.openFindings(app.id);
+  for (const failure of routeErrors(app, wr, slots, routeBase)) {
+    if (rolloutCovers(open, { route: failure.route, signal: "errors" }, failure.finding.severity)) continue;
     let causes = causesByWindow.get(failure.windowMs);
     if (!causes) causesByWindow.set(failure.windowMs, (causes = ctx.store.failingRequestCauses(app.id, end - failure.windowMs, end)));
     const top = causes
@@ -578,13 +610,14 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   // stamped at its end, so latency is judged only up to the latest interval received (#125).
   const blocking = new Set(blockingRoutes(ctx.store, app.id, end).map((b) => b.route));
   const latEnd = runtimeEnd(ctx, app, end);
-  const wLat: Windows = latEnd === end ? w : { end: latEnd, routes5: byKey(ctx.store.statsFor(app.id, "route", latEnd - 5 * MIN, latEnd)), routes15: w.routes15 };
+  const wLat: Windows = latEnd === end ? wr : { ...routeWindows(ctx, app, latEnd, deployedAt), routes15: wr.routes15, ms15: wr.ms15 };
   const longestBlock = new Map<string, number>();
   for (const b of ctx.store.blocks(app.id, latEnd - 5 * MIN, latEnd + 1)) {
     if (b.route !== null) longestBlock.set(b.route, Math.max(longestBlock.get(b.route) ?? 0, b.max_ms));
   }
   for (const { route, finding } of routeLatency(wLat, slots, routeBase)) {
     if (blocking.has(route)) continue;
+    if (rolloutCovers(open, { route, signal: "latency" }, finding.severity)) continue;
     if ((longestBlock.get(route) ?? 0) >= H.blockExplainsShare * Number(finding.evidence.p95)) continue;
     // A slow dependency this route calls is the likely cause (AGENTS.md example).
     const called = linked.filter((l) => l.route === route && slowHosts.has(l.host)).map((l) => slowHosts.get(l.host)!);
@@ -600,10 +633,10 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   }
 
   out.push(
-    ...authFailures(w, slots, routeBase),
+    ...authFailures(wr, slots, routeBase),
     ...saturation(ctx, app, w, slots, blocking, latEnd),
     ...trafficCollapse(ctx, app, w, slots),
-    ...errorBursts(ctx, app, w, slots),
+    ...errorBursts(ctx, app, wr, slots, open),
     ...dataTrust(ctx, app, w),
   );
   return out;

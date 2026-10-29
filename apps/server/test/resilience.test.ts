@@ -474,4 +474,16 @@ describe("cold start", () => {
     const [f] = only("cold_start");
     expect(f!.summary).toMatch(/answered its first 40 requests with p95 400 ms, 8\.0× its usual 50 ms/);
   });
+
+  it("first requests that stay as slow afterwards are the release, not a cold start (#133)", () => {
+    const boot = fx.now - 20 * MIN;
+    fx.baselineWeeks(boot, 3, (h) => fx.requests(h, h + HOUR_MS, 200, { duration: 50 }));
+    fx.start(boot, { instance: A, startup_ms: 900 });
+    fx.requests(boot + 5_000, boot + R.coldWindowMs - 1_000, 40, { duration: 400 });
+    fx.requests(boot + R.coldWindowMs + 5_000, boot + 2 * R.coldWindowMs - 1_000, 40, { duration: 380 });
+    expect(only("cold_start")).toEqual([]);
+    // Fast again afterwards: a cold start.
+    fx.requests(boot + R.coldWindowMs + 5_000, boot + 2 * R.coldWindowMs - 1_000, 1000, { duration: 50 });
+    expect(only("cold_start")[0]!.summary).toMatch(/answered its first 40 requests/);
+  });
 });

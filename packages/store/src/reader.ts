@@ -21,6 +21,44 @@ export interface Deploy {
   environment: string;
   first_seen: number;
   last_seen: number;
+  /** The latest boot on this release that replaced another release (DECISIONS #131); null if never seen. */
+  deployed_at: number | null;
+  /** The release that boot replaced (from the app's own events). */
+  replaced_release: string | null;
+  /** Deploy step's metadata (deploy_v1, #130); null when not sent. */
+  commit_sha: string | null;
+  previous_release: string | null;
+  lockfile_hash: string | null;
+}
+
+/** Requests that matter on one route and one release: counts only (Rollout Safety, #131). */
+export interface ReleaseRouteCounts {
+  route: string;
+  n: number;
+  weighted_n: number;
+  status_5xx: number;
+  /** 4xx other than 401 and 403 (those are login problems, not releases). */
+  status_4xx_other: number;
+  status_404: number;
+}
+
+/** One error type on one route in a release, with its top stack frame (relative path, line, function). */
+export interface ReleaseError {
+  error_type: string;
+  route: string | null;
+  n: number;
+  file: string | null;
+  line: number | null;
+  fn: string | null;
+}
+
+/** Durations of one route's requests against a threshold (its usual p95). */
+export interface Exceedance {
+  route: string;
+  n: number;
+  /** Requests slower than the threshold. */
+  above: number;
+  p95: number | null;
 }
 
 export interface StoredEvent {
@@ -374,8 +412,65 @@ export class StoreReader {
 
   deploys(appId: string): Deploy[] {
     return this.db
-      .prepare("SELECT release, environment, first_seen, last_seen FROM deploys WHERE app_id = ? ORDER BY first_seen")
+      .prepare(`SELECT release, environment, first_seen, last_seen, deployed_at, replaced_release, commit_sha, previous_release, lockfile_hash
+                FROM deploys WHERE app_id = ? ORDER BY first_seen`)
       .all(appId) as unknown as Deploy[];
+  }
+
+  /** Errors on one release with ts in [from, to), per type, route and top frame, most frequent first. */
+  releaseErrors(appId: string, release: string, from: number, to: number, limit = 10): ReleaseError[] {
+    return this.db
+      .prepare(`
+        SELECT name AS error_type, route, count(*) AS n,
+               json_extract(attrs, '$.frames[0].file') AS file, json_extract(attrs, '$.frames[0].line') AS line,
+               json_extract(attrs, '$.frames[0].fn') AS fn
+        FROM events WHERE app_id = ? AND type = 'error' AND ts >= ? AND ts < ? AND release = ?
+        GROUP BY name, route, file, line, fn ORDER BY n DESC, error_type LIMIT ?`)
+      .all(appId, from, to, release, limit) as unknown as ReleaseError[];
+  }
+
+  /**
+   * Requests that matter per route on one release with ts in [from, to),
+   * counted in SQL (Rollout Safety judges up to a day of them every minute).
+   */
+  releaseRouteCounts(appId: string, release: string, from: number, to: number): ReleaseRouteCounts[] {
+    return this.db
+      .prepare(`
+        SELECT route, count(*) AS n, sum(1.0 / coalesce(sample_rate, 1)) AS weighted_n,
+               sum(status >= 500) AS status_5xx,
+               sum(status >= 400 AND status < 500 AND status NOT IN (401, 403)) AS status_4xx_other,
+               sum(status = 404) AS status_404
+        FROM events WHERE app_id = ? AND type = 'request' AND ts >= ? AND ts < ? AND release = ? AND ${MATTERS_SQL}
+        GROUP BY route ORDER BY route`)
+      .all(appId, from, to, release) as unknown as ReleaseRouteCounts[];
+  }
+
+  /**
+   * Per route, how many requests that matter on one release with ts in
+   * [from, to) were slower than that route's threshold, and their p95. Key
+   * "*" (when `appThreshold` is given) is the whole app against its own.
+   */
+  releaseExceedances(appId: string, release: string, from: number, to: number, thresholds: ReadonlyMap<string, number>, appThreshold?: number): Exceedance[] {
+    const acc = new Map<string, number[]>();
+    const all: number[] = [];
+    const rows = this.db
+      .prepare(`SELECT route, duration_ms AS v FROM events
+                WHERE app_id = ? AND type = 'request' AND ts >= ? AND ts < ? AND release = ? AND ${MATTERS_SQL}`)
+      .iterate(appId, from, to, release) as Iterable<{ route: string; v: number }>;
+    for (const r of rows) {
+      if (appThreshold !== undefined) all.push(r.v);
+      if (!thresholds.has(r.route)) continue;
+      let list = acc.get(r.route);
+      if (!list) acc.set(r.route, (list = []));
+      list.push(r.v);
+    }
+    const judge = (route: string, values: number[], threshold: number): Exceedance => {
+      values.sort((a, b) => a - b);
+      return { route, n: values.length, above: values.filter((v) => v > threshold).length, p95: percentile(values, 95) };
+    };
+    const out = [...acc].map(([route, values]) => judge(route, values, thresholds.get(route)!));
+    if (appThreshold !== undefined && all.length) out.push(judge("*", all, appThreshold));
+    return out;
   }
 
   /** Lifecycle events (boot, heartbeat, shutdown) with ts in [from, to), oldest first. */
@@ -496,9 +591,13 @@ export class StoreReader {
    * for short windows; baselines come from the hourly rollup, which is built
    * with this same function.
    */
-  statsFor(appId: string, kind: StatKind, from: number, to: number): StatRow[] {
+  statsFor(appId: string, kind: StatKind, from: number, to: number, release?: string): StatRow[] {
     const acc = new Map<string, { row: StatRow; values: number[]; visitors: Set<string> }>();
-    for (const r of this.db.prepare(STAT_SQL[kind]).iterate(appId, from, to) as Iterable<StatSource>) {
+    // One release only (Rollout Safety, #131): the same definition, one more condition.
+    const rows = release === undefined
+      ? this.db.prepare(STAT_SQL[kind]).iterate(appId, from, to)
+      : this.db.prepare(`${STAT_SQL[kind]} AND release = ?`).iterate(appId, from, to, release);
+    for (const r of rows as Iterable<StatSource>) {
       let a = acc.get(r.key);
       if (!a) {
         a = {
