@@ -84,6 +84,6 @@ shorter timeout with a fallback message.
 | AI token usage event per route | Cost & Capacity | Phase 4 |
 | Expected env var names, present/missing (names only, never values) | Config & Secrets | Phase 3 |
 | Deploy metadata (commit, previous release, lockfile hash from the deploy step) | Supply Chain, Rollout Safety | Chunk 11a, done (`deploy_v1`, DECISIONS #130) |
-| Source maps for compiled frames; read-only link to the repository (diff → file/line) | Rollout Safety, Resilience | Chunk 11b |
+| Source maps for compiled frames; read-only link to the repository (diff → file/line) | Rollout Safety, Resilience | Chunk 11b, done (DECISIONS #136-#138) |
 | Read-only external prober (never changes the app) | Config & Secrets, Edge & Trust | Phase 3 |
 | Geo lookup; browser adapter | Geo; Frontend Experience | Phase 3; Phase 5 |

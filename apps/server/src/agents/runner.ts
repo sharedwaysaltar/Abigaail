@@ -207,6 +207,9 @@ export class Runner {
       worker = new Worker(url, {
         workerData: input,
         resourceLimits: this.opts.resourceLimits ?? { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 },
+        // Agents need no environment: none of the server's secrets (GitHub tokens, the live token,
+        // the SMTP password) reach a worker (DECISIONS #137).
+        env: {},
         stdout: false,
         stderr: false,
       });

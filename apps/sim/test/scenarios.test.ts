@@ -159,6 +159,25 @@ for (const app of ["node", "next"] as const) {
         }
       }, 300_000);
 
+      it("bad-deploy with GitHub down (no diff stored): Rollout still recommends the rollback on time, naming the error's frame, without changed lines", () => {
+        const base = scenario(app, "bad-deploy")!;
+        const down: Scenario = {
+          ...base,
+          expect: base.expect.map((e) => (e.fingerprint === "rollout:release:sim-r2" ? { ...e, summary: e.summary.filter((w) => !w.startsWith("Changed code involved")) } : e)),
+        };
+        const s = seededStore(app, QUIET);
+        try {
+          const r = replay({ store: s.store, appId: s.appId, app, plan: [{ scenario: down, at: WARMUP_MS }], start: QUIET, code: false });
+          expect(r.problems).toEqual([]);
+          expect(r.tracker.results(r.endedAt).filter((x) => x.status !== "pass")).toEqual([]);
+          const f = s.store.findingHistory(s.appId).find((x) => x.fingerprint === "rollout:release:sim-r2" && x.severity === "critical")!;
+          expect(f.summary).not.toContain("Changed code involved");
+          expect(f.evidence.frames).toContainEqual({ file: "apps/demo-node/faults.mjs", line: 135, fn: "applyDiscount", what: "TypeError on /checkout" });
+        } finally {
+          s.close();
+        }
+      }, 300_000);
+
       it("error-burst across an hour boundary: the rollup of its own hour does not make it old news", () => {
         // Starts at 03:45, so the fault (03:51-03:56) is rolled up at 04:00 while still in the window.
         const { results, problems } = run(app, ["error-burst"], QUIET + 15 * 60_000);

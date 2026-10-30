@@ -1,4 +1,4 @@
-export { BASELINE, EVAL_LAG_MS, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, VIEWS, windowEnd } from "./thresholds.js";
+export { BASELINE, CODE, EVAL_LAG_MS, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, VIEWS, windowEnd } from "./thresholds.js";
 export { binomialUpperTail, humanDuration, logGamma, mad, mannKendallZ, median, poissonCdf, poissonUpperTail, theilSen, wilsonLower } from "./stats.js";
 export { heldVerdict, judge, judgedRelease, releaseInput, rolloutCovers, VERDICT_RANK } from "./rollout.js";
 export type { BeforeAfter, Covers, JudgeInput, Judgement, LoopInput, ReleaseData, RouteInput, Signal, SignalKind, Verdict } from "./rollout.js";
@@ -49,6 +49,7 @@ export type {
   Measure,
   PointState,
   Reason,
+  ReleaseCode,
   ReleaseDetail,
   ReleaseRouteView,
   ReleaseRow,
@@ -62,3 +63,5 @@ export type {
 } from "./views.js";
 export { blockFunctions, flameTree, frameLabel, growingSites, merge as mergeProfiles, PROFILE_VIEW, profileView, topFunctions, topHeapSite } from "./profiles.js";
 export type { FlameNode, HeapSite, ProfileView, TopFunction } from "./profiles.js";
+export { codeContext, codeStatusText, codeUrl, involved, involvedText } from "./code.js";
+export type { CodeContext, CodeFrame, CodeStatus, Involved } from "./code.js";

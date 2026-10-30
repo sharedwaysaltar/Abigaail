@@ -78,6 +78,9 @@ function seed(name: string, tag: string): App {
   emit(store, clock - MIN, app.id, [{ signal: "x", severity: "critical", summary: marker(`${tag}summary`) }]);
   store.addIngestRejections([{ app_id: app.id, minute: T0 - MIN, status: 429, n: 3 }]);
   store.addScrubMismatches([{ app_id: app.id, minute: T0 - MIN, n: 2 }]);
+  store.setCodeLink(app.id, `owner/${tag}repo`, "ok", null);
+  store.saveCodeDiff(app.id, { release: marker(`${tag}release`), repo: `owner/${tag}repo`, base_commit: "a".repeat(40), head_commit: "b".repeat(40), status: "ok", reason: null, files: 1, truncated: 0, tries: 1, next_try_at: null },
+    [{ file: `src/${marker(`${tag}file`)}.ts`, previous_file: null, change: "modified", start_line: 1, end_line: 4 }]);
   return store.appByName(name)!;
 }
 

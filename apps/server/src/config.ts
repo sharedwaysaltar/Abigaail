@@ -1,5 +1,6 @@
 import { RETENTION, type RetentionDays, type RetentionPeriod } from "./agents/thresholds.js";
 import { loadAlertConfig, type AlertConfig } from "./alerts/config.js";
+import { loadGithubConfig, type CodeLinkConfig } from "./github.js";
 
 /** Server configuration from the environment. Keys and secrets never live in the repo. */
 export interface Config {
@@ -20,6 +21,8 @@ export interface Config {
   retention: RetentionDays;
   /** Alert channels, links and the heartbeat URL (none set: alerts are off). */
   alerts: AlertConfig;
+  /** Read-only GitHub links, one per app (ABIGAAIL_GITHUB_REPO_<APP> / ABIGAAIL_GITHUB_TOKEN_<APP>). */
+  github: CodeLinkConfig[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -38,6 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     liveToken: env.ABIGAAIL_LIVE_TOKEN ?? "",
     retention: loadRetention(env),
     alerts: loadAlertConfig(env),
+    github: loadGithubConfig(env),
   };
 }
 

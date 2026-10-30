@@ -19,7 +19,7 @@ import { plan, SCENARIOS, type Action, type Scenario } from "./scenarios.js";
 import { FIRST_RELEASE, seedHistory, seedHours } from "./seed.js";
 import { killAllNow, Log, NextDemo, NodeDemo, portFree, PORTS, Server, type Demo } from "./stack.js";
 import { MIN, type AppKind } from "./traffic.js";
-import { mins, storeChecks, timeline, Tracker, type Problem, type Result, type Timeline } from "./verify.js";
+import { codeLinkChecks, mins, storeChecks, timeline, Tracker, type Problem, type Result, type Timeline } from "./verify.js";
 
 const POLL_MS = 5000;
 /** A poll this late means the machine slept or the process was stopped. */
@@ -98,7 +98,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
   writable.close();
   console.log(`Seeded ${events} events of history over ${hours.length} past hours in ${((Date.now() - t0) / 1000).toFixed(1)} s.`);
 
-  const server = new Server(paths, log, liveToken);
+  const server = new Server(paths, log, liveToken, created.name);
   const demo: Demo = app === "node" ? new NodeDemo(key, log, paths.crash) : new NextDemo(key, log);
   let driver: Driver | undefined;
   let reader: StoreReader | undefined;
@@ -119,7 +119,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
     const now = Date.now();
     tracker.observe(reader.findingsSince(created.id, t.runStart, 1000));
     const results = tracker.results(now);
-    const problems = [...tracker.problems(), ...storeChecks(reader, created.id, t, now, (from, to) => driver!.answered(from, to))];
+    const problems = [...tracker.problems(), ...storeChecks(reader, created.id, t, now, (from, to) => driver!.answered(from, to)), ...codeLinkChecks(paths.db)];
     const ok = printReport(results, problems, tracker.notes());
     writeFileSync(paths.report, JSON.stringify({ app, appName: created.name, seed, node: process.versions.node, linking: demo.linking, timeline: t, results, problems, stats: driver?.stats }, null, 2));
     return ok;

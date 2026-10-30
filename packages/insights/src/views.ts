@@ -10,8 +10,10 @@ import {
 import { baselineSlots, rowsByKey, totals, typicalCount, typicalLevel, typicalP95, typicalRate, type BaselineSource } from "./baseline.js";
 import { blockingRoutes, leakVerdicts, unexpectedRestarts, type BlockingRoute, type Crash, type LeakVerdict } from "./resilience.js";
 import { median, poissonCdf, poissonUpperTail } from "./stats.js";
-import { BASELINE, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
+import { BASELINE, CODE, RESILIENCE, ROLLOUT, SCHEDULE, STATUS_FRESH_MS, VIEWS as V, windowEnd } from "./thresholds.js";
 import { judge, releaseInput, type ReleaseData, type SignalKind, type Verdict } from "./rollout.js";
+import { codeContext, codeStatusText, involved, type CodeFrame, type CodeStatus, type Involved } from "./code.js";
+import { blockFunctions } from "./profiles.js";
 
 const MIN = 60_000;
 
@@ -742,6 +744,23 @@ export interface ReleaseDetail {
   /** Frames point at compiled output (dist/, .next/, build/): source maps would name the source lines. */
   compiledFrames: boolean;
   finding: Finding | null;
+  /** The read-only GitHub link's view of this release (DECISIONS #138); null when no link is set up. */
+  code: ReleaseCode | null;
+}
+
+export interface ReleaseCode {
+  status: CodeStatus;
+  /** Why the diff is not there, in words ("" when it is). */
+  why: string;
+  repo: string | null;
+  base: string | null;
+  head: string | null;
+  files: number;
+  truncated: boolean;
+  /** The link itself failed (token expired, no access): its reason. */
+  linkFailed: string | null;
+  /** Frames of this release's errors, blocks and crashes that sit in code it changed. */
+  involved: Involved[];
 }
 
 const COMPILED = /^(dist|build|out|\.next|\.output)\//;
@@ -756,7 +775,7 @@ export function releaseView(store: StoreReader, appId: string, release: string, 
   if (!d) return undefined;
   const row = releasesView(store, appId).find((r) => r.release === release)!;
   const finding = row.finding;
-  const base = { release, deploy: d, row, finding, routes: [], errors: [], crashes: [], compiledFrames: false, from: null, to: null, baseline: null, baselineMs: null };
+  const base = { release, deploy: d, row, finding, routes: [], errors: [], crashes: [], compiledFrames: false, from: null, to: null, baseline: null, baselineMs: null, code: null };
   if (d.deployed_at === null || d.replaced_release === null) {
     return { ...base, notJudged: "Not judged: the app's first release, or one deployed before Abigaail recorded deploys." };
   }
@@ -779,6 +798,30 @@ export function releaseView(store: StoreReader, appId: string, release: string, 
   const errors = store.releaseErrors(appId, release, d.deployed_at, data.end, 10).map((e) => ({ ...e, isNew: fresh.has(`${e.error_type} ${e.route ?? "-"}`) }));
   const profileFiles = store.profiles(appId, "cpu", d.deployed_at, data.end, 3).flatMap((p) => p.frames.map((f) => f.file));
   const compiledFrames = [...errors.map((e) => e.file ?? ""), ...profileFiles].some((f) => COMPILED.test(f));
+  const ctx = codeContext(store, appId, release);
+  let code: ReleaseCode | null = null;
+  if (ctx.status !== "off" || ctx.diff) {
+    // Everything on the release, not only what Rollout judged significant: errors (innermost frames first), blocks, crashes.
+    const frames: CodeFrame[] = store
+      .releaseErrorFrames(appId, release, d.deployed_at, data.end, CODE.errorDepth)
+      .sort((a, b) => a.depth - b.depth || b.n - a.n)
+      .map((f) => ({ file: f.file, line: f.line, fn: f.fn, what: `${f.error_type}${f.route ? ` on ${f.route}` : ""}` }));
+    for (const f of blockFunctions(store, appId, d.deployed_at, data.end).slice(0, 5)) frames.push({ ...f.frame, what: "event-loop blocks" });
+    for (const c of data.crashes) {
+      if ((c.cause.kind === "error" || c.cause.kind === "fatal_error") && c.cause.frame) frames.push({ ...c.cause.frame, what: `the crash (${c.cause.error_type})` });
+    }
+    code = {
+      status: ctx.status,
+      why: codeStatusText(ctx),
+      repo: ctx.diff?.repo ?? ctx.link?.repo ?? null,
+      base: ctx.diff?.base_commit ?? null,
+      head: ctx.diff?.head_commit ?? null,
+      files: ctx.diff?.files ?? 0,
+      truncated: !!ctx.diff?.truncated,
+      linkFailed: ctx.link?.state === "failed" ? ctx.link.reason : null,
+      involved: involved(ctx, frames),
+    };
+  }
   return {
     ...base,
     notJudged: null,
@@ -790,5 +833,6 @@ export function releaseView(store: StoreReader, appId: string, release: string, 
     errors,
     crashes: data.crashes.map((c) => ({ ts: c.ts, text: c.text })),
     compiledFrames,
+    code,
   };
 }

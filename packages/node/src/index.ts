@@ -8,3 +8,5 @@ export { instanceId, RUNTIME, RuntimeMonitor } from "./runtime.js";
 export type { RuntimeOptions } from "./runtime.js";
 export { isSdkUrl, PROFILER_STATE, PROFILING, Profiler, profileFrame, profilingWanted } from "./profiler.js";
 export type { InspectorModule, InspectorSession, ProfilerOptions, ProfilerState } from "./profiler.js";
+export { COMPILED_RE, SOURCE_MAPS, SourceMapper, sourceMapsWanted } from "./sourcemap.js";
+export type { MapperOptions } from "./sourcemap.js";

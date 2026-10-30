@@ -67,6 +67,7 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
 - `packages/node`: `@abigaail/node` adapter (`diagnostics_channel` capture, flags, stack frames, metrics).
   `src/runtime.ts`: runtime signals (post-GC heap floor, event-loop blocks charged to routes, startup,
   instance id, opt-in crash record), sent only after the server announces `runtime_v1` (DECISIONS #110).
+  `src/sourcemap.ts`: opt-in source maps (`module.SourceMap`, budgets, frames stay project-relative, DECISIONS #136).
   `src/profiler.ts`: opt-in profiling (in-process `node:inspector`, CPU windows, sampling heap profiler, budget and
   back-off), sent only after `profile_v1`. `bench/profiling.mjs` measures its overhead (`npm run bench:profiling`).
 - `packages/next`: `@abigaail/next` (`register` / `onRequestError` for `instrumentation.ts`, routes manifest).
@@ -79,6 +80,7 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
   `src/profiles.ts`: stored profiles merged, top functions, flame tree, growing heap sites, functions behind blocks.
   `src/rollout.ts`: the Rollout Safety rules (`judge` is pure: exact tests, look correction, gates; `releaseInput`
   gathers; `rolloutCovers` is the fold rule Health and Resilience use), shared with the Releases tab (`releaseView`).
+  `src/code.ts`: diff → file/line (`involved`: frames in a release's changed hunks, github.com links only, #138).
 - `packages/auth`: `@abigaail/auth`, scrypt passwords, TOTP, sealed secrets, sign-in and session rules.
 - `apps/server`: ingest server (`src/server.ts`), derivations (`src/derive.ts`), daily salt
   file (`src/salt.ts`, never in the DB), admin CLI. Hosting requirements: docs/HOSTING.md.
@@ -90,6 +92,8 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
   (`weeklyVacuumSlot`; `RETENTION` in `agents/thresholds.ts`), runs even with
   agents off; erasure helpers (secure_delete, incremental vacuum, WAL truncate) are `packages/store/src/vacuum.ts`.
   What it may carry is `toLiveEvent` / `LIVE_FIELDS` in `packages/store/src/live.ts`.
+  `src/github.ts`: the read-only GitHub link (main thread only; token from env, dropped from `process.env`, never
+  stored or logged; only api.github.com; compare → paths and hunk line ranges, never patch text; #137).
   `src/alerts/`: the alerter (`alerter.ts`: sweep, dedup, cooldown, bounded sender), `channels.ts` (webhook, nodemailer),
   `url.ts` (where it may send; checked again at every connection), `format.ts` (`ITEM_FIELDS`, the only fields sent),
   `heartbeat.ts`, `config.ts` (env only), `cli.ts` (`alerts:test`). Red = `isRed` in the store, shared with status.
@@ -107,7 +111,8 @@ How agents must think (plan every agent against it): @docs/AGENTS.md.
   API routes a script calls use `requireApiSession()` (401, read-only, never a redirect). `lib/live.ts` relays
   the Live feed (pull-based, closed on sign-out).
 - `apps/sim`: the bad-traffic simulator. `scenarios.ts` (what each does and must produce), `traffic.ts` +
-  `model.ts` (the traffic and demo models shared by seeding and the replay tests), `guard.ts` (localhost
+  `model.ts` (the traffic and demo models shared by seeding and the replay tests), `code.ts` + `fake-github.ts`
+  (the GitHub fixture, preloaded into the simulator's own server only), `guard.ts` (localhost
   only), `paths.ts` (data/sim only, realpath-checked), `verify.ts` (judges findings), `replay.ts` (simulated
   clock, used by `test/scenarios.test.ts`), `stack.ts`/`driver.ts`/`main.ts` (the live run).
 - `apps/demo-node`, `apps/demo-next`: demo apps (not part of `npm run build`). demo-node's fault switches

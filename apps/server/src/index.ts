@@ -39,3 +39,5 @@ export { addressAllowed, addressKind, checkedLookup, checkUrl, UrlRefused } from
 export { purgeApp, PurgeInterrupted, purgePlan, purgeTotal, runPurgeCommand, vacuumIfOwed } from "./purge.js";
 export type { PurgeCommandDeps, PurgeOptions } from "./purge.js";
 export { appNamedFingerprints } from "./agents/watchdog.js";
+export { CodeLinks, dropGithubTokens, GITHUB, githubEnvNames, githubGet, loadGithubConfig, parseCompare, REASONS as CODE_LINK_REASONS } from "./github.js";
+export type { CodeLinkConfig, CodeLinksOptions, Fetch } from "./github.js";

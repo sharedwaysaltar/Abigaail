@@ -9,7 +9,9 @@ import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
+import { SIM_COMMITS, simGithubEnv } from "./code.js";
 import { assertLocalTarget } from "./guard.js";
 import type { Faults } from "./model.js";
 import { NORMAL_FAULTS } from "./model.js";
@@ -18,13 +20,15 @@ import type { AppKind } from "./traffic.js";
 
 export const PORTS = { ingest: 4318, live: 4320, node: 3001, next: 3000 } as const;
 export const SERVER_MAIN = join(REPO_ROOT, "apps/server/dist/main.js");
+/** Answers the server's GitHub calls from the fixture (code.ts); preloaded into the simulator's server only. */
+export const FAKE_GITHUB = join(REPO_ROOT, "apps/sim/dist/fake-github.js");
 export const DEMO_NODE_MAIN = join(REPO_ROOT, "apps/demo-node/server.mjs");
 export const DEMO_NEXT_DIR = join(REPO_ROOT, "apps/demo-next");
 export const REGION = "LON1";
 
 /** Ingest keys never reach the log, the terminal or the report, even if a child prints one. */
 export function redact(text: string): string {
-  return text.replace(/abk_[A-Za-z0-9_-]+/g, "abk_[redacted]");
+  return text.replace(/abk_[A-Za-z0-9_-]+/g, "abk_[redacted]").replace(/github_pat_[A-Za-z0-9_]+/g, "github_pat_[redacted]");
 }
 
 export class Log {
@@ -126,6 +130,8 @@ export class Server {
     private readonly paths: SimPaths,
     private readonly log: Log,
     private readonly liveToken: string | undefined,
+    /** The simulated app: its read-only GitHub link goes to the fixture. */
+    private readonly appName?: string,
   ) {}
 
   async start(): Promise<void> {
@@ -139,8 +145,11 @@ export class Server {
       ABIGAAIL_PORT: String(PORTS.ingest),
       ABIGAAIL_LIVE_PORT: String(PORTS.live),
       ...(this.liveToken ? { ABIGAAIL_LIVE_TOKEN: this.liveToken } : {}),
+      ...(this.appName ? simGithubEnv(this.appName) : {}),
+      ...(process.env.ABIGAAIL_SIM_GITHUB === "down" ? { ABIGAAIL_SIM_GITHUB: "down" } : {}),
     };
-    this.child = track(spawn(process.execPath, [SERVER_MAIN], { env, stdio: ["ignore", "pipe", "pipe"] }));
+    const preload = this.appName && existsSync(FAKE_GITHUB) ? ["--import", pathToFileURL(FAKE_GITHUB).href] : [];
+    this.child = track(spawn(process.execPath, [...preload, SERVER_MAIN], { env, stdio: ["ignore", "pipe", "pipe"] }));
     capture(this.child, "server", this.log);
     await waitForPort(PORTS.ingest, 20_000);
   }
@@ -196,6 +205,8 @@ export class NodeDemo implements Demo {
       ABIGAAIL_ENDPOINT: endpoint.href,
       ABIGAAIL_INGEST_KEY: this.#key,
       ABIGAAIL_RELEASE: release,
+      // The deploy step's commit, so the server's GitHub job can compare releases (fixture: code.ts).
+      ...(SIM_COMMITS[release] ? { ABIGAAIL_COMMIT: SIM_COMMITS[release] } : {}),
       ABIGAAIL_ENVIRONMENT: "development",
       ABIGAAIL_REGION: REGION,
       ABIGAAIL_DEMO_SIM: "1",

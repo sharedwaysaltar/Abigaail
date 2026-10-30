@@ -7,6 +7,7 @@ import { Alerter } from "./alerts/alerter.js";
 import { makeChannels } from "./alerts/channels.js";
 import { Heartbeat } from "./alerts/heartbeat.js";
 import { loadConfig, type Config } from "./config.js";
+import { CodeLinks, dropGithubTokens } from "./github.js";
 import { LIVE, LiveHub, startLive } from "./live.js";
 import { vacuumIfOwed } from "./purge.js";
 import { convertForShrinking, Retention } from "./retention.js";
@@ -22,6 +23,8 @@ try {
   log(`${err instanceof Error ? err.message : String(err)}; not starting`);
   process.exit(1);
 }
+// The tokens now live only in config.github: nothing started later (agent workers, child processes) inherits them.
+dropGithubTokens(process.env);
 let salt: SaltFile;
 try {
   // Rotates a salt left over from an earlier day before the first request.
@@ -56,6 +59,8 @@ const alerter = channels.length
 const runner = config.agents
   ? new Runner({ store, dbPath: config.dbPath, saltPath: config.saltPath, retention: config.retention, alerts: !!alerter })
   : undefined;
+// The read-only GitHub link runs in this thread, so its tokens never reach an agent worker (DECISIONS #137).
+const codeLinks = config.github.length ? new CodeLinks({ store, links: config.github }) : undefined;
 const healthz = (): { ok: boolean; agents?: "off" } => (runner ? { ok: runner.watchdogFresh() } : { ok: true, agents: "off" });
 const heartbeat = config.alerts.heartbeatUrl
   ? new Heartbeat({ url: config.alerts.heartbeatUrl, allowPrivate: !!config.alerts.heartbeatAllowPrivate, healthy: () => healthz().ok })
@@ -86,12 +91,15 @@ server.listen(config.port, config.host, () => {
   }
   alerter?.start();
   console.log(alerter ? `[abigaail] alerts: ${channels.map((c) => c.label).join("; ")}` : "[abigaail] alerts are off (no channel configured)");
+  codeLinks?.start();
+  console.log(codeLinks ? `[abigaail] github link on for ${config.github.map((l) => l.app).join(", ")} (read-only)` : "[abigaail] github link off (no ABIGAAIL_GITHUB_REPO_<APP>)");
   heartbeat?.start();
   if (heartbeat) console.log("[abigaail] heartbeat on (ABIGAAIL_HEARTBEAT_URL)");
 });
 
 function shutdown(): void {
   void runner?.stop();
+  void codeLinks?.stop();
   alerter?.stop();
   heartbeat?.stop();
   void retention.stop();

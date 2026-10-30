@@ -9,16 +9,24 @@
 
 import type { App } from "@abigaail/store";
 import {
+  blockFunctions,
+  codeContext,
+  codeStatusText,
+  involved,
+  involvedText,
+  CODE,
   heldVerdict,
   humanDuration,
   judge,
   releaseInput,
+  type CodeFrame,
   type Covers,
   type Judgement,
   type ReleaseData,
   type Signal,
   type Verdict,
 } from "@abigaail/insights";
+import { githubEnvNames, REASONS } from "../github.js";
 import { ROLLOUT as R, SCHEDULE } from "./thresholds.js";
 import type { Agent, AgentContext, AgentFinding } from "./types.js";
 
@@ -78,10 +86,47 @@ const RULE_TEXT: Record<string, string> = {
   route_quiet: `a route carrying at least ${pct(R.routeTrafficShare)} of the usual traffic went quiet`,
 };
 
-function finding(app: App, data: ReleaseData, j: Judgement, verdict: Verdict, covers: Covers): AgentFinding {
+/**
+ * The frames behind the signals, most relevant first: each new error type's
+ * and each failing route's error frames (innermost first), the functions
+ * inside event-loop blocks for a slower release, a crash's frame.
+ */
+function codeFrames(ctx: AgentContext, app: App, data: ReleaseData, signals: readonly Signal[]): CodeFrame[] {
+  const out: CodeFrame[] = [];
+  const errors = ctx.store.releaseErrorFrames(app.id, data.release, data.deployedAt, data.end, CODE.errorDepth).sort((a, b) => a.depth - b.depth || b.n - a.n);
+  const of = (keep: (f: (typeof errors)[number]) => boolean, what: string) => {
+    for (const f of errors) if (keep(f)) out.push({ file: f.file, line: f.line, fn: f.fn, what });
+  };
+  for (const s of signals) {
+    if (s.kind === "new_error") {
+      const key = String(s.detail.error);
+      const space = key.indexOf(" ");
+      const type = key.slice(0, space);
+      const route = key.slice(space + 1);
+      of((f) => f.error_type === type && (f.route ?? "-") === route, `${type}${route !== "-" ? ` on ${route}` : ""}`);
+    } else if (s.kind === "errors" || s.kind === "client_errors") {
+      of((f) => f.route === s.route, `errors on ${s.route}`);
+    } else if (s.kind === "latency" || s.kind === "app_latency") {
+      for (const f of blockFunctions(ctx.store, app.id, data.deployedAt, data.end).slice(0, 3)) out.push({ ...f.frame, what: "event-loop blocks" });
+    } else if (s.kind === "loop") {
+      for (const c of data.crashes) {
+        const cause = c.cause;
+        if ((cause.kind === "error" || cause.kind === "fatal_error") && cause.frame) out.push({ ...cause.frame, what: `the crash (${cause.error_type})` });
+      }
+    }
+  }
+  return out;
+}
+
+function finding(ctx: AgentContext, app: App, data: ReleaseData, j: Judgement, verdict: Verdict, covers: Covers): AgentFinding {
   const { release, previous, deployedAt } = data;
   const since = `since the deploy at ${hhmm(deployedAt)}`;
   const signals = ranked(j);
+  // Diff → file/line (#138): which of the frames behind the signals the release changed.
+  const frames = signals.length ? codeFrames(ctx, app, data, signals) : [];
+  const code = signals.length ? codeContext(ctx.store, app.id, release) : undefined;
+  const changed = code ? involved(code, frames) : [];
+  const changedText = involvedText(changed, release);
   const said = signals.slice(0, 4).map(describe);
   const more = signals.length > 4 ? `; and ${signals.length - 4} more` : "";
   const corrected = j.confidence.corrected;
@@ -91,12 +136,14 @@ function finding(app: App, data: ReleaseData, j: Judgement, verdict: Verdict, co
   let action: string;
   switch (verdict) {
     case "rollback":
-      summary = `Recommend rollback: release ${release} (replacing ${previous}) ${said.join("; ")}${more}, ${since}.`;
+      summary = `Recommend rollback: release ${release} (replacing ${previous}) ${said.join("; ")}${more}, ${since}.${changedText ? ` ${changedText}` : ""}`;
       cause = `The change started with release ${release}: impact, ${RULE_TEXT[j.impact.rule ?? ""] ?? "high"}${pText ? `; confidence, ${pText}` : ""}, and ${previous} was normal before the deploy.`;
-      action = `Roll back to ${previous}, then look at what changed between ${previous} and ${release}${signals[0]?.route ? ` on ${signals[0].route}` : ""}.`;
+      action = changed.some((c) => c.match === "line")
+        ? `Roll back to ${previous}, then look at the changed lines named above (Releases tab: Changed code involved).`
+        : `Roll back to ${previous}, then look at what changed between ${previous} and ${release}${signals[0]?.route ? ` on ${signals[0].route}` : ""}.`;
       break;
     case "watch": {
-      summary = `Watch release ${release} (replacing ${previous}): ${said.join("; ")}${more}, ${since}.`;
+      summary = `Watch release ${release} (replacing ${previous}): ${said.join("; ")}${more}, ${since}.${changedText ? ` ${changedText}` : ""}`;
       const gate = !j.impact.met ? "the impact is below the rollback bar" : (j.confidence.why ?? "it has not held long enough");
       cause = `Changed with release ${release}, compared with ${BASELINE_TEXT[data.baseline]}; not a rollback because ${gate}.`;
       action = `Look at what changed between ${previous} and ${release}${signals[0]?.route ? ` on ${signals[0].route}` : ""}; Rollout keeps comparing for ${humanDuration(R.judgeMs)} after the deploy.`;
@@ -146,13 +193,52 @@ function finding(app: App, data: ReleaseData, j: Judgement, verdict: Verdict, co
       commit: data.deploy.commit_sha,
       previous_release: data.deploy.previous_release,
       lockfile_hash: data.deploy.lockfile_hash,
+      // The frames behind the signals, with or without the GitHub link.
+      ...(frames.length ? { frames: frames.filter((f) => !f.file.includes("node_modules/")).slice(0, 8) } : {}),
+      ...(code
+        ? {
+            code: {
+              status: code.status,
+              ...(code.status !== "ok" ? { why: codeStatusText(code) } : {}),
+              ...(code.diff ? { repo: code.diff.repo, base: code.diff.base_commit, head: code.diff.head_commit, files: code.diff.files } : {}),
+              involved: changed,
+            },
+          }
+        : {}),
     },
     fact: verdict === "fine" || verdict === "too_little",
   };
 }
 
+const LINK_ACTION: Record<string, (repo: string, token: string) => string> = {
+  [REASONS.revoked]: (repo, token) =>
+    `Create a new fine-grained token (github_pat_…) with access to ${repo} only and Contents: read, set it as ${token}, and restart the Abigaail server.`,
+  [REASONS.forbidden]: (repo, token) => `Give the token in ${token} Contents: read on ${repo} (fine-grained token settings), or create a new one, and restart the Abigaail server.`,
+  [REASONS.noRepo]: (repo, token) => `Check that ${repo} is the repository's owner/name and that the token in ${token} has access to it, then restart the Abigaail server.`,
+};
+
+/** The read-only GitHub link stopped working (#137): findings keep their frames, without the changed lines. */
+function codeLinkFailed(ctx: AgentContext, app: App): AgentFinding[] {
+  const link = ctx.store.codeLink(app.id);
+  if (link?.state !== "failed") return [];
+  const token = githubEnvNames(app.name).token;
+  return [{
+    signal: "code_link_failed",
+    subject: "",
+    severity: "warning",
+    summary: `The read-only GitHub link for ${app.name} (${link.repo}) fails: ${link.reason ?? "GitHub refused it"}. Findings still name their frames, but not the changed lines.`,
+    action: (LINK_ACTION[link.reason ?? ""] ?? LINK_ACTION[REASONS.forbidden]!)(link.repo, token),
+    evidence: { repo: link.repo, reason: link.reason, since: link.since, checked_at: link.checked_at },
+    fact: true,
+  }];
+}
+
 function forApp(ctx: AgentContext, app: App): AgentFinding[] {
   if (app.disabled_at !== null) return [];
+  return [...releaseFinding(ctx, app), ...codeLinkFailed(ctx, app)];
+}
+
+function releaseFinding(ctx: AgentContext, app: App): AgentFinding[] {
   const data = releaseInput(ctx.store, app.id, ctx.windowEnd);
   if (!data) return [];
   const j = judge(data.input);
@@ -172,7 +258,7 @@ function forApp(ctx: AgentContext, app: App): AgentFinding[] {
     : j.raw === "watch" || j.raw === "rollback"
       ? j.covers
       : ((prev?.evidence.covers as Covers | undefined) ?? empty);
-  return [finding(app, data, j, verdict, covers)];
+  return [finding(ctx, app, data, j, verdict, covers)];
 }
 
 export const rollout: Agent = {

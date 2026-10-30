@@ -44,7 +44,7 @@ export function requestItems(r: Rng, req: SimRequest, out: Outcome, ts = req.at)
   }
   if (out.error) {
     items.push({
-      event: { type: "error", event_id: uuid(r), client_ts: end, error_type: out.error, route: out.route, handled: true, parent_id: event_id },
+      event: { type: "error", event_id: uuid(r), client_ts: end, error_type: out.error, route: out.route, handled: true, parent_id: event_id, ...(out.frames ? { frames: out.frames.map((f) => ({ ...f })) } : {}) },
       derived: { ts: end },
     });
   }

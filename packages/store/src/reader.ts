@@ -43,6 +43,55 @@ export interface ReleaseRouteCounts {
 }
 
 /** One error type on one route in a release, with its top stack frame (relative path, line, function). */
+/** The read-only GitHub link of one app (DECISIONS #136): never the token. */
+export interface CodeLink {
+  repo: string;
+  state: "ok" | "failed";
+  /** A fixed text saying what failed (never GitHub's own message). */
+  reason: string | null;
+  checked_at: number;
+  /** Since when it has been in this state. */
+  since: number;
+}
+
+export type CodeDiffStatus = "ok" | "failed" | "too_large" | "not_found";
+
+/** GitHub's compare of the replaced release's commit with a release's own (DECISIONS #137). */
+export interface CodeDiff {
+  release: string;
+  repo: string;
+  base_commit: string;
+  head_commit: string;
+  status: CodeDiffStatus;
+  reason: string | null;
+  files: number;
+  /** GitHub lists at most 300 files: more changed than are stored. */
+  truncated: number;
+  fetched_at: number;
+  tries: number;
+  next_try_at: number | null;
+}
+
+/** A changed file and, per hunk, the new side's line range (null: the whole file). Never the patch. */
+export interface CodeHunk {
+  file: string;
+  previous_file: string | null;
+  change: string;
+  start_line: number | null;
+  end_line: number | null;
+}
+
+/** One stack frame of a release's errors, with how often it appeared and its depth. */
+export interface ErrorFrame {
+  error_type: string;
+  route: string | null;
+  file: string;
+  line: number;
+  fn: string | null;
+  depth: number;
+  n: number;
+}
+
 export interface ReleaseError {
   error_type: string;
   route: string | null;
@@ -415,6 +464,43 @@ export class StoreReader {
       .prepare(`SELECT release, environment, first_seen, last_seen, deployed_at, replaced_release, commit_sha, previous_release, lockfile_hash
                 FROM deploys WHERE app_id = ? ORDER BY first_seen`)
       .all(appId) as unknown as Deploy[];
+  }
+
+  // ---- the GitHub link (DECISIONS #136-#138) -----------------------------------
+
+  codeLink(appId: string): CodeLink | undefined {
+    return this.db.prepare("SELECT repo, state, reason, checked_at, since FROM code_links WHERE app_id = ?").get(appId) as CodeLink | undefined;
+  }
+
+  codeDiff(appId: string, release: string): CodeDiff | undefined {
+    return this.db
+      .prepare(`SELECT release, repo, base_commit, head_commit, status, reason, files, truncated, fetched_at, tries, next_try_at
+                FROM code_diffs WHERE app_id = ? AND release = ?`)
+      .get(appId, release) as CodeDiff | undefined;
+  }
+
+  codeHunks(appId: string, release: string): CodeHunk[] {
+    return this.db
+      .prepare(`SELECT file, previous_file, change, start_line, end_line FROM code_hunks
+                WHERE app_id = ? AND release = ? ORDER BY file, start_line`)
+      .all(appId, release) as unknown as CodeHunk[];
+  }
+
+  /**
+   * The first `depth` frames of one release's errors with ts in [from, to),
+   * per error type, route and frame, most frequent first: what the diff is
+   * matched against.
+   */
+  releaseErrorFrames(appId: string, release: string, from: number, to: number, depth = 8, limit = 200): ErrorFrame[] {
+    return this.db
+      .prepare(`
+        SELECT e.name AS error_type, e.route AS route,
+               json_extract(f.value, '$.file') AS file, json_extract(f.value, '$.line') AS line,
+               json_extract(f.value, '$.fn') AS fn, min(CAST(f.key AS INTEGER)) AS depth, count(*) AS n
+        FROM events e, json_each(e.attrs, '$.frames') f
+        WHERE e.app_id = ? AND e.type = 'error' AND e.ts >= ? AND e.ts < ? AND e.release = ? AND CAST(f.key AS INTEGER) < ?
+        GROUP BY e.name, e.route, file, line, fn ORDER BY n DESC, depth LIMIT ?`)
+      .all(appId, from, to, release, depth, limit) as unknown as ErrorFrame[];
   }
 
   /** Errors on one release with ts in [from, to), per type, route and top frame, most frequent first. */

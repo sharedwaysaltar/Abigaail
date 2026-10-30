@@ -154,11 +154,12 @@ export const SCENARIOS: readonly Scenario[] = [
   {
     name: "bad-deploy",
     apps: ["node"],
-    description: "Deploys sim-r2, whose /checkout throws a TypeError on 40% of requests (500); rolled back to sim-r1 after 25 min. Health reports the route at once; Rollout Safety recommends a rollback once it is sure, and Health's findings fold into it.",
+    description: "Deploys sim-r2, whose /checkout throws a TypeError on 40% of requests (500); rolled back to sim-r1 after 25 min. Health reports the route at once; Rollout Safety recommends a rollback once it is sure, naming the changed lines the error comes from (the read-only GitHub link, answered by a fixture), and Health's findings fold into it.",
     steps: [...deployR2({ checkoutBug: 0.4 }), ...backToR1(25 * MIN, { checkoutBug: 0 })],
     faultMs: 25 * MIN + 2 * SEC,
     expect: [
-      { fingerprint: rollout("sim-r2"), severity: "critical", summary: ["Recommend rollback: release sim-r2 (replacing sim-r1)", "/checkout returns 5xx", "new error TypeError on /checkout"], showWithinMs: 16 * MIN, resolveWithinMs: 6 * MIN },
+      // The GitHub fixture (code.ts) changed applyDiscount's lines 133-136; the TypeError is thrown at line 135.
+      { fingerprint: rollout("sim-r2"), severity: "critical", summary: ["Recommend rollback: release sim-r2 (replacing sim-r1)", "/checkout returns 5xx", "new error TypeError on /checkout", "Changed code involved: apps/demo-node/faults.mjs:135 (applyDiscount), lines 133-136"], showWithinMs: 16 * MIN, resolveWithinMs: 6 * MIN },
       { fingerprint: health("server_errors", "/checkout"), severity: "critical", summary: ["/checkout returns 5xx"], showWithinMs: 7 * MIN, resolveWithinMs: 21 * MIN },
       { fingerprint: health("new_error", "TypeError /checkout"), severity: "warning", summary: ["New error: TypeError on /checkout"], showWithinMs: 4 * MIN, resolveWithinMs: 21 * MIN },
       { fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },

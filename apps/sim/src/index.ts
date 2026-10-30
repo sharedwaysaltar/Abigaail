@@ -11,3 +11,4 @@ export * from "./verify.js";
 export * from "./replay.js";
 export * from "./random.js";
 export { Log, NextDemo, NodeDemo, redact } from "./stack.js";
+export * from "./code.js";

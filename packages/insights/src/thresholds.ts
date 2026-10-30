@@ -239,3 +239,16 @@ export const ROLLOUT = {
   dependencyShare: 0.5,
   dependencyWindowMs: 30 * MIN,
 };
+
+/**
+ * Diff → file/line (DECISIONS #138): a frame is "in changed lines" when it
+ * falls inside a hunk of the release's diff or this many lines around it.
+ */
+export const CODE = {
+  lineSlack: 3,
+  /** Frames named in a finding at most (the Releases tab lists more). */
+  maxInSummary: 2,
+  maxInvolved: 12,
+  /** Frames per error read for matching (the outermost ones are framework code). */
+  errorDepth: 8,
+};

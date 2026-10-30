@@ -57,3 +57,7 @@ decided later (see DECISIONS #2); this list grows as chunks land.
 - [ ] **Two independent ways to hear about trouble:** configure both alert channels, or one channel
       plus `ABIGAAIL_HEARTBEAT_URL` / an uptime check on `/healthz`. A single channel cannot report its
       own failure (DECISIONS #98), and nothing inside Abigaail can report the server being down.
+- [ ] **GitHub link (optional):** the server may also connect out to `api.github.com:443`, and only
+      there, for apps with `ABIGAAIL_GITHUB_REPO_<APP>` set. Each token is a fine-grained `github_pat_`
+      token for that app's repository only, Contents: read only, with an expiry; it is in the server's
+      environment only, never in the dashboard's (DECISIONS #137).
