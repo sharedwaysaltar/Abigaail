@@ -127,6 +127,9 @@ function finding(ctx: AgentContext, app: App, data: ReleaseData, j: Judgement, v
   const code = signals.length ? codeContext(ctx.store, app.id, release) : undefined;
   const changed = code ? involved(code, frames) : [];
   const changedText = involvedText(changed, release);
+  // Without changed lines (no link, no commit, GitHub down), the summary still names where: alerts carry the summary, never the evidence.
+  const top = frames.find((f) => !f.file.startsWith("(") && !f.file.includes("node_modules/"));
+  const where = changedText ? ` ${changedText}` : top ? ` Top frame: ${top.file}:${top.line}${top.fn ? ` (${top.fn})` : ""}.` : "";
   const said = signals.slice(0, 4).map(describe);
   const more = signals.length > 4 ? `; and ${signals.length - 4} more` : "";
   const corrected = j.confidence.corrected;
@@ -136,14 +139,14 @@ function finding(ctx: AgentContext, app: App, data: ReleaseData, j: Judgement, v
   let action: string;
   switch (verdict) {
     case "rollback":
-      summary = `Recommend rollback: release ${release} (replacing ${previous}) ${said.join("; ")}${more}, ${since}.${changedText ? ` ${changedText}` : ""}`;
+      summary = `Recommend rollback: release ${release} (replacing ${previous}) ${said.join("; ")}${more}, ${since}.${where}`;
       cause = `The change started with release ${release}: impact, ${RULE_TEXT[j.impact.rule ?? ""] ?? "high"}${pText ? `; confidence, ${pText}` : ""}, and ${previous} was normal before the deploy.`;
       action = changed.some((c) => c.match === "line")
         ? `Roll back to ${previous}, then look at the changed lines named above (Releases tab: Changed code involved).`
         : `Roll back to ${previous}, then look at what changed between ${previous} and ${release}${signals[0]?.route ? ` on ${signals[0].route}` : ""}.`;
       break;
     case "watch": {
-      summary = `Watch release ${release} (replacing ${previous}): ${said.join("; ")}${more}, ${since}.${changedText ? ` ${changedText}` : ""}`;
+      summary = `Watch release ${release} (replacing ${previous}): ${said.join("; ")}${more}, ${since}.${where}`;
       const gate = !j.impact.met ? "the impact is below the rollback bar" : (j.confidence.why ?? "it has not held long enough");
       cause = `Changed with release ${release}, compared with ${BASELINE_TEXT[data.baseline]}; not a rollback because ${gate}.`;
       action = `Look at what changed between ${previous} and ${release}${signals[0]?.route ? ` on ${signals[0].route}` : ""}; Rollout keeps comparing for ${humanDuration(R.judgeMs)} after the deploy.`;

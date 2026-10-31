@@ -5,7 +5,7 @@
 import { appendFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { health, resilience, watchdog, type Agent } from "@abigaail/server";
-import { mins, plan, replay, scenario, scenariosFor, WARMUP_MS, type AppKind, type Scenario, type Tracker } from "@abigaail/sim";
+import { mins, plan, replay, scenario, scenariosFor, WARMUP_MS, withGithubDown, type AppKind, type Scenario, type Tracker } from "@abigaail/sim";
 import { BUSY, cleanup, QUIET, seededStore } from "./simfx.js";
 
 const MIN = 60_000;
@@ -160,11 +160,12 @@ for (const app of ["node", "next"] as const) {
       }, 300_000);
 
       it("bad-deploy with GitHub down (no diff stored): Rollout still recommends the rollback on time, naming the error's frame, without changed lines", () => {
-        const base = scenario(app, "bad-deploy")!;
-        const down: Scenario = {
-          ...base,
-          expect: base.expect.map((e) => (e.fingerprint === "rollout:release:sim-r2" ? { ...e, summary: e.summary.filter((w) => !w.startsWith("Changed code involved")) } : e)),
-        };
+        // As the live run judges it with ABIGAAIL_SIM_GITHUB=down: the top frame, never "Changed code involved".
+        const down = withGithubDown(scenario(app, "bad-deploy")!);
+        expect(down.expect.find((e) => e.fingerprint === "rollout:release:sim-r2")).toMatchObject({
+          summary: expect.arrayContaining(["Top frame: apps/demo-node/faults.mjs:135 (applyDiscount)."]),
+          summaryNot: ["Changed code involved"],
+        });
         const s = seededStore(app, QUIET);
         try {
           const r = replay({ store: s.store, appId: s.appId, app, plan: [{ scenario: down, at: WARMUP_MS }], start: QUIET, code: false });
@@ -172,9 +173,20 @@ for (const app of ["node", "next"] as const) {
           expect(r.tracker.results(r.endedAt).filter((x) => x.status !== "pass")).toEqual([]);
           const f = s.store.findingHistory(s.appId).find((x) => x.fingerprint === "rollout:release:sim-r2" && x.severity === "critical")!;
           expect(f.summary).not.toContain("Changed code involved");
+          expect(f.summary).toContain("Top frame: apps/demo-node/faults.mjs:135 (applyDiscount).");
           expect(f.evidence.frames).toContainEqual({ file: "apps/demo-node/faults.mjs", line: 135, fn: "applyDiscount", what: "TypeError on /checkout" });
         } finally {
           s.close();
+        }
+        // The verifier holds it: judged as "down" while GitHub answered, the changed lines are a FAIL.
+        const up = seededStore(app, QUIET);
+        try {
+          const r = replay({ store: up.store, appId: up.appId, app, plan: [{ scenario: down, at: WARMUP_MS }], start: QUIET });
+          const res = r.tracker.results(r.endedAt).find((x) => x.fingerprint === "rollout:release:sim-r2")!;
+          expect(res.status).toBe("fail");
+          expect(res.detail).toMatch(/summary lacks .*Top frame: apps\/demo-node\/faults\.mjs:135|must not say "Changed code involved"/);
+        } finally {
+          up.close();
         }
       }, 300_000);
 

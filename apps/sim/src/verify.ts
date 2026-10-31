@@ -141,6 +141,8 @@ export class Tracker {
         const detail = `summary lacks "${exp.summary.join('", "')}"; when confirmed it read: ${hit.summary}`;
         return last.state === "open" && now <= resolveBy ? { ...base, status: "shown", showMs, detail } : { ...base, status: "fail", showMs, detail };
       }
+      const banned = confirmed.find((e) => exp.summaryNot?.some((w) => e.summary.includes(w)));
+      if (banned) return { ...base, status: "fail", showMs, detail: `summary must not say "${exp.summaryNot!.join('", "')}"; it read: ${banned.summary}` };
       if (last.state === "open") {
         return now > resolveBy ? { ...base, status: "fail", showMs, detail: `still open ${mins(now - item.faultEndAt)} after the fault ended` } : { ...base, status: "shown", showMs, detail: "shown; waiting to resolve" };
       }

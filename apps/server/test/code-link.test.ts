@@ -225,6 +225,7 @@ describe("findings", () => {
     const f = twoRuns().find((x) => x.fingerprint === "rollout:release:r2")!;
     expect(f.severity).toBe("critical");
     expect(f.summary).toContain("Changed code involved: src/checkout.ts:12 (applyDiscount), lines 10-15, changed in r2.");
+    expect(f.summary).not.toContain("Top frame");
     expect(f.action).toContain("look at the changed lines");
     const code = f.evidence.code as { status: string; involved: { url: string; match: string }[] };
     expect(code.status).toBe("ok");
@@ -242,18 +243,32 @@ describe("findings", () => {
     expect(f.severity).toBe("critical");
     expect(f.summary).toMatch(/^Recommend rollback: release r2/);
     expect(f.summary).not.toContain("Changed code involved");
+    // Alerts carry the summary and cause only: the code location must be in the summary.
+    expect(f.summary).toMatch(/since the deploy at 13:50 UTC\. Top frame: src\/checkout\.ts:12 \(applyDiscount\)\.$/);
     expect(f.evidence.frames).toContainEqual({ ...FRAME, what: "TypeError on /checkout" });
     expect(f.evidence.code).toMatchObject({ status: "failed", why: REASONS.unreachable, involved: [] });
     expect(releaseView(fx.store, fx.appId, "r2", NOW)!.errors[0]).toMatchObject({ file: FRAME.file, line: FRAME.line, fn: FRAME.fn });
   });
 
-  it("without a link the finding is as before, with its frames", () => {
+  it("without a link the summary names the top frame, and the evidence has the frames", () => {
     badRelease();
     const f = twoRuns().find((x) => x.fingerprint === "rollout:release:r2")!;
     expect(f.severity).toBe("critical");
+    expect(f.summary).toMatch(/ Top frame: src\/checkout\.ts:12 \(applyDiscount\)\.$/);
     expect(f.evidence.frames).toContainEqual({ ...FRAME, what: "TypeError on /checkout" });
     expect(f.evidence.code).toMatchObject({ status: "off", involved: [] });
     expect(releaseView(fx.store, fx.appId, "r2", NOW)!.code).toBeNull();
+  });
+
+  it("a release named by a label (no commit to compare): the summary names the top frame", async () => {
+    badRelease();
+    // The deploy step sent no commit for r2: nothing can be fetched.
+    (fx.store as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db.prepare("UPDATE deploys SET commit_sha = NULL WHERE release = 'r2'").run();
+    await job(fakeFetch(github).fetch).runOnce();
+    const f = twoRuns().find((x) => x.fingerprint === "rollout:release:r2")!;
+    expect(f.evidence.code).toMatchObject({ status: "no_commit" });
+    expect(f.summary).toContain("Top frame: src/checkout.ts:12 (applyDiscount).");
+    expect(f.summary).not.toContain("Changed code involved");
   });
 
   it("a 401: the link is marked failed and Rollout says 'token expired or revoked: create a new one'; the app is not asked again for an hour", async () => {

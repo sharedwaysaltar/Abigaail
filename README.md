@@ -280,7 +280,8 @@ one, once per release (a compare never changes, so it is kept), and stores the c
 files' paths and each change's line range. **The patch text is never stored**: it is read
 for its line numbers and dropped. The token lives only in the server process's memory: it is
 removed from the environment once read, and never reaches the database, a log line, an
-agent or the dashboard. GitHub down or slow changes nothing else: findings keep their frames,
+agent or the dashboard. GitHub down or slow changes nothing else: findings keep their frames (a finding with no
+changed lines to name says "Top frame: src/checkout.ts:12 (applyDiscount)." instead),
 the server retries with back-off, and the release's page says why there is no match. If GitHub
 refuses the token (expired or revoked, no access to the repository), Rollout Safety reports
 `code_link_failed` with what to do ("token expired or revoked: create a new one").
@@ -506,7 +507,8 @@ out-of-memory restart loop, a slow memory leak, and four deploys of a new releas
 that breaks a route, one that slows one, a clean one, and one that crashes at every start
 (each then rolled back, as you would after "recommend rollback"). Its server's GitHub link
 answers from a built-in fixture (no network, no real token), so bad-deploy's finding names
-the changed lines; `ABIGAAIL_SIM_GITHUB=down` makes that fixture fail like GitHub being down.
+the changed lines; `ABIGAAIL_SIM_GITHUB=down` makes that fixture fail like GitHub being down (the run then expects
+the finding to name the top frame instead, and never "Changed code involved").
 After each run it also checks that no patch text or token reached the database. It prints PASS or FAIL for each expected finding, with how
 long it took to appear and to resolve. It only talks to demo apps on this machine and
 never touches `data/abigaail.db`; stop `npm run dev:server` and the demo first (it needs

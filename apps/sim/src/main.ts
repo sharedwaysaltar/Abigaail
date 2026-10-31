@@ -15,7 +15,7 @@ import { Driver } from "./driver.js";
 import type { Faults } from "./model.js";
 import { NORMAL_FAULTS } from "./model.js";
 import { ensureSimDir, resetSim, simPaths } from "./paths.js";
-import { plan, SCENARIOS, type Action, type Scenario } from "./scenarios.js";
+import { plan, SCENARIOS, withGithubDown, type Action, type Scenario } from "./scenarios.js";
 import { FIRST_RELEASE, seedHistory, seedHours } from "./seed.js";
 import { killAllNow, Log, NextDemo, NodeDemo, portFree, PORTS, Server, type Demo } from "./stack.js";
 import { MIN, type AppKind } from "./traffic.js";
@@ -76,7 +76,10 @@ function printReport(results: Result[], problems: Problem[], notes: string[]): b
 
 async function run(app: AppKind, names: string[], seed: number): Promise<boolean> {
   if (!names.length) throw new Error("usage: npm run sim -- run <scenario|all> [--app node|next]  (see: npm run sim -- list)");
-  const planned = plan(app, names);
+  // GitHub down: the fixture fails every call, so expectations name the top frame instead of changed lines.
+  const githubDown = process.env.ABIGAAIL_SIM_GITHUB === "down";
+  const planned = plan(app, names).map((p) => (githubDown ? { ...p, scenario: withGithubDown(p.scenario) } : p));
+  if (githubDown) console.log("GitHub is down for this run (ABIGAAIL_SIM_GITHUB=down): findings must name the top frame, not changed lines.");
   if (app === "next" && !NextDemo.built()) throw new Error("demo-next is not built: run `npm run build -w @abigaail/demo-next` first");
   const liveToken = process.env.ABIGAAIL_LIVE_TOKEN || undefined;
   for (const port of [PORTS.ingest, PORTS[app], ...(liveToken ? [PORTS.live] : [])]) {
