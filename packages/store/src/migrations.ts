@@ -365,6 +365,49 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE deploys ADD COLUMN previous_release TEXT;
   ALTER TABLE deploys ADD COLUMN lockfile_hash TEXT;
   `,
+  // 16: the optional read-only GitHub link (DECISIONS #136-#138). code_links:
+  // one row per app whose link is configured: the repository (owner/name; the
+  // token never reaches the database) and whether the last call worked
+  // (state ok|failed, reason a fixed text). code_diffs: per release, GitHub's
+  // compare of the replaced release's commit with this one (status ok|failed|
+  // too_large|not_found; next_try_at for a retry). code_hunks: the files it
+  // changed and, per hunk, the new side's first and last line (NULL: the whole
+  // file, when GitHub sent no patch). No column holds patch text or code.
+  `
+  CREATE TABLE code_links (
+    app_id     TEXT PRIMARY KEY,
+    repo       TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    reason     TEXT,
+    checked_at INTEGER NOT NULL,
+    since      INTEGER NOT NULL
+  );
+  CREATE TABLE code_diffs (
+    app_id      TEXT NOT NULL,
+    release     TEXT NOT NULL,
+    repo        TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    head_commit TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    reason      TEXT,
+    files       INTEGER NOT NULL DEFAULT 0,
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    fetched_at  INTEGER NOT NULL,
+    tries       INTEGER NOT NULL DEFAULT 0,
+    next_try_at INTEGER,
+    PRIMARY KEY (app_id, release)
+  );
+  CREATE TABLE code_hunks (
+    app_id        TEXT NOT NULL,
+    release       TEXT NOT NULL,
+    file          TEXT NOT NULL,
+    previous_file TEXT,
+    change        TEXT NOT NULL,
+    start_line    INTEGER,
+    end_line      INTEGER
+  );
+  CREATE INDEX code_hunks_release ON code_hunks (app_id, release);
+  `,
 ];
 
 /** Shape of the hourly rollup; hours rolled with an older version are rolled again. */

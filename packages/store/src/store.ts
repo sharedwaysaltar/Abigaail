@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { AbigaailEvent, DeployEvent, Environment } from "@abigaail/schema";
 import { generateIngestKey, hashIngestKey } from "./keys.js";
 import { MIGRATION_DROP_SALTS, MIGRATIONS, ROLLUP_VERSION } from "./migrations.js";
-import { APP_COLUMNS, HOUR_MS, StoreReader, type AlertState, type App, type DeliveryStatus, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
+import { APP_COLUMNS, HOUR_MS, StoreReader, type AlertState, type App, type CodeDiff, type CodeHunk, type DeliveryStatus, type RetentionName, type RunOutcome, type Severity, type StatKind } from "./reader.js";
 import { toRow, type Derived, type EventRow } from "./rows.js";
 import { checkpointTruncate, convertToIncremental, incrementalVacuum, vacuumInPlace, type VacuumConversion } from "./vacuum.js";
 
@@ -186,6 +186,9 @@ export const PURGE_TABLES = {
   alert_state: "delete",
   ingest_rejections: "delete",
   scrub_mismatches: "delete",
+  code_links: "delete",
+  code_diffs: "delete",
+  code_hunks: "delete",
   audit_log: "keep",
   purge_progress: "last",
 } as const satisfies Record<string, "delete" | "keep" | "last">;
@@ -226,6 +229,9 @@ const PURGE_SQL: Record<Exclude<PurgeTable, "alert_items">, string> = {
   alert_state: "DELETE FROM alert_state WHERE app_id = ? AND rowid IN (SELECT rowid FROM alert_state WHERE app_id = ? LIMIT ?)",
   ingest_rejections: "DELETE FROM ingest_rejections WHERE app_id = ? AND rowid IN (SELECT rowid FROM ingest_rejections WHERE app_id = ? LIMIT ?)",
   scrub_mismatches: "DELETE FROM scrub_mismatches WHERE app_id = ? AND rowid IN (SELECT rowid FROM scrub_mismatches WHERE app_id = ? LIMIT ?)",
+  code_links: "DELETE FROM code_links WHERE app_id = ? AND rowid IN (SELECT rowid FROM code_links WHERE app_id = ? LIMIT ?)",
+  code_diffs: "DELETE FROM code_diffs WHERE app_id = ? AND rowid IN (SELECT rowid FROM code_diffs WHERE app_id = ? LIMIT ?)",
+  code_hunks: "DELETE FROM code_hunks WHERE app_id = ? AND rowid IN (SELECT rowid FROM code_hunks WHERE app_id = ? LIMIT ?)",
 };
 
 /** True when the app_id has an apps row: writes for a purged app are dropped (DECISIONS #126). */
@@ -937,6 +943,67 @@ export class Store extends StoreReader {
   }
 
   /** Record the configured channels (labels only); channels no longer configured are removed. */
+  // ---- the GitHub link (DECISIONS #136-#138) -----------------------------------
+
+  /** The link's state; `since` moves only when the state or its reason changes. Never the token. */
+  setCodeLink(appId: string, repo: string, state: "ok" | "failed", reason: string | null): void {
+    const now = this.now();
+    this.tx(() => {
+      if (!this.db.prepare(APP_EXISTS).get(appId)) return;
+      this.db
+        .prepare(`
+          INSERT INTO code_links (app_id, repo, state, reason, checked_at, since) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (app_id) DO UPDATE SET
+            since = CASE WHEN code_links.state = excluded.state AND code_links.reason IS excluded.reason AND code_links.repo = excluded.repo
+                         THEN code_links.since ELSE excluded.since END,
+            repo = excluded.repo, state = excluded.state, reason = excluded.reason, checked_at = excluded.checked_at`)
+        .run(appId, repo, state, reason, now, now);
+    });
+  }
+
+  /** Links no longer configured are forgotten (their cached diffs stay until pruned). */
+  removeCodeLinks(keep: readonly string[]): number {
+    const rows = this.db.prepare("SELECT app_id FROM code_links").all() as { app_id: string }[];
+    let n = 0;
+    for (const r of rows) if (!keep.includes(r.app_id)) n += Number(this.db.prepare("DELETE FROM code_links WHERE app_id = ?").run(r.app_id).changes);
+    return n;
+  }
+
+  /** One release's compare and its hunks, replacing what was stored for it. Paths and line numbers only. */
+  saveCodeDiff(appId: string, d: Omit<CodeDiff, "fetched_at">, hunks: readonly CodeHunk[]): void {
+    this.tx(() => {
+      if (!this.db.prepare(APP_EXISTS).get(appId)) return;
+      this.db.prepare("DELETE FROM code_hunks WHERE app_id = ? AND release = ?").run(appId, d.release);
+      this.db
+        .prepare(`
+          INSERT INTO code_diffs (app_id, release, repo, base_commit, head_commit, status, reason, files, truncated, fetched_at, tries, next_try_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT (app_id, release) DO UPDATE SET
+            repo = excluded.repo, base_commit = excluded.base_commit, head_commit = excluded.head_commit, status = excluded.status,
+            reason = excluded.reason, files = excluded.files, truncated = excluded.truncated, fetched_at = excluded.fetched_at,
+            tries = excluded.tries, next_try_at = excluded.next_try_at`)
+        .run(appId, d.release, d.repo, d.base_commit, d.head_commit, d.status, d.reason, d.files, d.truncated, this.now(), d.tries, d.next_try_at);
+      const insert = this.db.prepare(
+        "INSERT INTO code_hunks (app_id, release, file, previous_file, change, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (const h of hunks) insert.run(appId, d.release, h.file, h.previous_file, h.change, h.start_line, h.end_line);
+    });
+  }
+
+  /** Forget diffs of releases last seen before `before` (they are judged for a day; kept a while for the Releases tab). */
+  pruneCodeDiffs(appId: string, before: number): number {
+    return this.tx(() => {
+      const old = `SELECT c.release FROM code_diffs c LEFT JOIN deploys d ON d.app_id = c.app_id AND d.release = c.release
+                   WHERE c.app_id = ? AND c.fetched_at < ? AND coalesce(d.last_seen, 0) < ?`;
+      const releases = (this.db.prepare(old).all(appId, before, before) as { release: string }[]).map((r) => r.release);
+      for (const r of releases) {
+        this.db.prepare("DELETE FROM code_hunks WHERE app_id = ? AND release = ?").run(appId, r);
+        this.db.prepare("DELETE FROM code_diffs WHERE app_id = ? AND release = ?").run(appId, r);
+      }
+      return releases.length;
+    });
+  }
+
   writeAlertChannels(rows: readonly { channel: string; label: string }[]): void {
     const upsert = this.db.prepare(`
       INSERT INTO alert_channels (channel, label, updated_at) VALUES (?, ?, ?)

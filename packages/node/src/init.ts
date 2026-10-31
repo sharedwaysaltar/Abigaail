@@ -29,6 +29,7 @@ import { requestFlags } from "./flags.js";
 import { clientIp, isLocalAddress } from "./proxy.js";
 import { Profiler, profilingWanted, type InspectorModule } from "./profiler.js";
 import { RuntimeMonitor } from "./runtime.js";
+import { compiledHint, SourceMapper, sourceMapsWanted } from "./sourcemap.js";
 import { errorCodeOf, errorDetail, errorType, parseStack } from "./stack.js";
 
 export const DEFAULT_IGNORE: readonly string[] = ["/_next/static/*", "/_next/image", "/favicon.ico", "/robots.txt"];
@@ -97,6 +98,14 @@ export interface NodeOptions extends Partial<Omit<ClientOptions, "environment">>
    * Needs runtimeSignals.
    */
   profiling?: boolean;
+  /**
+   * Map stack frames and profile frames in compiled files (dist/, .next/) to
+   * the source file and line with the build's source maps (opt-in, DECISIONS
+   * #136): the SDK reads the .map files next to them. Default
+   * ABIGAAIL_SOURCE_MAPS=1; ABIGAAIL_SOURCE_MAPS=off turns it off whatever
+   * this says. Not needed when Node runs with --enable-source-maps.
+   */
+  sourceMaps?: boolean;
   /** Tests: a stand-in for node:inspector. */
   inspector?: InspectorModule;
   /** Benchmarks: each profiling window's main-thread work. */
@@ -370,6 +379,9 @@ class NodeAdapter implements AbigaailNode {
   private readonly runtime: RuntimeMonitor | undefined;
   /** Profiling (profiler.ts); undefined unless opted in. */
   private readonly profiler: Profiler | undefined;
+  /** Source maps (sourcemap.ts); undefined unless opted in. */
+  private readonly maps: SourceMapper | undefined;
+  private hintedCompiled = false;
   /** The profiler just paused the app and the lag histogram still holds that pause. */
   private pausePending = false;
   private cpuPrev = process.cpuUsage();
@@ -395,6 +407,13 @@ class NodeAdapter implements AbigaailNode {
     this.trustProxy = Number.isInteger(opts.trustProxy) && opts.trustProxy! > 0 ? opts.trustProxy! : 0;
     this.root = opts.root ?? process.cwd();
     this.current = opts.linkOutbound === false ? undefined : new AsyncLocalStorage<string>();
+    if (sourceMapsWanted(opts.sourceMaps, identity.env)) {
+      try {
+        this.maps = new SourceMapper(this.root, (msg) => report(new AbigaailWarning(msg)));
+      } catch (err) {
+        report(err);
+      }
+    }
 
     if (opts.runtimeSignals !== false) {
       try {
@@ -422,6 +441,7 @@ class NodeAdapter implements AbigaailNode {
           this.profiler = new Profiler(client, this.runtime, report, (msg) => report(new AbigaailWarning(msg)), {
             root: this.root,
             inspector: opts.inspector,
+            mapper: this.maps,
             onWindow: opts.onProfilerWindow,
             timing: opts.profilerTiming,
             // The pause is ours: the histogram's next reading would be it, so drop what it holds
@@ -459,7 +479,9 @@ class NodeAdapter implements AbigaailNode {
     const onFatal = (err: unknown) => {
       this.captureError(err, { handled: false });
       try {
-        this.runtime?.fatalError(errorType(err), parseStack(err, this.root)?.[0]);
+        const frames = parseStack(err, this.root);
+        // The process may be about to exit: only maps already loaded.
+        this.runtime?.fatalError(errorType(err), (frames && this.maps ? this.maps.mapFrames(frames) : frames)?.[0]);
       } catch (e) {
         this.report(e);
       }
@@ -643,15 +665,40 @@ class NodeAdapter implements AbigaailNode {
       if (this.stopped) return;
       const frames = parseStack(err, this.root);
       const parent = this.current?.getStore();
-      this.client.capture({
-        type: "error",
+      const handled = ctx.handled ?? true;
+      const event = {
+        type: "error" as const,
         error_type: errorType(err),
         // Raw here; the core sanitiser scrubs it before anything is queued.
         ...(errorDetail(err) as Record<string, string>),
-        handled: ctx.handled ?? true,
+        handled,
         ...(ctx.route ? { route: ctx.route } : {}),
-        ...(frames ? { frames } : {}),
         ...(parent ? { parent_id: parent } : {}),
+      };
+      const send = (f: typeof frames) => this.client.capture({ ...event, ...(f ? { frames: f } : {}) });
+      const maps = this.maps;
+      if (!frames || !maps) {
+        if (!this.hintedCompiled && !maps && compiledHint(frames)) {
+          this.hintedCompiled = true;
+          this.report(new AbigaailWarning("stack frames point at compiled files (dist/, .next/, build/); set ABIGAAIL_SOURCE_MAPS=1 with source maps built to have them name your source lines (README, \"Source maps\")"));
+        }
+        send(frames);
+        return;
+      }
+      const missing = maps.missing(frames.map((f) => f.file));
+      // An uncaught error may end the process before a map is read: it goes now, mapped as far as known.
+      if (!missing.length || !handled) {
+        send(maps.mapFrames(frames));
+        return;
+      }
+      // Sent once its maps are read, with the time it happened.
+      const at = Date.now();
+      void maps.load(missing).then(() => {
+        try {
+          this.client.capture({ ...event, client_ts: at, frames: maps.mapFrames(frames) });
+        } catch (e) {
+          this.report(e);
+        }
       });
     } catch (e) {
       this.report(e);

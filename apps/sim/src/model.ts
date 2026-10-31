@@ -48,6 +48,8 @@ export const DEMO_FRAMES = {
   renderDocs: { file: "apps/demo-node/faults.mjs", line: 113, fn: "renderDocs" },
   rememberSearch: { file: "apps/demo-node/faults.mjs", line: 96, fn: "rememberSearch" },
   applyDiscount: { file: "apps/demo-node/faults.mjs", line: 135, fn: "applyDiscount" },
+  /** The /checkout handler's call to applyDiscount. */
+  checkout: { file: "apps/demo-node/server.mjs", line: 105 },
   runMigrations: { file: "apps/demo-node/faults.mjs", line: 143, fn: "runMigrations" },
 } as const;
 export const BLOCK_DOCS_MS = 300;
@@ -69,6 +71,8 @@ export interface Outcome {
   outbound?: { host: string; status: number; duration: number };
   /** Error class of an error event the request produces. */
   error?: string;
+  /** Its stack frames, innermost first, as the demo's SDK reports them. */
+  frames?: { file: string; line: number; fn?: string }[];
 }
 
 /** The route pattern the app's SDK reports for a path (404s on unknown paths are "unmatched"). */
@@ -96,7 +100,7 @@ export function outcome(r: Rng, app: AppKind, path: string, faults: Faults): Out
       return { route, status: 200, duration: faults.blockDocs ? BLOCK_DOCS_MS + own : own };
     case "/checkout": {
       // Drawn only while the fault is on, so every other run keeps its random sequence.
-      if (faults.checkoutBug > 0 && r() < faults.checkoutBug) return { route, status: 500, duration: own, error: "TypeError" };
+      if (faults.checkoutBug > 0 && r() < faults.checkoutBug) return { route, status: 500, duration: own, error: "TypeError", frames: [DEMO_FRAMES.applyDiscount, DEMO_FRAMES.checkout] };
       const dep = faults.dependency === "ok" ? between(r, DEPENDENCY_MS) : between(r, [1, 3]);
       const status = faults.dependency === "ok" ? 200 : 503;
       return { route, status: status === 200 ? 200 : 502, duration: own + dep, outbound: { host: DEPENDENCY_HOST, status, duration: dep } };

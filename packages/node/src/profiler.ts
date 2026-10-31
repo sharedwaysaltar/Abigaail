@@ -17,6 +17,7 @@ import { performance } from "node:perf_hooks";
 import type { AbigaailClient } from "@abigaail/core";
 import { isFramePath, isIdent, LIMITS, MAX_FN_LENGTH, type ProfileEvent, type ProfileFrame, type ProfileKind } from "@abigaail/schema";
 import { RUNTIME, type RuntimeMonitor, type WindowLog } from "./runtime.js";
+import type { SourceMapper } from "./sourcemap.js";
 import { relativePath } from "./stack.js";
 
 export const PROFILING = {
@@ -88,6 +89,7 @@ interface CallFrame {
   functionName: string;
   url: string;
   lineNumber: number;
+  columnNumber?: number;
 }
 interface CpuNode {
   id: number;
@@ -142,7 +144,7 @@ const frameKey = (f: ProfileFrame) => `${f.file}:${f.line}:${f.fn ?? ""}`;
  * identifier), or a fixed placeholder ("(abigaail)" for the SDK's own code).
  * Nothing else of the frame is kept.
  */
-export function profileFrame(cf: CallFrame, root: string): ProfileFrame | typeof IDLE | undefined {
+export function profileFrame(cf: CallFrame, root: string, mapper?: SourceMapper): ProfileFrame | typeof IDLE | undefined {
   const name = cf.functionName;
   if (name === "(root)") return undefined;
   if (name === "(idle)") return IDLE;
@@ -153,6 +155,9 @@ export function profileFrame(cf: CallFrame, root: string): ProfileFrame | typeof
   let file = !cf.url ? "(native)" : cf.url.startsWith("node:") ? "(node)" : (relativePath(cf.url, root) ?? "(external)");
   if (!isFramePath(file)) file = "(external)";
   const placeholder = file.startsWith("(");
+  // A compiled file's position, mapped to the source with the maps already loaded (#136).
+  const mapped = placeholder ? undefined : mapper?.position(file, cf.lineNumber, cf.columnNumber ?? 0);
+  if (mapped) return { file: mapped.file, line: mapped.line, ...(fn ? { fn } : {}) };
   return { file, line: placeholder ? 0 : Math.max(0, cf.lineNumber + 1), ...(fn ? { fn } : {}) };
 }
 
@@ -225,6 +230,8 @@ export interface ProfilerOptions {
   timing?: { windowMs?: number; everyMs?: number; ignoreLoad?: boolean; idleRetryMs?: number; idleWaitMs?: number; startBudgetMs?: number } | undefined;
   /** The profiler paused the app this long (starting a window); the adapter keeps it out of its lag metrics. */
   onPause?: ((ms: number) => void) | undefined;
+  /** Source maps (opt-in, #136): compiled frames are mapped before they are merged. */
+  mapper?: SourceMapper | undefined;
 }
 
 export class Profiler {
@@ -415,8 +422,12 @@ export class Profiler {
     const w0 = this.now();
     const { profile } = await this.post<{ profile: CpuProfile }>("Profiler.stop");
     const log = this.runtime.stopLog();
+    // Reading maps is the mapper's work, with its own budget, and mostly waiting on the disk.
+    const m0 = this.now();
+    await this.loadMaps(profile.nodes.map((n) => n.callFrame));
+    const mapMs = this.now() - m0;
     const samples = this.merge(profile, t0, log, ms);
-    const workMs = this.now() - w0;
+    const workMs = this.now() - w0 - mapMs;
     this.opts.onWindow?.({ workMs, startMs, samples });
     if (workMs > PROFILING.budgetMs || startMs > (this.opts.timing?.startBudgetMs ?? PROFILING.startBudgetMs)) {
       if (++this.overruns >= PROFILING.maxOverruns) {
@@ -447,6 +458,19 @@ export class Profiler {
     }
   }
 
+  /** Loads the maps of the app's compiled files among these frames (opt-in; bounded by the mapper). */
+  private async loadMaps(frames: readonly CallFrame[]): Promise<void> {
+    const mapper = this.opts.mapper;
+    if (!mapper) return;
+    const files = new Set<string>();
+    for (const cf of frames) {
+      if (!cf.url || cf.url.startsWith("node:") || isSdkUrl(cf.url)) continue;
+      const f = relativePath(cf.url, this.opts.root);
+      if (f) files.add(f);
+    }
+    await mapper.load([...files]);
+  }
+
   private accFor(key: string): Acc {
     let a = this.acc.get(key);
     if (!a) this.acc.set(key, (a = new Acc()));
@@ -467,7 +491,7 @@ export class Profiler {
     }
     const frameMemo = new Map<number, ProfileFrame | typeof IDLE | undefined>();
     const frameOfNode = (id: number) => {
-      if (!frameMemo.has(id)) frameMemo.set(id, byId.has(id) ? profileFrame(byId.get(id)!.callFrame, this.opts.root) : undefined);
+      if (!frameMemo.has(id)) frameMemo.set(id, byId.has(id) ? profileFrame(byId.get(id)!.callFrame, this.opts.root, this.opts.mapper) : undefined);
       return frameMemo.get(id);
     };
     const stackMemo = new Map<number, ProfileFrame[] | typeof IDLE>();
@@ -541,10 +565,19 @@ export class Profiler {
     if (!this.announced || this.state === PROFILER_STATE.disabled) return;
     const w0 = this.now();
     const { profile } = await this.post<{ profile: { head: HeapNode } }>("HeapProfiler.getSamplingProfile");
+    if (this.opts.mapper) {
+      const frames: CallFrame[] = [];
+      const collect = (n: HeapNode) => {
+        frames.push(n.callFrame);
+        for (const c of n.children ?? []) collect(c);
+      };
+      collect(profile.head);
+      await this.loadMaps(frames);
+    }
     const acc = new Acc();
     acc.windowMs = this.now() - this.heapSince;
     const walk = (node: HeapNode, path: ProfileFrame[]) => {
-      const f = profileFrame(node.callFrame, this.opts.root);
+      const f = profileFrame(node.callFrame, this.opts.root, this.opts.mapper);
       const here = f && f !== IDLE ? [...path, f] : path;
       if (node.selfSize > 0 && here.length) acc.add(here.slice(-PROFILING.heapDepth), node.selfSize);
       for (const c of node.children ?? []) walk(c, here.length > 64 ? here.slice(-64) : here);

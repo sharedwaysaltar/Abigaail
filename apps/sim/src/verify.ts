@@ -3,7 +3,9 @@
 // The live run polls this every few seconds over a read-only connection; the
 // replay tests feed it after every simulated agent run.
 
+import { existsSync, readFileSync } from "node:fs";
 import { isRed, type Finding, type Severity, type StoreReader } from "@abigaail/store";
+import { PATCH_MARKER, SIM_GITHUB_TOKEN } from "./code.js";
 import { NEVER_ALLOWED, STARTUP_ALLOWED, type Expectation, type Scenario } from "./scenarios.js";
 
 const RANK: Record<Severity, number> = { info: 0, unknown: 1, warning: 2, critical: 3 };
@@ -73,7 +75,7 @@ export interface Result {
 }
 
 export interface Problem {
-  kind: "unexpected" | "forbidden" | "count" | "limits";
+  kind: "unexpected" | "forbidden" | "count" | "limits" | "privacy";
   detail: string;
 }
 
@@ -139,6 +141,8 @@ export class Tracker {
         const detail = `summary lacks "${exp.summary.join('", "')}"; when confirmed it read: ${hit.summary}`;
         return last.state === "open" && now <= resolveBy ? { ...base, status: "shown", showMs, detail } : { ...base, status: "fail", showMs, detail };
       }
+      const banned = confirmed.find((e) => exp.summaryNot?.some((w) => e.summary.includes(w)));
+      if (banned) return { ...base, status: "fail", showMs, detail: `summary must not say "${exp.summaryNot!.join('", "')}"; it read: ${banned.summary}` };
       if (last.state === "open") {
         return now > resolveBy ? { ...base, status: "fail", showMs, detail: `still open ${mins(now - item.faultEndAt)} after the fault ended` } : { ...base, status: "shown", showMs, detail: "shown; waiting to resolve" };
       }
@@ -212,6 +216,21 @@ export function storeChecks(
   if (limited) out.push({ kind: "limits", detail: `ingest refused ${limited} batches with 429` });
   const dropped = Math.max(0, ...reader.metricSeries(appId, "sdk_dropped_events", t.runStart, now + 1).map((m) => m.value));
   if (dropped) out.push({ kind: "limits", detail: `the SDK dropped ${dropped} events` });
+  return out;
+}
+
+/**
+ * The GitHub fixture's patch text and token must never reach the database
+ * or its WAL (DECISIONS #137): checked on the raw bytes after every live run.
+ */
+export function codeLinkChecks(dbPath: string): Problem[] {
+  const out: Problem[] = [];
+  for (const path of [dbPath, `${dbPath}-wal`]) {
+    if (!existsSync(path)) continue;
+    const bytes = readFileSync(path);
+    if (bytes.includes(PATCH_MARKER)) out.push({ kind: "privacy", detail: `GitHub patch text found in ${path}` });
+    if (bytes.includes(SIM_GITHUB_TOKEN)) out.push({ kind: "privacy", detail: `the GitHub token found in ${path}` });
+  }
   return out;
 }
 

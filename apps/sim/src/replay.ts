@@ -4,7 +4,8 @@
 // Resilience and Rollout Safety agents run every minute as the runner would. The tests use it to
 // pin each scenario's findings and timings without waiting hours.
 
-import { evaluate, findingInputs, health, resilience, rollout, watchdog, type Agent } from "@abigaail/server";
+import { evaluate, findingInputs, health, parseCompare, resilience, rollout, watchdog, type Agent } from "@abigaail/server";
+import { SIM_COMMITS, SIM_COMPARE, SIM_REPO } from "./code.js";
 import { HOUR_MS, type Store } from "@abigaail/store";
 import { blockItem, lifecycleItem, metricItem, profileItem, requestItems, type Item } from "./events.js";
 import { BLOCK_DOCS_MS, DEMO_FRAMES, NORMAL_FAULTS, outcome, type Faults } from "./model.js";
@@ -60,6 +61,17 @@ export interface ReplayOptions {
   metricsPhaseMs?: number;
   /** The agents to run (default all four); tests leave one out to compare. */
   agents?: readonly Agent[];
+  /** Store the simulated releases' diffs as the GitHub job would (default true); false: no link (GitHub never answered). */
+  code?: boolean;
+}
+
+/** The diffs the GitHub job would store for sim-r2 (against sim-r1) and for the rollback to sim-r1. */
+export function seedCodeDiffs(store: Store, appId: string): void {
+  const parsed = parseCompare(SIM_COMPARE)!;
+  store.setCodeLink(appId, SIM_REPO, "ok", null);
+  for (const [release, base, head] of [["sim-r2", SIM_COMMITS["sim-r1"]!, SIM_COMMITS["sim-r2"]!], ["sim-r1", SIM_COMMITS["sim-r2"]!, SIM_COMMITS["sim-r1"]!]] as const) {
+    store.saveCodeDiff(appId, { release, repo: SIM_REPO, base_commit: base, head_commit: head, status: "ok", reason: null, files: parsed.files, truncated: 0, tries: 1, next_try_at: null }, parsed.hunks);
+  }
 }
 
 export interface ReplayResult {
@@ -103,6 +115,9 @@ export function replay(o: ReplayOptions): ReplayResult {
   let lastFlush = o.start;
   let rolledThrough = Math.floor(o.start / HOUR_MS) * HOUR_MS;
   const answered: { at: number; kind: Kind }[] = [];
+
+  // What the server's GitHub job stores for the simulated releases (live: from the fixture, about a minute after each deploy).
+  if (o.code !== false) seedCodeDiffs(o.store, o.appId);
 
   const flush = (now: number) => {
     for (let i = 0; i < buffer.length; i += 500) insertValidated(o.store, o.appId, release, buffer.slice(i, i + 500), now);

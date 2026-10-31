@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateIngestKey } from "@abigaail/store";
-import { Log, NextDemo, NodeDemo, redact } from "@abigaail/sim";
+import { Log, NextDemo, NodeDemo, redact, SIM_GITHUB_TOKEN } from "@abigaail/sim";
 
 let dir: string;
 beforeEach(() => {
@@ -35,5 +35,11 @@ describe("ingest key", () => {
       expect(inspect(demo, { depth: 5, showHidden: true })).not.toContain("abk_");
     }
     await log.close();
+  });
+});
+
+describe("GitHub token", () => {
+  it("is redacted from anything a child prints, even the fixture's fake one", () => {
+    expect(redact(`[server] token ${SIM_GITHUB_TOKEN} refused`)).toBe("[server] token github_pat_[redacted] refused");
   });
 });

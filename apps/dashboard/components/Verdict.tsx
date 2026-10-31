@@ -13,8 +13,9 @@ export function SourceMapHint() {
   return (
     <p className="small muted" style={{ marginTop: 16 }}>
       Stack frames on this release point at compiled files (<span className="mono">dist/</span>, <span className="mono">.next/</span>,{" "}
-      <span className="mono">build/</span>), so findings name compiled lines rather than your source. Emit source maps when you build
-      (README: Source maps) and Abigaail will name the source files and lines instead.
+      <span className="mono">build/</span>), so findings name compiled lines rather than your source, and changed code cannot be
+      matched to them. Emit source maps when you build and start the app with{" "}
+      <span className="mono">ABIGAAIL_SOURCE_MAPS=1</span> (README: Source maps): the SDK then names the source files and lines.
     </p>
   );
 }

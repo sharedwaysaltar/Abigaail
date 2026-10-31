@@ -220,19 +220,71 @@ before the deploy). Otherwise it says watch, looks fine, or too little traffic y
 
 Stack frames and profiles name the files that run, which in production are compiled
 (`dist/server.js`, `.next/server/chunks/…`). To have them name your source files and
-lines instead:
+lines (and to let the GitHub link below match them to what a release changed), build
+with source maps and turn on mapping in the SDK:
 
-- **TypeScript (tsc):** set `"sourceMap": true` in `tsconfig.json`, and start Node with
-  `--enable-source-maps` (or `NODE_OPTIONS=--enable-source-maps`). Node then maps every
-  stack trace; reading a stack costs a little more, which matters only if your app
-  creates very many errors.
-- **Next.js:** set `experimental: { serverSourceMaps: true }` in `next.config` (off by
-  default in production builds) and start with `NODE_OPTIONS=--enable-source-maps`.
-  **Never** set `productionBrowserSourceMaps`: it serves your source code to anyone.
+1. **Emit maps when you build.**
+   - **TypeScript (tsc):** `"sourceMap": true` in `tsconfig.json` (`dist/app.js` gets
+     `dist/app.js.map` next to it).
+   - **Next.js:** `experimental: { serverSourceMaps: true }` in `next.config` (off by
+     default in production builds). **Never** set `productionBrowserSourceMaps`: it serves
+     your source code to anyone.
+   - **esbuild, webpack, Rollup:** external maps next to the output (`sourcemap: true` /
+     `devtool: "source-map"`). Inline (`data:`) maps are not read.
+2. **Start the app with `ABIGAAIL_SOURCE_MAPS=1`** (or `init({ sourceMaps: true })`).
+   `ABIGAAIL_SOURCE_MAPS=off` always wins.
 
-Paths stay project-relative as always: a source path outside your project is never sent.
-While a release's frames still point at compiled files, the Releases tab says so once.
-Mapping profiles (which Node does not map) comes with chunk 11b.
+The SDK then maps every frame in your own compiled files, for errors and for profiles,
+with Node's built-in `module.SourceMap`. It is off by default because it reads files in your
+app, so it does so within limits: only the `.map` of a compiled file a frame points at
+(found through its `sourceMappingURL` comment or as `<file>.map`, inside your project),
+asynchronously and one at a time, at most 16 MB each, at most 64 kept in memory, and
+never your code itself (the maps' `sourcesContent` is dropped as soon as one is read). A
+map that takes over 100 ms to read three times turns mapping off for the process, with
+one warning. An error waits at most 2 s for its maps; an uncaught error goes at once,
+mapped as far as already known. Paths stay project-relative as always: a source outside
+your project leaves the frame as it was.
+
+**Alternatively**, Node's own `--enable-source-maps` (`NODE_OPTIONS=--enable-source-maps`)
+maps `Error.stack` itself, at some cost per stack read; it does not map profiles.
+
+When frames point at compiled files and no map is found, the SDK warns once (and once,
+without mapping on, to say how to turn it on); the Releases tab says so too.
+
+### Link a GitHub repository (optional, read-only)
+
+With a link, Rollout Safety and Resilience say which **changed lines** a problem comes
+from: "Changed code involved: src/checkout.ts:12 (applyDiscount), lines 10-15, changed in
+4f2c…", and the release's page lists every frame in changed code with a link to those
+lines on github.com. It needs the deploy step's commit (`ABIGAAIL_RELEASE` as the SHA, or
+`ABIGAAIL_COMMIT`) for the release and the one it replaced, and source maps for compiled code.
+
+1. On GitHub: Settings → Developer settings → **Fine-grained tokens** → Generate new token.
+   Repository access: **Only select repositories**, your app's repository only.
+   Permissions: **Contents: Read-only** (Metadata: read-only is added by GitHub), nothing
+   else. Pick an expiry; when it expires you get a finding saying so.
+2. In the Abigaail server's environment (`apps/server/.env`), for an app named `shop`
+   (capitals, `-` as `_`, so `my-shop` is `MY_SHOP`):
+
+   ```sh
+   ABIGAAIL_GITHUB_REPO_SHOP=your-org/shop
+   ABIGAAIL_GITHUB_TOKEN_SHOP=github_pat_…
+   ```
+
+   Only fine-grained `github_pat_` tokens are accepted (a classic token can read every
+   repository you can). Restart the server.
+
+What it does: about a minute after a deploy, the server asks `api.github.com` (and nothing
+else; redirects are refused) for the compare of the replaced release's commit with the new
+one, once per release (a compare never changes, so it is kept), and stores the changed
+files' paths and each change's line range. **The patch text is never stored**: it is read
+for its line numbers and dropped. The token lives only in the server process's memory: it is
+removed from the environment once read, and never reaches the database, a log line, an
+agent or the dashboard. GitHub down or slow changes nothing else: findings keep their frames (a finding with no
+changed lines to name says "Top frame: src/checkout.ts:12 (applyDiscount)." instead),
+the server retries with back-off, and the release's page says why there is no match. If GitHub
+refuses the token (expired or revoked, no access to the repository), Rollout Safety reports
+`code_link_failed` with what to do ("token expired or revoked: create a new one").
 
 ## 3. Connect a Next.js app
 
@@ -298,7 +350,8 @@ handlers reach Abigaail through `onRequestError` (class name and route only).
 - **Call your app makes** (fetch, `http.request`): the host name only, method, status,
   duration, and whether it failed or timed out.
 - **Error:** the class name (`TypeError`) and stack frames as project-relative file, line and
-  function. Never the message, which can contain user data.
+  function (with `ABIGAAIL_SOURCE_MAPS=1`, your source file and line instead of the compiled
+  one). The message only after the scrubber below.
 - **Metrics,** every 30 s: memory, CPU, event-loop delay, and the SDK's own queue and
   dropped-event counts.
 - **Lifecycle:** start, a heartbeat every minute, clean shutdown, and the region code (at start).
@@ -452,7 +505,11 @@ failing dependency, a slow route, a burst of server errors, a crash loop, an out
 traffic collapse and a deploy; on their own, a route that blocks the event loop, an
 out-of-memory restart loop, a slow memory leak, and four deploys of a new release: one
 that breaks a route, one that slows one, a clean one, and one that crashes at every start
-(each then rolled back, as you would after "recommend rollback"). It prints PASS or FAIL for each expected finding, with how
+(each then rolled back, as you would after "recommend rollback"). Its server's GitHub link
+answers from a built-in fixture (no network, no real token), so bad-deploy's finding names
+the changed lines; `ABIGAAIL_SIM_GITHUB=down` makes that fixture fail like GitHub being down (the run then expects
+the finding to name the top frame instead, and never "Changed code involved").
+After each run it also checks that no patch text or token reached the database. It prints PASS or FAIL for each expected finding, with how
 long it took to appear and to resolve. It only talks to demo apps on this machine and
 never touches `data/abigaail.db`; stop `npm run dev:server` and the demo first (it needs
 their ports). To watch a run in the dashboard, set `ABIGAAIL_DB_PATH=./data/sim/abigaail.db`
@@ -580,7 +637,9 @@ the webhook's; link-local and metadata addresses are always refused.
 `4318`), `ABIGAAIL_AGENTS=off` to run ingest only. The Live view's feed listens on
 `127.0.0.1` only, port `ABIGAAIL_LIVE_PORT` (default `4320`), and only when
 `ABIGAAIL_LIVE_TOKEN` is set (`openssl rand -base64 32`; the dashboard needs the same value).
-Alert channels and the heartbeat are in section 9.
+Alert channels and the heartbeat are in section 9. The optional GitHub link is
+`ABIGAAIL_GITHUB_REPO_<APP>` / `ABIGAAIL_GITHUB_TOKEN_<APP>` (section 2, "Link a GitHub
+repository"); a set but invalid value stops the server from starting.
 `GET /healthz` answers 503 when the agents have stalled: point an external uptime check
 at it. Retention periods are the `ABIGAAIL_RETAIN_*_DAYS` settings in section 4; a value
 that is not a whole number, is below its minimum or above 3650 stops the server from

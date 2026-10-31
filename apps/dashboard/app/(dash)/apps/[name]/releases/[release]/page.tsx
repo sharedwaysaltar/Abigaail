@@ -183,6 +183,49 @@ export default async function ReleasePage({ params }: { params: Promise<{ name: 
         </section>
       ) : null}
 
+      {v.code ? (
+        <section>
+          <h2>Changed code involved</h2>
+          {v.code.linkFailed ? (
+            <p className="small"><strong>The GitHub link fails:</strong> {v.code.linkFailed}. Findings still name their frames.</p>
+          ) : null}
+          {v.code.status === "ok" ? (
+            v.code.involved.length ? (
+              <table>
+                <thead><tr><th>Where</th><th>Behind</th><th>Changed in {v.release}</th></tr></thead>
+                <tbody>
+                  {v.code.involved.map((c) => (
+                    <tr key={`${c.file}:${c.line}`}>
+                      <td className="mono">{c.file}:{c.line}{c.fn ? ` (${c.fn})` : ""}</td>
+                      <td>{c.what}</td>
+                      <td>
+                        {/* Only ever a github.com link, built from checked parts (codeUrl). */}
+                        {c.url.startsWith("https://github.com/") ? (
+                          <a href={c.url} target="_blank" rel="noopener noreferrer">
+                            {c.match === "line" && c.lines ? `lines ${c.lines[0]}-${c.lines[1]}` : "the file, elsewhere"}
+                          </a>
+                        ) : (
+                          c.match === "line" ? "these lines" : "the file, elsewhere"
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="empty">None of this release&apos;s error frames, block functions or crash frames are in the {v.code.files} file{v.code.files === 1 ? "" : "s"} it changed.</p>
+            )
+          ) : (
+            <p className="calm">Not matched: {v.code.why}.</p>
+          )}
+          <p className="small muted">
+            {v.code.repo ? <>From GitHub&apos;s compare of <span className="mono">{v.code.repo}</span>{v.code.base && v.code.head ? <> <span className="mono">{v.code.base.slice(0, 7)}…{v.code.head.slice(0, 7)}</span></> : null}: {v.code.files} file{v.code.files === 1 ? "" : "s"} changed{v.code.truncated ? " (GitHub lists at most 300)" : ""}. </> : null}
+            A frame counts when it is inside a changed hunk or within 3 lines of one. Abigaail keeps only paths and line ranges, never the code.
+            {v.compiledFrames ? " Frames on compiled files cannot match: see the source map note above." : ""}
+          </p>
+        </section>
+      ) : null}
+
       <section>
         <h2>From the deploy step</h2>
         <ul className="plain small">

@@ -29,6 +29,8 @@ export interface Expectation {
   severity: Severity;
   /** Words the summary must contain (when it reached its severity). */
   summary: readonly string[];
+  /** Words no summary of it may contain once it reached its severity. */
+  summaryNot?: readonly string[];
   showWithinMs: number;
   resolveWithinMs: number;
 }
@@ -69,6 +71,26 @@ const backToR1 = (at: number, faults: Partial<Faults> = {}): Scenario["steps"] =
   ...(Object.keys(faults).length ? [{ at: at + SEC, action: { faults } }] : []),
   { at: at + 2 * SEC, action: { start: { release: "sim-r1" } } },
 ];
+
+/** bad-deploy's code location: with the GitHub link (the fixture), and without it (GitHub down). */
+const CHANGED_LINES = "Changed code involved: apps/demo-node/faults.mjs:135 (applyDiscount), lines 133-136";
+const TOP_FRAME = "Top frame: apps/demo-node/faults.mjs:135 (applyDiscount).";
+
+/**
+ * A scenario as judged with GitHub down (ABIGAAIL_SIM_GITHUB=down, or a replay
+ * with no diff): where a summary named the changed lines it must name the top
+ * frame instead, and never "Changed code involved".
+ */
+export function withGithubDown(s: Scenario): Scenario {
+  return {
+    ...s,
+    expect: s.expect.map((e) =>
+      e.summary.includes(CHANGED_LINES)
+        ? { ...e, summary: e.summary.map((w) => (w === CHANGED_LINES ? TOP_FRAME : w)), summaryNot: ["Changed code involved"] }
+        : e,
+    ),
+  };
+}
 
 /** May appear while the stack starts: no traffic in the window yet, or the app has not reconnected. */
 export const STARTUP_ALLOWED: readonly string[] = [health("too_little_traffic"), "watchdog:reconnecting:"];
@@ -154,11 +176,12 @@ export const SCENARIOS: readonly Scenario[] = [
   {
     name: "bad-deploy",
     apps: ["node"],
-    description: "Deploys sim-r2, whose /checkout throws a TypeError on 40% of requests (500); rolled back to sim-r1 after 25 min. Health reports the route at once; Rollout Safety recommends a rollback once it is sure, and Health's findings fold into it.",
+    description: "Deploys sim-r2, whose /checkout throws a TypeError on 40% of requests (500); rolled back to sim-r1 after 25 min. Health reports the route at once; Rollout Safety recommends a rollback once it is sure, naming the changed lines the error comes from (the read-only GitHub link, answered by a fixture), and Health's findings fold into it.",
     steps: [...deployR2({ checkoutBug: 0.4 }), ...backToR1(25 * MIN, { checkoutBug: 0 })],
     faultMs: 25 * MIN + 2 * SEC,
     expect: [
-      { fingerprint: rollout("sim-r2"), severity: "critical", summary: ["Recommend rollback: release sim-r2 (replacing sim-r1)", "/checkout returns 5xx", "new error TypeError on /checkout"], showWithinMs: 16 * MIN, resolveWithinMs: 6 * MIN },
+      // The GitHub fixture (code.ts) changed applyDiscount's lines 133-136; the TypeError is thrown at line 135.
+      { fingerprint: rollout("sim-r2"), severity: "critical", summary: ["Recommend rollback: release sim-r2 (replacing sim-r1)", "/checkout returns 5xx", "new error TypeError on /checkout", CHANGED_LINES], summaryNot: [TOP_FRAME], showWithinMs: 16 * MIN, resolveWithinMs: 6 * MIN },
       { fingerprint: health("server_errors", "/checkout"), severity: "critical", summary: ["/checkout returns 5xx"], showWithinMs: 7 * MIN, resolveWithinMs: 21 * MIN },
       { fingerprint: health("new_error", "TypeError /checkout"), severity: "warning", summary: ["New error: TypeError on /checkout"], showWithinMs: 4 * MIN, resolveWithinMs: 21 * MIN },
       { fingerprint: health("deploy", "sim-r2"), severity: "info", summary: ["deployed release sim-r2 (was sim-r1)"], showWithinMs: 3 * MIN, resolveWithinMs: 19 * MIN },

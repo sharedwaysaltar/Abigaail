@@ -15,11 +15,11 @@ import { Driver } from "./driver.js";
 import type { Faults } from "./model.js";
 import { NORMAL_FAULTS } from "./model.js";
 import { ensureSimDir, resetSim, simPaths } from "./paths.js";
-import { plan, SCENARIOS, type Action, type Scenario } from "./scenarios.js";
+import { plan, SCENARIOS, withGithubDown, type Action, type Scenario } from "./scenarios.js";
 import { FIRST_RELEASE, seedHistory, seedHours } from "./seed.js";
 import { killAllNow, Log, NextDemo, NodeDemo, portFree, PORTS, Server, type Demo } from "./stack.js";
 import { MIN, type AppKind } from "./traffic.js";
-import { mins, storeChecks, timeline, Tracker, type Problem, type Result, type Timeline } from "./verify.js";
+import { codeLinkChecks, mins, storeChecks, timeline, Tracker, type Problem, type Result, type Timeline } from "./verify.js";
 
 const POLL_MS = 5000;
 /** A poll this late means the machine slept or the process was stopped. */
@@ -76,7 +76,10 @@ function printReport(results: Result[], problems: Problem[], notes: string[]): b
 
 async function run(app: AppKind, names: string[], seed: number): Promise<boolean> {
   if (!names.length) throw new Error("usage: npm run sim -- run <scenario|all> [--app node|next]  (see: npm run sim -- list)");
-  const planned = plan(app, names);
+  // GitHub down: the fixture fails every call, so expectations name the top frame instead of changed lines.
+  const githubDown = process.env.ABIGAAIL_SIM_GITHUB === "down";
+  const planned = plan(app, names).map((p) => (githubDown ? { ...p, scenario: withGithubDown(p.scenario) } : p));
+  if (githubDown) console.log("GitHub is down for this run (ABIGAAIL_SIM_GITHUB=down): findings must name the top frame, not changed lines.");
   if (app === "next" && !NextDemo.built()) throw new Error("demo-next is not built: run `npm run build -w @abigaail/demo-next` first");
   const liveToken = process.env.ABIGAAIL_LIVE_TOKEN || undefined;
   for (const port of [PORTS.ingest, PORTS[app], ...(liveToken ? [PORTS.live] : [])]) {
@@ -98,7 +101,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
   writable.close();
   console.log(`Seeded ${events} events of history over ${hours.length} past hours in ${((Date.now() - t0) / 1000).toFixed(1)} s.`);
 
-  const server = new Server(paths, log, liveToken);
+  const server = new Server(paths, log, liveToken, created.name);
   const demo: Demo = app === "node" ? new NodeDemo(key, log, paths.crash) : new NextDemo(key, log);
   let driver: Driver | undefined;
   let reader: StoreReader | undefined;
@@ -119,7 +122,7 @@ async function run(app: AppKind, names: string[], seed: number): Promise<boolean
     const now = Date.now();
     tracker.observe(reader.findingsSince(created.id, t.runStart, 1000));
     const results = tracker.results(now);
-    const problems = [...tracker.problems(), ...storeChecks(reader, created.id, t, now, (from, to) => driver!.answered(from, to))];
+    const problems = [...tracker.problems(), ...storeChecks(reader, created.id, t, now, (from, to) => driver!.answered(from, to)), ...codeLinkChecks(paths.db)];
     const ok = printReport(results, problems, tracker.notes());
     writeFileSync(paths.report, JSON.stringify({ app, appName: created.name, seed, node: process.versions.node, linking: demo.linking, timeline: t, results, problems, stats: driver?.stats }, null, 2));
     return ok;
